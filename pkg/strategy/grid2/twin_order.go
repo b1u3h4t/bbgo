@@ -170,6 +170,9 @@ func newTwinOrderBook(pins []Pin) *TwinOrderBook {
 }
 
 func (b *TwinOrderBook) String() string {
+	if b == nil {
+		return "nil TwinOrderBook"
+	}
 	var sb strings.Builder
 
 	sb.WriteString("================== TWIN ORDERBOOK ==================\n")

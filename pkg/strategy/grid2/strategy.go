@@ -166,6 +166,9 @@ type Strategy struct {
 	EnableProfitFixer bool        `json:"enableProfitFixer"`
 	FixProfitSince    *types.Time `json:"fixProfitSince"`
 
+	// Leverage is the leverage for the grid
+	Leverage fixedpoint.Value `json:"leverage"`
+
 	// Debug enables the debug mode
 	Debug bool `json:"debug"`
 
@@ -610,6 +613,15 @@ func (s *Strategy) checkRequiredInvestmentByQuantity(
 				nextLowerPin := pins[i-1]
 				nextLowerPrice := fixedpoint.Value(nextLowerPin)
 				requiredQuote = requiredQuote.Add(quantity.Mul(nextLowerPrice))
+
+				// leverage the quote
+				if s.Leverage.Sign() > 0 {
+					leverage := s.Leverage
+					if s.Leverage.Compare(fixedpoint.NewFromFloat(10)) > 0 {
+						leverage = fixedpoint.NewFromFloat(10)
+					}
+					requiredQuote = requiredQuote.Div(leverage)
+				}
 			}
 		} else {
 			// for orders that buy
@@ -617,6 +629,15 @@ func (s *Strategy) checkRequiredInvestmentByQuantity(
 				continue
 			}
 			requiredQuote = requiredQuote.Add(quantity.Mul(price))
+
+			// leverage the quote
+			if s.Leverage.Sign() > 0 {
+				leverage := s.Leverage
+				if s.Leverage.Compare(fixedpoint.NewFromFloat(10)) > 0 {
+					leverage = fixedpoint.NewFromFloat(10)
+				}
+				requiredQuote = requiredQuote.Div(leverage)
+			}
 		}
 	}
 
@@ -672,6 +693,15 @@ func (s *Strategy) checkRequiredInvestmentByAmount(
 				nextLowerPin := pins[i-1]
 				nextLowerPrice := fixedpoint.Value(nextLowerPin)
 				requiredQuote = requiredQuote.Add(quantity.Mul(nextLowerPrice))
+
+				// leverage the quote
+				if s.Leverage.Sign() > 0 {
+					leverage := s.Leverage
+					if s.Leverage.Compare(fixedpoint.NewFromFloat(10)) > 0 {
+						leverage = fixedpoint.NewFromFloat(10)
+					}
+					requiredQuote = requiredQuote.Div(leverage)
+				}
 			}
 		} else {
 			// for orders that buy
@@ -680,6 +710,15 @@ func (s *Strategy) checkRequiredInvestmentByAmount(
 			}
 
 			requiredQuote = requiredQuote.Add(amount)
+
+			// leverage the quote
+			if s.Leverage.Sign() > 0 {
+				leverage := s.Leverage
+				if s.Leverage.Compare(fixedpoint.NewFromFloat(10)) > 0 {
+					leverage = fixedpoint.NewFromFloat(10)
+				}
+				requiredQuote = requiredQuote.Div(leverage)
+			}
 		}
 	}
 
