@@ -171,6 +171,9 @@ type ExchangeSessionConfig struct {
 	IsolatedMarginSymbol string `json:"isolatedMarginSymbol,omitempty" yaml:"isolatedMarginSymbol,omitempty"`
 
 	Futures               bool   `json:"futures,omitempty" yaml:"futures"`
+	// Delivery enables Binance Coin-M futures (dapi). Requires futures: true.
+	// Mutually exclusive with isolatedFutures; when both are set, delivery wins.
+	Delivery              bool   `json:"delivery,omitempty" yaml:"delivery,omitempty"`
 	IsolatedFutures       bool   `json:"isolatedFutures,omitempty" yaml:"isolatedFutures,omitempty"`
 	IsolatedFuturesSymbol string `json:"isolatedFuturesSymbol,omitempty" yaml:"isolatedFuturesSymbol,omitempty"`
 
@@ -1206,11 +1209,18 @@ func (session *ExchangeSession) InitExchange(name string, ex types.Exchange) err
 			return fmt.Errorf("exchange %s does not support futures", exchangeName)
 		}
 
-		if session.IsolatedFutures {
+		if session.Delivery {
+			if session.IsolatedFutures {
+				log.Warnf("session %s: delivery=true ignores isolatedFutures (Coin-M does not use isolatedFutures)", name)
+			}
+			futuresExchange.UseDelivery()
+		} else if session.IsolatedFutures {
 			futuresExchange.UseIsolatedFutures(session.IsolatedFuturesSymbol)
 		} else {
 			futuresExchange.UseFutures()
 		}
+	} else if session.Delivery {
+		return fmt.Errorf("session %s: delivery requires futures: true", name)
 	}
 
 	session.Name = name

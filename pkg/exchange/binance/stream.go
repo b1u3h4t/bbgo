@@ -14,6 +14,7 @@ import (
 	"github.com/c9s/bbgo/pkg/util"
 
 	"github.com/adshao/go-binance/v2"
+	"github.com/adshao/go-binance/v2/delivery"
 	"github.com/adshao/go-binance/v2/futures"
 
 	"github.com/c9s/bbgo/pkg/types"
@@ -71,8 +72,9 @@ type Stream struct {
 
 	types.StandardStream
 
-	client        *binance.Client
-	futuresClient *futures.Client
+	client         *binance.Client
+	futuresClient  *futures.Client
+	deliveryClient *delivery.Client
 
 	ed25519authentication
 
@@ -130,11 +132,12 @@ type Stream struct {
 	futuresMarketSubs []types.Subscription // cached /market subscriptions
 }
 
-func NewStream(ex *Exchange, client *binance.Client, futuresClient *futures.Client) *Stream {
+func NewStream(ex *Exchange, client *binance.Client, futuresClient *futures.Client, deliveryClient *delivery.Client) *Stream {
 	stream := &Stream{
 		StandardStream:        types.NewStandardStream(),
 		client:                client,
 		futuresClient:         futuresClient,
+		deliveryClient:        deliveryClient,
 		ed25519authentication: ex.ed25519authentication,
 
 		exchange:     ex,
@@ -159,7 +162,7 @@ func NewStream(ex *Exchange, client *binance.Client, futuresClient *futures.Clie
 				return ex.QueryDepth(context.Background(), e.Symbol)
 			}, 3*time.Second)
 
-			if ex.IsFutures {
+			if ex.IsFutures || ex.IsDelivery {
 				f.CheckPreviousID()
 			}
 
@@ -466,6 +469,9 @@ func (s *Stream) handleOrderTradeUpdateEvent(e *OrderTradeUpdateEvent) {
 }
 
 func (s *Stream) getPublicEndpointUrl() string {
+	if s.exchange.IsDelivery {
+		return s.getDeliveryEndpointUrl()
+	}
 	if s.exchange.IsFutures {
 		s.futuresPublicSubs, s.futuresMarketSubs = classifyFuturesSubscriptions(s.Subscriptions)
 		if len(s.futuresPublicSubs) > 0 && len(s.futuresMarketSubs) > 0 {
@@ -500,6 +506,9 @@ func (s *Stream) getPublicEndpointUrl() string {
 }
 
 func (s *Stream) getUserDataStreamEndpointUrl(listenKey string) string {
+	if s.exchange.IsDelivery {
+		return s.getDeliveryEndpointUrl() + "/" + listenKey
+	}
 	if s.exchange.IsFutures {
 		return s.getFuturesPrivateEndpointUrl(listenKey)
 	}
@@ -671,6 +680,10 @@ func (s *Stream) fetchListenKey(ctx context.Context) (string, error) {
 		debug("margin mode is enabled, requesting margin user stream listen key...")
 		req := s.client.NewStartMarginUserStreamService()
 		return req.Do(ctx)
+	} else if s.exchange.IsDelivery {
+		debug("coin-m delivery mode is enabled, requesting delivery user stream listen key...")
+		req := s.deliveryClient.NewStartUserStreamService()
+		return req.Do(ctx)
 	} else if s.exchange.IsFutures {
 		debug("futures mode is enabled, requesting futures user stream listen key...")
 		req := s.futuresClient.NewStartUserStreamService()
@@ -694,6 +707,9 @@ func (s *Stream) keepaliveListenKey(ctx context.Context, listenKey string) error
 		}
 		req := s.client.NewKeepaliveMarginUserStreamService().ListenKey(listenKey)
 		return req.Do(ctx)
+	} else if s.exchange.IsDelivery {
+		req := s.deliveryClient.NewKeepaliveUserStreamService().ListenKey(listenKey)
+		return req.Do(ctx)
 	} else if s.exchange.IsFutures {
 		req := s.futuresClient.NewKeepaliveUserStreamService().ListenKey(listenKey)
 		return req.Do(ctx)
@@ -716,6 +732,9 @@ func (s *Stream) closeListenKey(ctx context.Context, listenKey string) (err erro
 			err = req.Do(ctx)
 		}
 
+	} else if s.exchange.IsDelivery {
+		req := s.deliveryClient.NewCloseUserStreamService().ListenKey(listenKey)
+		err = req.Do(ctx)
 	} else if s.exchange.IsFutures {
 		req := s.futuresClient.NewCloseUserStreamService().ListenKey(listenKey)
 		err = req.Do(ctx)
@@ -879,6 +898,13 @@ func classifyFuturesSubscriptions(subs []types.Subscription) (public, market []t
 		}
 	}
 	return
+}
+
+func (s *Stream) getDeliveryEndpointUrl() string {
+	if testNet {
+		return TestNetDeliveryWebSocketURL + "/ws"
+	}
+	return DeliveryWebSocketURL + "/ws"
 }
 
 func (s *Stream) getFuturesPublicEndpointUrl() string {

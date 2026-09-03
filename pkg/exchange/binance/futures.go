@@ -74,11 +74,14 @@ func (e *Exchange) queryFuturesClosedOrders(
 func (e *Exchange) TransferFuturesAccountAsset(
 	ctx context.Context, asset string, amount fixedpoint.Value, io types.TransferDirection,
 ) error {
+	if e.IsDelivery {
+		return e.TransferDeliveryAccountAsset(ctx, asset, amount, io)
+	}
+
 	req := e.client2.NewFuturesTransferRequest()
 	req.Asset(asset)
 	req.Amount(amount.String())
 
-	// TODO: Add support for coin-margined futures transfer types
 	switch io {
 	case types.TransferIn:
 		req.TransferType(binanceapi.FuturesTransferSpotToUsdtFutures)
@@ -606,6 +609,9 @@ func (e *Exchange) QueryFundingFeeHistory(
 }
 
 func (e *Exchange) SetLeverage(ctx context.Context, symbol string, leverage int) error {
+	if e.IsDelivery {
+		return e.setDeliveryLeverage(ctx, symbol, leverage)
+	}
 	if e.IsFutures {
 		_, err := e.futuresClient2.NewFuturesChangeInitialLeverageRequest().
 			Symbol(symbol).
@@ -618,6 +624,9 @@ func (e *Exchange) SetLeverage(ctx context.Context, symbol string, leverage int)
 }
 
 func (e *Exchange) QueryPositionRisk(ctx context.Context, symbol ...string) ([]types.PositionRisk, error) {
+	if e.IsDelivery {
+		return e.queryDeliveryPositionRisk(ctx, symbol...)
+	}
 	if !e.IsFutures {
 		return nil, fmt.Errorf("not supported for non-futures exchange")
 	}

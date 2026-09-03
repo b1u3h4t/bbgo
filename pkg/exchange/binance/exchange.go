@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/adshao/go-binance/v2"
-
+	"github.com/adshao/go-binance/v2/delivery"
 	"github.com/adshao/go-binance/v2/futures"
 	"go.uber.org/multierr"
 
@@ -47,6 +47,10 @@ const MarginWebSocketURL = "wss://margin-stream.binance.com"
 
 const FuturesWebSocketURL = "wss://fstream.binance.com"
 const TestNetFuturesWebSocketURL = "wss://stream.binancefuture.com"
+
+// Delivery (Coin-M) WebSocket endpoints
+const DeliveryWebSocketURL = "wss://dstream.binance.com"
+const TestNetDeliveryWebSocketURL = "wss://dstream.binancefuture.com"
 
 // TestNet URLs
 const TestNetWebSocketURL = "wss://testnet.binance.vision"
@@ -143,7 +147,8 @@ type Exchange struct {
 
 	// futuresClient is used for usdt-m futures
 	futuresClient *futures.Client // USDT-M Futures
-	// deliveryClient	*delivery.Client // Coin-M Futures
+	// deliveryClient is used for coin-m futures (dapi)
+	deliveryClient *delivery.Client // Coin-M Futures
 
 	// client2 is a newer version of the binance api client implemented by ourselves.
 	client2 *binanceapi.RestClient
@@ -190,9 +195,13 @@ func New(key, secret string, args ...string) *Exchange {
 	var futuresClient = binance.NewFuturesClient(key, secret)
 	futuresClient.HTTPClient = binanceapi.DefaultHttpClient
 
+	var deliveryClient = delivery.NewClient(key, secret)
+	deliveryClient.HTTPClient = binanceapi.DefaultHttpClient
+
 	if v, ok := envvar.Bool("DEBUG_BINANCE_CLIENT", false); ok {
 		client.Debug = v
 		futuresClient.Debug = v
+		deliveryClient.Debug = v
 	}
 
 	if isBinanceUs() {
@@ -213,6 +222,7 @@ func New(key, secret string, args ...string) *Exchange {
 
 		client:         client,
 		futuresClient:  futuresClient,
+		deliveryClient: deliveryClient,
 		client2:        client2,
 		futuresClient2: futuresClient2,
 	}
@@ -270,6 +280,15 @@ func (e *Exchange) Name() types.ExchangeName {
 }
 
 func (e *Exchange) QueryTicker(ctx context.Context, symbol string) (*types.Ticker, error) {
+	if e.IsDelivery {
+		req := e.deliveryClient.NewListPriceChangeStatsService()
+		req.Symbol(strings.ToUpper(symbol))
+		stats, err := req.Do(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return toGlobalDeliveryTicker(stats[0])
+	}
 	if e.IsFutures {
 		req := e.futuresClient.NewListPriceChangeStatsService()
 		req.Symbol(strings.ToUpper(symbol))
@@ -308,6 +327,34 @@ func (e *Exchange) QueryTickers(ctx context.Context, symbol ...string) (map[stri
 
 	for _, s := range symbol {
 		m[s] = exists
+	}
+
+	if e.IsDelivery {
+		var req = e.deliveryClient.NewListPriceChangeStatsService()
+		changeStats, err := req.Do(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, stats := range changeStats {
+			if _, ok := m[stats.Symbol]; len(symbol) != 0 && !ok {
+				continue
+			}
+
+			tick := types.Ticker{
+				Volume: fixedpoint.MustNewFromString(stats.Volume),
+				Last:   fixedpoint.MustNewFromString(stats.LastPrice),
+				Open:   fixedpoint.MustNewFromString(stats.OpenPrice),
+				High:   fixedpoint.MustNewFromString(stats.HighPrice),
+				Low:    fixedpoint.MustNewFromString(stats.LowPrice),
+				Buy:    fixedpoint.MustNewFromString(stats.LastPrice),
+				Sell:   fixedpoint.MustNewFromString(stats.LastPrice),
+				Time:   time.Unix(0, stats.CloseTime*int64(time.Millisecond)),
+			}
+
+			tickers[stats.Symbol] = tick
+		}
+
+		return tickers, nil
 	}
 
 	if e.IsFutures {
@@ -368,6 +415,23 @@ func (e *Exchange) QueryTickers(ctx context.Context, symbol ...string) (map[stri
 
 func (e *Exchange) QueryMarkets(ctx context.Context) (types.MarketMap, error) {
 
+	if e.IsDelivery {
+		exchangeInfo, err := e.deliveryClient.NewExchangeInfoService().Do(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		markets := types.MarketMap{}
+		for _, symbol := range exchangeInfo.Symbols {
+			if symbol.ContractStatus != "" && symbol.ContractStatus != "TRADING" {
+				continue
+			}
+			markets[symbol.Symbol] = toGlobalDeliveryMarket(symbol)
+		}
+
+		return markets, nil
+	}
+
 	if e.IsFutures {
 		exchangeInfo, err := e.futuresClient.NewExchangeInfoService().Do(ctx)
 		if err != nil {
@@ -405,7 +469,7 @@ func (e *Exchange) QueryAveragePrice(ctx context.Context, symbol string) (fixedp
 }
 
 func (e *Exchange) NewStream() types.Stream {
-	return NewStream(e, e.client, e.futuresClient)
+	return NewStream(e, e.client, e.futuresClient, e.deliveryClient)
 }
 
 func (e *Exchange) QueryMarginFutureHourlyInterestRate(
@@ -894,7 +958,9 @@ func (e *Exchange) QuerySpotAccount(ctx context.Context) (*types.Account, error)
 func (e *Exchange) QueryAccount(ctx context.Context) (*types.Account, error) {
 	var account *types.Account
 	var err error
-	if e.IsFutures {
+	if e.IsDelivery {
+		account, err = e.QueryDeliveryAccount(ctx)
+	} else if e.IsFutures {
 		account, err = e.QueryFuturesAccount(ctx)
 	} else if e.IsIsolatedMargin {
 		account, err = e.QueryIsolatedMarginAccount(ctx)
@@ -918,6 +984,10 @@ func (e *Exchange) QueryOpenOrders(ctx context.Context, symbol string) (orders [
 		}
 
 		return toGlobalOrders(binanceOrders, false)
+	}
+
+	if e.IsDelivery {
+		return e.queryDeliveryOpenOrders(ctx, symbol)
 	}
 
 	if e.IsFutures {
@@ -1014,6 +1084,10 @@ func (e *Exchange) QueryOrder(ctx context.Context, q types.OrderQuery) (*types.O
 		return toGlobalOrder(order, e.IsMargin)
 	}
 
+	if e.IsDelivery {
+		return e.queryDeliveryOrder(ctx, q)
+	}
+
 	if e.IsFutures {
 		return e.queryFuturesOrder(ctx, q)
 	}
@@ -1076,6 +1150,10 @@ func (e *Exchange) QueryClosedOrders(
 		return toGlobalOrders(binanceOrders, e.IsMargin)
 	}
 
+	if e.IsDelivery {
+		return e.queryDeliveryClosedOrders(ctx, symbol, since, until, lastOrderID)
+	}
+
 	if e.IsFutures {
 		return e.queryFuturesClosedOrders(ctx, symbol, since, until, lastOrderID)
 	}
@@ -1110,6 +1188,10 @@ func (e *Exchange) CancelOrders(ctx context.Context, orders ...types.Order) (err
 	if err = orderLimiter.Wait(ctx); err != nil {
 		log.WithError(err).Errorf("order rate limiter wait error")
 		return err
+	}
+
+	if e.IsDelivery {
+		return e.cancelDeliveryOrders(ctx, orders...)
 	}
 
 	if e.IsFutures {
@@ -1370,6 +1452,8 @@ func (e *Exchange) SubmitOrder(ctx context.Context, order types.SubmitOrder) (cr
 
 	if e.IsMargin {
 		createdOrder, err = e.submitMarginOrder(ctx, order)
+	} else if e.IsDelivery {
+		createdOrder, err = e.submitDeliveryOrder(ctx, order)
 	} else if e.IsFutures {
 		createdOrder, err = e.submitFuturesOrder(ctx, order)
 	} else {
@@ -1392,6 +1476,9 @@ func (e *Exchange) SubmitOrder(ctx context.Context, order types.SubmitOrder) (cr
 func (e *Exchange) QueryKLines(
 	ctx context.Context, symbol string, interval types.Interval, options types.KLineQueryOptions,
 ) ([]types.KLine, error) {
+	if e.IsDelivery {
+		return e.QueryDeliveryKLines(ctx, symbol, interval, options)
+	}
 	if e.IsFutures {
 		return e.QueryFuturesKLines(ctx, symbol, interval, options)
 	}
@@ -1563,6 +1650,8 @@ func (e *Exchange) QueryTrades(
 
 	if e.IsMargin {
 		return e.queryMarginTrades(ctx, symbol, options)
+	} else if e.IsDelivery {
+		return nil, fmt.Errorf("coin-m delivery QueryTrades is not supported by go-binance delivery client yet")
 	} else if e.IsFutures {
 		return e.queryFuturesTrades(ctx, symbol, options)
 	}
@@ -1573,6 +1662,13 @@ func (e *Exchange) QueryTrades(
 // See also https://www.binance.com/en/fee/schedule
 // See futures fee at: https://www.binance.com/en/fee/futureFee
 func (e *Exchange) DefaultFeeRates() types.ExchangeFee {
+	if e.IsDelivery {
+		// Coin-M VIP0 approximate rates (with BNB discount varies); placeholder aligned with UM-ish maker/taker
+		return types.ExchangeFee{
+			MakerFeeRate: fixedpoint.NewFromFloat(0.01 * 0.0200),
+			TakerFeeRate: fixedpoint.NewFromFloat(0.01 * 0.0500),
+		}
+	}
 	if e.IsFutures {
 		return types.ExchangeFee{
 			MakerFeeRate: fixedpoint.NewFromFloat(0.01 * 0.0180), // 0.0180% -USDT with BNB
@@ -1590,6 +1686,9 @@ func (e *Exchange) DefaultFeeRates() types.ExchangeFee {
 func (e *Exchange) QueryDepth(
 	ctx context.Context, symbol string,
 ) (snapshot types.SliceOrderBook, finalUpdateID int64, err error) {
+	if e.IsDelivery {
+		return e.queryDeliveryDepth(ctx, symbol)
+	}
 	if e.IsFutures {
 		return e.queryFuturesDepth(ctx, symbol)
 	}

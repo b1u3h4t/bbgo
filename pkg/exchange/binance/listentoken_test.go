@@ -23,7 +23,7 @@ func TestExchange_EnableListenKey(t *testing.T) {
 func TestStream_ListenKeyConfiguration(t *testing.T) {
 	// Test default behavior (new listenToken method)
 	exchange1 := &Exchange{}
-	stream1 := NewStream(exchange1, nil, nil)
+	stream1 := NewStream(exchange1, nil, nil, nil)
 	if stream1.exchange.useListenKey {
 		t.Error("Stream should use listenToken method by default (useListenKey should be false)")
 	}
@@ -31,7 +31,7 @@ func TestStream_ListenKeyConfiguration(t *testing.T) {
 	// Test enabling deprecated listenKey method
 	exchange2 := &Exchange{}
 	exchange2.EnableListenKey()
-	stream2 := NewStream(exchange2, nil, nil)
+	stream2 := NewStream(exchange2, nil, nil, nil)
 	if !stream2.exchange.useListenKey {
 		t.Error("Stream should have useListenKey enabled when exchange has UseListenKey enabled")
 	}

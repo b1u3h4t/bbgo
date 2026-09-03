@@ -5,11 +5,13 @@ import "github.com/c9s/bbgo/pkg/fixedpoint"
 type FuturesExchange interface {
 	UseFutures()
 	UseIsolatedFutures(symbol string)
+	UseDelivery()
 	GetFuturesSettings() FuturesSettings
 }
 
 type FuturesSettings struct {
 	IsFutures             bool
+	IsDelivery            bool // Coin-M (dapi) when true; USDT-M when IsFutures && !IsDelivery
 	IsIsolatedFutures     bool
 	IsolatedFuturesSymbol string
 }
@@ -20,10 +22,19 @@ func (s FuturesSettings) GetFuturesSettings() FuturesSettings {
 
 func (s *FuturesSettings) UseFutures() {
 	s.IsFutures = true
+	s.IsDelivery = false
+}
+
+func (s *FuturesSettings) UseDelivery() {
+	s.IsFutures = true
+	s.IsDelivery = true
+	s.IsIsolatedFutures = false
+	s.IsolatedFuturesSymbol = ""
 }
 
 func (s *FuturesSettings) UseIsolatedFutures(symbol string) {
 	s.IsFutures = true
+	s.IsDelivery = false
 	s.IsIsolatedFutures = true
 	s.IsolatedFuturesSymbol = symbol
 }

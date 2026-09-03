@@ -27,7 +27,11 @@ const (
 func (s *Stream) handleConnect() {
 	if s.PublicOnly {
 		// market data stream
-		if s.exchange.IsFutures {
+		if s.exchange.IsDelivery {
+			if err := s.writeSubscriptions(); err != nil {
+				log.WithError(err).Error("coin-m delivery subscribe error")
+			}
+		} else if s.exchange.IsFutures {
 			// Determine which subscriptions to send on the main connection:
 			//   - mixed or market-only → main conn is /market → send futuresMarketSubs
 			//   - public-only (depth/bookTicker only) → main conn is /public → send futuresPublicSubs

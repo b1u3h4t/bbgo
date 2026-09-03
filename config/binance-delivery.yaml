@@ -1,0 +1,25 @@
+---
+# Binance Coin-M (delivery / dapi) session example
+#
+# Requires:
+#   futures: true
+#   delivery: true
+#
+# Note: grid2 does NOT support coin-margined grids yet.
+# Use this session with strategies that understand contract quantity (contracts / ContractValue).
+
+sessions:
+  binance_delivery:
+    exchange: binance
+    envVarPrefix: BINANCE
+    futures: true
+    delivery: true
+    # optional: set leverage per symbol
+    # symbolLeverage:
+    #   BTCUSD_PERP: 5
+
+exchangeStrategies:
+- on: binance_delivery
+  dummy:
+    symbol: BTCUSD_PERP
+    interval: 1m
