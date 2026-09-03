@@ -208,8 +208,7 @@ func toGlobalFuturesOrder[T FuturesOrderConstraint](orderSource T, isIsolated bo
 		time = o.CreateTime
 		updateTime = o.UpdateTime
 	case futures.GetAlgoOrderResp:
-	case *futures.GetAlgoOrderResp:
-		// GetAlgoOrderResp has the same structure as CreateAlgoOrderResp
+		// GetAlgoOrderResp (value type) — same fields as pointer case below
 		clientOrderID = o.ClientAlgoId
 		symbol = o.Symbol
 		side = o.Side
@@ -219,12 +218,30 @@ func toGlobalFuturesOrder[T FuturesOrderConstraint](orderSource T, isIsolated bo
 		origQuantity = o.Quantity
 		stopPrice = o.TriggerPrice
 		price = o.Price
-		avgPrice = "" // GetAlgoOrderResp doesn't have AvgPrice
+		avgPrice = ""
 		timeInForce = o.TimeInForce
 		orderID = o.AlgoId
 		actualOrderId, _ = strconv.ParseUint(o.ActualOrderId, 10, 64)
 		status = futures.OrderStatusType(o.AlgoStatus)
-		executedQuantity = "0" // GetAlgoOrderResp doesn't have ExecutedQuantity
+		executedQuantity = "0"
+		time = o.CreateTime
+		updateTime = o.UpdateTime
+	case *futures.GetAlgoOrderResp:
+		clientOrderID = o.ClientAlgoId
+		symbol = o.Symbol
+		side = o.Side
+		orderType = o.OrderType
+		reduceOnly = o.ReduceOnly
+		closePosition = o.ClosePosition
+		origQuantity = o.Quantity
+		stopPrice = o.TriggerPrice
+		price = o.Price
+		avgPrice = ""
+		timeInForce = o.TimeInForce
+		orderID = o.AlgoId
+		actualOrderId, _ = strconv.ParseUint(o.ActualOrderId, 10, 64)
+		status = futures.OrderStatusType(o.AlgoStatus)
+		executedQuantity = "0"
 		time = o.CreateTime
 		updateTime = o.UpdateTime
 	default:
