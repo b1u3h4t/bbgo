@@ -528,6 +528,13 @@ func (b *ActiveOrderBook) add(order types.Order) {
 		b.mu.Unlock()
 
 		b.EmitNew(order)
+
+		// If the exchange returns a non-new status on submit (common for marketable
+		// limit orders that fill immediately), there may be no subsequent WS update.
+		// Mirror the pending-update path so strategies can place reverse orders.
+		if order.Status != types.OrderStatusNew {
+			b.Update(order)
+		}
 	}
 }
 
