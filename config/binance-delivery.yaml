@@ -1,12 +1,15 @@
 ---
-# Binance Coin-M (delivery / dapi) session example
+# Binance Coin-M (delivery / dapi) + grid2 example
 #
 # Requires:
 #   futures: true
 #   delivery: true
 #
-# Note: grid2 does NOT support coin-margined grids yet.
-# Use this session with strategies that understand contract quantity (contracts / ContractValue).
+# Coin-M grid2 notes:
+#   - quantity is in CONTRACTS (not base coins)
+#   - margin is in BASE (e.g. BTC for BTCUSD_PERP)
+#   - set leverage; compound is disabled automatically
+#   - earnBase is forced on (PnL tracked in base)
 
 sessions:
   binance_delivery:
@@ -20,6 +23,17 @@ sessions:
 
 exchangeStrategies:
 - on: binance_delivery
-  dummy:
+  grid2:
     symbol: BTCUSD_PERP
-    interval: 1m
+    gridNumber: 10
+    # quantity = contracts per pin
+    quantity: 1
+    leverage: 5
+    # optional: cap base margin budget (otherwise uses available base wallet)
+    # baseInvestment: 0.05
+    upperPrice: 120000
+    lowerPrice: 80000
+    # feeRate defaults to ~0.02% for coin-m if omitted
+    # feeRate: 0.0002
+    skipSpreadCheck: false
+    keepOrdersWhenShutdown: true

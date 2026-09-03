@@ -586,6 +586,10 @@ func (e *Exchange) QueryFuturesIncomeHistory(
 func (e *Exchange) QueryFundingFeeHistory(
 	ctx context.Context, symbol string, startTime, endTime *time.Time,
 ) ([]types.FundingFee, error) {
+	if e.IsDelivery {
+		return e.queryDeliveryIncome(ctx, symbol, "FUNDING_FEE", startTime, endTime)
+	}
+
 	resp, err := e.QueryFuturesIncomeHistory(
 		ctx, symbol, binanceapi.FuturesIncomeFundingFee, startTime, endTime,
 	)

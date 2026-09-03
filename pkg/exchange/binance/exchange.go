@@ -1012,6 +1012,10 @@ func (e *Exchange) QueryOrderTrades(ctx context.Context, q types.OrderQuery) ([]
 		return nil, errors.New("binance: symbol parameter is a mandatory parameter for querying order trades")
 	}
 
+	if e.IsDelivery {
+		return e.queryDeliveryOrderTrades(ctx, q)
+	}
+
 	var remoteTrades []binance.TradeV3
 	var trades []types.Trade
 
@@ -1651,7 +1655,7 @@ func (e *Exchange) QueryTrades(
 	if e.IsMargin {
 		return e.queryMarginTrades(ctx, symbol, options)
 	} else if e.IsDelivery {
-		return nil, fmt.Errorf("coin-m delivery QueryTrades is not supported by go-binance delivery client yet")
+		return e.queryDeliveryUserTrades(ctx, symbol, 0, options)
 	} else if e.IsFutures {
 		return e.queryFuturesTrades(ctx, symbol, options)
 	}

@@ -239,6 +239,10 @@ func (s *Strategy) Validate() error {
 		return fmt.Errorf("either quantity, amount or quoteInvestment must be set")
 	}
 
+	if err := s.validateCoinM(); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -249,6 +253,7 @@ func (s *Strategy) Defaults() error {
 
 	s.LogFields["symbol"] = s.Symbol
 	s.LogFields["strategy"] = ID
+	s.applyCoinMDefaults()
 	return nil
 }
 
@@ -318,6 +323,23 @@ func (s *Strategy) checkSpread() error {
 }
 
 func (s *Strategy) calculateProfit(o types.Order, buyPrice, buyQuantity fixedpoint.Value) *GridProfit {
+	if s.isCoinM() {
+		// Inverse PnL in base: contractValue * qty * (1/buyPrice - 1/sellPrice)
+		qty := o.Quantity
+		if buyQuantity.Sign() > 0 {
+			qty = fixedpoint.Min(qty, buyQuantity)
+		}
+		profitQuantity := s.Market.ContractValue.Mul(qty).Mul(
+			fixedpoint.One.Div(buyPrice).Sub(fixedpoint.One.Div(o.Price)),
+		)
+		return &GridProfit{
+			Currency: s.Market.BaseCurrency,
+			Profit:   profitQuantity,
+			Time:     o.UpdateTime.Time(),
+			Order:    o,
+		}
+	}
+
 	if s.EarnBase {
 		// sell quantity - buy quantity
 		profitQuantity := o.Quantity.Sub(buyQuantity)
@@ -383,8 +405,10 @@ func (s *Strategy) aggregateOrderQuoteAmountAndFee(o types.Order) (fixedpoint.Va
 		s.logger.Infof("GRID: found filled order trades: %+v", orderTrades)
 	}
 
+	// Spot/USDT-M: buy fee in base, sell fee in quote.
+	// Coin-M: fee is usually charged in base on both sides.
 	feeCurrency := s.Market.BaseCurrency
-	if o.Side == types.SideTypeSell {
+	if !s.isCoinM() && o.Side == types.SideTypeSell {
 		feeCurrency = s.Market.QuoteCurrency
 	}
 
@@ -464,6 +488,8 @@ func (s *Strategy) processFilledOrder(o types.Order) {
 		o.OrderID, o.Side,
 		fee.String(), feeCurrency)
 
+	coinM := s.isCoinM()
+
 	switch o.Side {
 	case types.SideTypeSell:
 		newSide = types.SideTypeBuy
@@ -476,8 +502,14 @@ func (s *Strategy) processFilledOrder(o types.Order) {
 			}
 		}
 
-		// use the profit to buy more inventory in the grid
-		if s.Compound || s.EarnBase {
+		if coinM {
+			// Coin-M: quantity is contracts; fee is paid in base wallet — keep contract size fixed.
+			newQuantity = executedQuantity
+			if s.QuantityOrAmount.Quantity.Sign() > 0 {
+				newQuantity = fixedpoint.Max(s.QuantityOrAmount.Quantity, o.Quantity)
+			}
+		} else if s.Compound || s.EarnBase {
+			// use the profit to buy more inventory in the grid
 			// if it's not using the platform fee currency, reduce the quote quantity for the buy order
 			if feeCurrency == s.Market.QuoteCurrency && fee.Sign() > 0 {
 				orderExecutedQuoteAmount = orderExecutedQuoteAmount.Sub(fee)
@@ -516,19 +548,27 @@ func (s *Strategy) processFilledOrder(o types.Order) {
 			}
 		}
 
-		if feeCurrency == s.Market.BaseCurrency && fee.Sign() > 0 {
-			newQuantity = newQuantity.Sub(fee)
-		}
+		if coinM {
+			newQuantity = executedQuantity
+			if s.QuantityOrAmount.Quantity.Sign() > 0 {
+				newQuantity = s.QuantityOrAmount.Quantity
+			}
+			newQuantity = newQuantity.Round(s.Market.VolumePrecision, fixedpoint.Down)
+		} else {
+			if feeCurrency == s.Market.BaseCurrency && fee.Sign() > 0 {
+				newQuantity = newQuantity.Sub(fee)
+			}
 
-		// if EarnBase is enabled, we should sell less to get the same quote amount back
-		if s.EarnBase {
-			newQuantity = orderExecutedQuoteAmount.Div(newPrice).Sub(fee)
-		}
+			// if EarnBase is enabled, we should sell less to get the same quote amount back
+			if s.EarnBase {
+				newQuantity = orderExecutedQuoteAmount.Div(newPrice).Sub(fee)
+			}
 
-		// always round down the base quantity for placing sell order to avoid the base currency fund locking issue
-		origQuantity := newQuantity
-		newQuantity = newQuantity.Round(s.Market.VolumePrecision, fixedpoint.Down)
-		s.logger.Infof("round down sell order quantity %s to %s by base quantity precision %d", origQuantity.String(), newQuantity.String(), s.Market.VolumePrecision)
+			// always round down the base quantity for placing sell order to avoid the base currency fund locking issue
+			origQuantity := newQuantity
+			newQuantity = newQuantity.Round(s.Market.VolumePrecision, fixedpoint.Down)
+			s.logger.Infof("round down sell order quantity %s to %s by base quantity precision %d", origQuantity.String(), newQuantity.String(), s.Market.VolumePrecision)
+		}
 	}
 
 	if newQuantity.Compare(s.Market.MinQuantity) < 0 {
@@ -1105,7 +1145,30 @@ func (s *Strategy) openGrid(ctx context.Context, session *bbgo.ExchangeSession) 
 
 	// shift 1 grid because we will start from the buy order
 	// if the buy order is filled, then we will submit another sell order at the higher grid.
-	if s.QuantityOrAmount.IsSet() {
+	if s.isCoinM() {
+		if err2 := s.validateCoinM(); err2 != nil {
+			s.EmitGridError(err2)
+			return err2
+		}
+		// Prefer BaseInvestment as margin budget when configured.
+		marginBudget := totalBase
+		if !s.BaseInvestment.IsZero() {
+			if s.BaseInvestment.Compare(totalBase) > 0 {
+				err2 := fmt.Errorf("coin-m baseInvestment %f > available base %f %s",
+					s.BaseInvestment.Float64(), totalBase.Float64(), s.Market.BaseCurrency)
+				s.EmitGridError(err2)
+				return err2
+			}
+			marginBudget = s.BaseInvestment
+		}
+		if _, err2 := s.checkRequiredInvestmentByQuantityCoinM(
+			marginBudget, s.QuantityOrAmount.Quantity, lastPrice, s.grid.Pins,
+		); err2 != nil {
+			s.EmitGridError(err2)
+			return err2
+		}
+		totalBase = marginBudget
+	} else if s.QuantityOrAmount.IsSet() {
 		if quantity := s.QuantityOrAmount.Quantity; !quantity.IsZero() {
 			if _, _, err2 := s.checkRequiredInvestmentByQuantity(totalBase, totalQuote, s.QuantityOrAmount.Quantity, lastPrice, s.grid.Pins); err2 != nil {
 				s.EmitGridError(err2)
@@ -1142,7 +1205,7 @@ func (s *Strategy) openGrid(ctx context.Context, session *bbgo.ExchangeSession) 
 
 	// if base investment and quote investment is set, when we should check if the
 	// investment configuration is valid with the current balances
-	if !s.BaseInvestment.IsZero() && !s.QuoteInvestment.IsZero() {
+	if !s.isCoinM() && !s.BaseInvestment.IsZero() && !s.QuoteInvestment.IsZero() {
 		if s.BaseInvestment.Compare(totalBase) > 0 {
 			err2 := fmt.Errorf("baseInvestment setup %f is greater than the total base balance %f", s.BaseInvestment.Float64(), totalBase.Float64())
 			s.EmitGridError(err2)
@@ -1157,7 +1220,9 @@ func (s *Strategy) openGrid(ctx context.Context, session *bbgo.ExchangeSession) 
 
 	var submitOrders []types.SubmitOrder
 
-	if !s.BaseInvestment.IsZero() || !s.QuoteInvestment.IsZero() {
+	if s.isCoinM() {
+		submitOrders, err = s.generateCoinMGridOrders(totalBase, lastPrice)
+	} else if !s.BaseInvestment.IsZero() || !s.QuoteInvestment.IsZero() {
 		submitOrders, err = s.generateGridOrders(s.QuoteInvestment, s.BaseInvestment, lastPrice)
 	} else {
 		submitOrders, err = s.generateGridOrders(totalQuote, totalBase, lastPrice)
@@ -1262,6 +1327,10 @@ func (s *Strategy) updateGridNumOfOrdersMetrics(grid *grid2types.Grid) {
 }
 
 func (s *Strategy) generateGridOrders(totalQuote, totalBase, lastPrice fixedpoint.Value) ([]types.SubmitOrder, error) {
+	if s.isCoinM() {
+		return s.generateCoinMGridOrders(totalBase, lastPrice)
+	}
+
 	var pins = s.grid.Pins
 	var usedBase = fixedpoint.Zero
 	var usedQuote = fixedpoint.Zero
@@ -1547,9 +1616,14 @@ func (s *Strategy) Run(ctx context.Context, _ bbgo.OrderExecutor, session *bbgo.
 	s.writeCtx, s.cancelWrite = context.WithCancel(ctx)
 
 	s.session = session
+	s.applyCoinMDefaults()
 
 	// newPrometheusLabels requires session.Name to setup the exchange label
 	s.mergedPrometheusLabels = s.newPrometheusLabels()
+
+	if err := s.validateCoinM(); err != nil {
+		return err
+	}
 
 	if service, ok := session.Exchange.(types.ExchangeOrderQueryService); ok {
 		s.orderQueryService = service
@@ -1600,7 +1674,8 @@ func (s *Strategy) Run(ctx context.Context, _ bbgo.OrderExecutor, session *bbgo.
 	}
 
 	// we need to check the minimal quote investment here, because we need the market info
-	if s.QuoteInvestment.Sign() > 0 {
+	// Coin-M uses base margin + fixed contracts — skip quote investment checks.
+	if !s.isCoinM() && s.QuoteInvestment.Sign() > 0 {
 		grid := s.newGrid()
 		if err := s.checkMinimalQuoteInvestment(grid); err != nil {
 			if s.StopIfLessThanMinimalQuoteInvestment {
