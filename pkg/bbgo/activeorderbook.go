@@ -515,10 +515,12 @@ func (b *ActiveOrderBook) add(order types.Order) {
 		b.EmitNew(order)
 
 		// when using add(order), it's usually a new maker order on the order book.
-		// so, when it's not status=new, we should trigger order update handler
+		// so, when it's not status=new, we should trigger order update handler.
+		// Run async: add() is often called while strategy writeMutex is held
+		// (e.g. grid2 openGrid SubmitOrders); synchronous Update -> reverse
+		// SubmitOrders would re-lock writeMutex and deadlock.
 		if order.Status != types.OrderStatusNew {
-			// emit the order update handle function to trigger callback
-			b.Update(order)
+			go b.Update(order)
 		}
 
 	} else {
@@ -531,9 +533,9 @@ func (b *ActiveOrderBook) add(order types.Order) {
 
 		// If the exchange returns a non-new status on submit (common for marketable
 		// limit orders that fill immediately), there may be no subsequent WS update.
-		// Mirror the pending-update path so strategies can place reverse orders.
+		// Async: same writeMutex deadlock risk as the pending-update path above.
 		if order.Status != types.OrderStatusNew {
-			b.Update(order)
+			go b.Update(order)
 		}
 	}
 }
