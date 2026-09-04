@@ -107,6 +107,73 @@ func TestStrategy_generateCoinMGridOrders(t *testing.T) {
 	}
 }
 
+func newUSDTMTestStrategy() *Strategy {
+	s := newTestStrategy("HYPEUSDT")
+	s.UpperPrice = number(88)
+	s.LowerPrice = number(84)
+	s.GridNum = 5
+	s.Leverage = number(3)
+	s.QuantityOrAmount.Quantity = number(1)
+	s.session = &bbgo.ExchangeSession{
+		ExchangeSessionConfig: bbgo.ExchangeSessionConfig{
+			Futures:  true,
+			Delivery: false,
+		},
+	}
+	return s
+}
+
+func TestStrategy_isUSDTMFutures(t *testing.T) {
+	spot := newTestStrategy()
+	assert.False(t, spot.isUSDTMFutures())
+	assert.False(t, spot.isCoinM())
+
+	um := newUSDTMTestStrategy()
+	assert.True(t, um.isUSDTMFutures())
+	assert.False(t, um.isCoinM())
+
+	cm := newCoinMTestStrategy()
+	assert.False(t, cm.isUSDTMFutures())
+	assert.True(t, cm.isCoinM())
+}
+
+func TestStrategy_generateGridOrders_USDTM_noBase(t *testing.T) {
+	s := newUSDTMTestStrategy()
+	s.grid = grid2types.NewGrid(s.LowerPrice, s.UpperPrice, fixedpoint.NewFromInt(s.GridNum), s.Market.TickSize)
+	s.grid.CalculateArithmeticPins()
+
+	// mid inside band; no base inventory — must still place sells above mid
+	lastPrice := number(86)
+	orders, err := s.generateGridOrders(number(100_000), number(0), lastPrice)
+	assert.NoError(t, err)
+	if !assert.Equal(t, 4, len(orders)) {
+		for _, o := range orders {
+			t.Logf("- %s %s", o.Price.String(), o.Side)
+		}
+	}
+
+	assertPriceSide(t, []PriceSideAssert{
+		{number(88), types.SideTypeSell},
+		{number(87), types.SideTypeSell},
+		{number(86), types.SideTypeSell}, // pin == lastPrice is sell side
+		{number(84), types.SideTypeBuy},  // pin just below mid skipped (twin gap)
+	}, orders)
+
+	// Spot with same balances must convert sells → buys (regression)
+	spot := newTestStrategy("HYPEUSDT")
+	spot.UpperPrice = number(88)
+	spot.LowerPrice = number(84)
+	spot.GridNum = 5
+	spot.QuantityOrAmount.Quantity = number(1)
+	spot.grid = grid2types.NewGrid(spot.LowerPrice, spot.UpperPrice, fixedpoint.NewFromInt(spot.GridNum), spot.Market.TickSize)
+	spot.grid.CalculateArithmeticPins()
+	spotOrders, err := spot.generateGridOrders(number(100_000), number(0), lastPrice)
+	assert.NoError(t, err)
+	for _, o := range spotOrders {
+		assert.Equal(t, types.SideTypeBuy, o.Side, "spot without base must not place sells")
+	}
+}
+
 func TestStrategy_validateCoinM(t *testing.T) {
 	s := newCoinMTestStrategy()
 	assert.NoError(t, s.validateCoinM())

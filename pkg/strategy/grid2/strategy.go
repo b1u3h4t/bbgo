@@ -739,10 +739,15 @@ func (s *Strategy) checkRequiredInvestmentByQuantity(
 			if requiredBase.Add(quantity).Compare(baseBalance) <= 0 {
 				requiredBase = requiredBase.Add(quantity)
 			} else if i > 0 { // we do not want to sell at i == 0
-				// convert sell to buy quote and add to requiredQuote
-				nextLowerPin := pins[i-1]
-				nextLowerPrice := fixedpoint.Value(nextLowerPin)
-				requiredQuote = requiredQuote.Add(quantity.Mul(nextLowerPrice))
+				if s.isUSDTMFutures() {
+					// USDT-M: open short with quote margin; do not convert to buy
+					requiredQuote = requiredQuote.Add(quantity.Mul(price))
+				} else {
+					// Spot: convert sell to buy quote at the next lower pin
+					nextLowerPin := pins[i-1]
+					nextLowerPrice := fixedpoint.Value(nextLowerPin)
+					requiredQuote = requiredQuote.Add(quantity.Mul(nextLowerPrice))
+				}
 
 				// leverage the quote
 				if s.Leverage.Sign() > 0 {
@@ -819,10 +824,14 @@ func (s *Strategy) checkRequiredInvestmentByAmount(
 			if requiredBase.Add(quantity).Compare(baseBalance) <= 0 {
 				requiredBase = requiredBase.Add(quantity)
 			} else if i > 0 { // we do not want to sell at i == 0
-				// convert sell to buy quote and add to requiredQuote
-				nextLowerPin := pins[i-1]
-				nextLowerPrice := fixedpoint.Value(nextLowerPin)
-				requiredQuote = requiredQuote.Add(quantity.Mul(nextLowerPrice))
+				if s.isUSDTMFutures() {
+					requiredQuote = requiredQuote.Add(quantity.Mul(price))
+				} else {
+					// Spot: convert sell to buy quote at the next lower pin
+					nextLowerPin := pins[i-1]
+					nextLowerPrice := fixedpoint.Value(nextLowerPin)
+					requiredQuote = requiredQuote.Add(quantity.Mul(nextLowerPrice))
+				}
 
 				// leverage the quote
 				if s.Leverage.Sign() > 0 {
@@ -1512,9 +1521,36 @@ func (s *Strategy) generateGridOrders(totalQuote, totalBase, lastPrice fixedpoin
 					ClientOrderID: s.newClientOrderID(),
 				})
 				usedBase = usedBase.Add(quantity)
+			} else if s.isUSDTMFutures() {
+				// USDT-M futures: open short with quote margin; never convert to a
+				// marketable buy above lastPrice (spot fallback would do that).
+				quoteQuantity := quantity.Mul(sellPrice)
+				if s.Leverage.Sign() > 0 {
+					quoteQuantity = quoteQuantity.Div(s.leverageOrOne())
+				}
+				roundUpQuoteQuantity := quoteQuantity.Round(s.Market.PricePrecision, fixedpoint.Up)
+				if usedQuote.Add(roundUpQuoteQuantity).Compare(totalQuote) > 0 {
+					return nil, fmt.Errorf(
+						"usdt-m: used quote margin %f + %f > available %f %s for sell @ %s",
+						usedQuote.Float64(), roundUpQuoteQuantity.Float64(),
+						totalQuote.Float64(), s.Market.QuoteCurrency, sellPrice.String(),
+					)
+				}
+				submitOrders = append(submitOrders, types.SubmitOrder{
+					Symbol:        s.Symbol,
+					Type:          types.OrderTypeLimit,
+					Side:          types.SideTypeSell,
+					Price:         sellPrice,
+					Quantity:      quantity,
+					Market:        s.Market,
+					TimeInForce:   types.TimeInForceGTC,
+					Tag:           orderTag,
+					GroupID:       s.OrderGroupID,
+					ClientOrderID: s.newClientOrderID(),
+				})
+				usedQuote = usedQuote.Add(roundUpQuoteQuantity)
 			} else {
-				// if we don't have enough base asset
-				// then we need to place a buy order at the next price.
+				// Spot: if we don't have enough base asset, place a buy at the next price.
 				nextPin := pins[i-1]
 				nextPrice := fixedpoint.Value(nextPin)
 				submitOrders = append(submitOrders, types.SubmitOrder{

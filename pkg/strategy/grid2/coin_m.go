@@ -20,6 +20,21 @@ func (s *Strategy) isCoinM() bool {
 	return s.Market.ContractValue.Sign() > 0
 }
 
+// isUSDTMFutures reports whether this grid is on USDT-M (linear) futures.
+// Linear futures can open shorts without base inventory; spot cannot.
+func (s *Strategy) isUSDTMFutures() bool {
+	if s.isCoinM() {
+		return false
+	}
+	if s.session != nil && s.session.Futures {
+		return true
+	}
+	if s.ExchangeSession != nil && s.ExchangeSession.Futures {
+		return true
+	}
+	return false
+}
+
 func (s *Strategy) leverageOrOne() fixedpoint.Value {
 	if s.Leverage.Sign() <= 0 {
 		return fixedpoint.One
