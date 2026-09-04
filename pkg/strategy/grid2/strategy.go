@@ -137,6 +137,10 @@ type Strategy struct {
 	// AutoBollinger sets upper/lower from Bollinger bands at start (Hummingbot bollingrid-like).
 	AutoBollinger *AutoBollinger `json:"autoBollinger"`
 
+	// QuantumAllocator adapts Hummingbot quantum_grid_allocator (single-symbol):
+	// position-deviation intensity, buy/sell zone bias, optional BB/gridRange bounds.
+	QuantumAllocator *QuantumAllocator `json:"quantumAllocator"`
+
 	// KeepOrdersWhenShutdown option is used for keeping the grid orders when shutting down bbgo
 	KeepOrdersWhenShutdown bool `json:"keepOrdersWhenShutdown"`
 
@@ -227,6 +231,9 @@ type Strategy struct {
 	// takeProfitAnchor is the mid price when the grid was opened (for TakeProfitRatio).
 	takeProfitAnchor fixedpoint.Value
 
+	// quantumZoneState caches the last quantum allocation zone.
+	quantumZoneState QuantumZone
+
 	// this ensures that bbgo.Sync to lock the object
 	sync.Mutex
 }
@@ -236,7 +243,7 @@ func (s *Strategy) ID() string {
 }
 
 func (s *Strategy) Validate() error {
-	if s.AutoRange == nil && s.AutoBollinger == nil {
+	if s.AutoRange == nil && s.AutoBollinger == nil && !s.hasQuantumRange() {
 		if s.UpperPrice.IsZero() {
 			return errors.New("upperPrice can not be zero, you forgot to set?")
 		}
@@ -311,6 +318,11 @@ func (s *Strategy) Subscribe(session *bbgo.ExchangeSession) {
 		s.AutoBollinger.defaults()
 		session.Subscribe(types.KLineChannel, s.Symbol, types.SubscribeOptions{Interval: s.AutoBollinger.Interval})
 	}
+
+	if s.QuantumAllocator != nil && s.QuantumAllocator.DynamicGridRange {
+		s.QuantumAllocator.defaults()
+		session.Subscribe(types.KLineChannel, s.Symbol, types.SubscribeOptions{Interval: s.QuantumAllocator.BBInterval})
+	}
 }
 
 // InstanceID returns the instance identifier from the current grid configuration parameters
@@ -318,6 +330,8 @@ func (s *Strategy) InstanceID() string {
 	id := fmt.Sprintf("%s-%s-size-%d", ID, s.Symbol, s.GridNum)
 
 	switch {
+	case s.QuantumAllocator != nil && s.hasQuantumRange():
+		id += "-" + s.QuantumAllocator.String()
 	case s.AutoBollinger != nil:
 		id += "-autoBoll-" + s.AutoBollinger.String()
 	case s.AutoRange != nil:
@@ -1066,6 +1080,10 @@ func (s *Strategy) newOrderUpdateHandler(ctx context.Context, session *bbgo.Exch
 
 		s.handleOrderFilled(o)
 
+		if s.QuantumAllocator != nil {
+			s.applyQuantumAllocatorIntensity()
+		}
+
 		if s.MaxOpenOrders > 0 {
 			lastPrice, err := s.getLastTradePrice(ctx, session)
 			if err != nil {
@@ -1198,16 +1216,24 @@ func (s *Strategy) openGrid(ctx context.Context, session *bbgo.ExchangeSession) 
 		return nil
 	}
 
-	grid := s.newGrid()
-	s.grid = grid
-	s.logger.Info("OPENING GRID: ", s.grid.String())
-
 	lastPrice, err := s.getLastTradePrice(ctx, session)
 	if err != nil {
 		err2 := errors.Wrap(err, "unable to get the last trade price")
 		s.EmitGridError(err2)
 		return err2
 	}
+
+	if s.QuantumAllocator != nil {
+		if err := s.applyQuantumAllocatorRange(session, lastPrice); err != nil {
+			s.EmitGridError(err)
+			return err
+		}
+		s.applyQuantumAllocatorIntensity()
+	}
+
+	grid := s.newGrid()
+	s.grid = grid
+	s.logger.Info("OPENING GRID: ", s.grid.String())
 
 	if s.BaseGridNum > 0 {
 		sell1 := fixedpoint.Value(s.grid.Pins[len(s.grid.Pins)-1-s.BaseGridNum])
@@ -1318,6 +1344,9 @@ func (s *Strategy) openGrid(ctx context.Context, session *bbgo.ExchangeSession) 
 		return err
 	}
 
+	if s.QuantumAllocator != nil {
+		submitOrders = s.filterQuantumSideBias(submitOrders, lastPrice)
+	}
 	submitOrders = s.filterGridSubmitOrders(submitOrders, lastPrice)
 	if !s.TakeProfitRatio.IsZero() {
 		// Prefer live mid when inside the band; otherwise use grid midpoint so a
@@ -1746,6 +1775,17 @@ func (s *Strategy) Run(ctx context.Context, _ bbgo.OrderExecutor, session *bbgo.
 
 	if err := s.applyAutoBollinger(session); err != nil {
 		return err
+	}
+
+	if s.QuantumAllocator != nil {
+		s.QuantumAllocator.defaults()
+		// Prefer live last price for quantum range; fall back later in openGrid if needed.
+		if mid, err := s.getLastTradePrice(ctx, session); err == nil && !mid.IsZero() {
+			if err := s.applyQuantumAllocatorRange(session, mid); err != nil {
+				return err
+			}
+		}
+		s.applyQuantumAllocatorIntensity()
 	}
 
 	s.logger.Infof("market info: %+v", s.Market)

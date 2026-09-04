@@ -1,0 +1,56 @@
+---
+# Quantum allocator + dynamic Bollinger half-span (centers on open mid).
+# Expect fewer fills / larger unrealized if price trends out of the open band.
+#
+sessions:
+  binance:
+    exchange: binance
+    envVarPrefix: BINANCE
+    futures: true
+    delivery: true
+    symbolLeverage:
+      BNBUSD_PERP: 3
+
+backtest:
+  startTime: "2026-09-03"
+  endTime: "2026-09-05"
+  symbols: [BNBUSD_PERP]
+  sessions: [binance]
+  feeMode: native
+  accounts:
+    binance:
+      makerFeeRate: 0.02%
+      takerFeeRate: 0.05%
+      balances:
+        BNB: 1.0
+
+exchangeStrategies:
+  - on: binance
+    grid2:
+      symbol: BNBUSD_PERP
+      gridNumber: 8
+      quantity: 1
+      leverage: 3
+      compound: false
+      earnBase: true
+      feeRate: 0.020%
+      skipSpreadCheck: true
+      quantumAllocator:
+        targetPosition: 0
+        maxPositionAbs: 7
+        longOnlyThreshold: 0.2
+        shortOnlyThreshold: 0.2
+        baseGridValuePct: 0.08
+        maxGridValuePct: 0.15
+        maxDeviation: 0.05
+        baseMaxOpenOrders: 4
+        gridRange: 0.007
+        dynamicGridRange: true
+        tpSlRatio: 0.8
+        bbLength: 40
+        bbStd: 2.0
+        bbInterval: 15m
+      resetPositionWhenStart: true
+      clearOpenOrdersWhenStart: true
+      keepOrdersWhenShutdown: false
+      recoverOrdersWhenStart: false
