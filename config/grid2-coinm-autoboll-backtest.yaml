@@ -1,0 +1,51 @@
+---
+# Coin-M grid2 backtest: Bollinger auto range (Hummingbot bollingrid-like).
+# Requires enough prior delivery klines for the BB window.
+#
+#   bbgo backtest --config config/grid2-coinm-autoboll-backtest.yaml --sync --sync-from 2026-08-27 --force -v
+#
+sessions:
+  binance:
+    exchange: binance
+    envVarPrefix: BINANCE
+    futures: true
+    delivery: true
+    symbolLeverage:
+      BNBUSD_PERP: 3
+
+backtest:
+  startTime: "2026-09-03"
+  endTime: "2026-09-05"
+  symbols:
+    - BNBUSD_PERP
+  sessions:
+    - binance
+  feeMode: native
+  accounts:
+    binance:
+      makerFeeRate: 0.02%
+      takerFeeRate: 0.05%
+      balances:
+        BNB: 1.0
+
+exchangeStrategies:
+  - on: binance
+    grid2:
+      symbol: BNBUSD_PERP
+      gridNumber: 8
+      quantity: 1
+      leverage: 3
+      compound: false
+      earnBase: true
+      feeRate: 0.020%
+      skipSpreadCheck: true
+      maxOpenOrders: 4
+      activationBounds: 0.01
+      autoBollinger:
+        interval: 15m
+        window: 40
+        bandWidth: 2.0
+      resetPositionWhenStart: true
+      clearOpenOrdersWhenStart: true
+      keepOrdersWhenShutdown: false
+      recoverOrdersWhenStart: false

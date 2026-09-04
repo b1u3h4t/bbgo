@@ -1,0 +1,66 @@
+---
+# Coin-M grid2 backtest with Hummingbot-inspired controls:
+#   maxOpenOrders / activationBounds / maxOrdersPerBatch / takeProfitRatio / autoBollinger
+#
+# Live production bbgo.yaml is intentionally unchanged — enable these only after review.
+#
+#   bbgo backtest --config config/grid2-coinm-hb-style-backtest.yaml --force -v
+#
+sessions:
+  binance:
+    exchange: binance
+    envVarPrefix: BINANCE
+    futures: true
+    delivery: true
+    symbolLeverage:
+      BNBUSD_PERP: 3
+
+backtest:
+  startTime: "2026-09-03"
+  endTime: "2026-09-05"
+  symbols:
+    - BNBUSD_PERP
+  sessions:
+    - binance
+  feeMode: native
+  accounts:
+    binance:
+      makerFeeRate: 0.02%
+      takerFeeRate: 0.05%
+      balances:
+        BNB: 1.0
+
+exchangeStrategies:
+  - on: binance
+    grid2:
+      symbol: BNBUSD_PERP
+      # Fixed mid-724 band (also used when autoBollinger is commented out)
+      upperPrice: 729.00
+      lowerPrice: 719.00
+      gridNumber: 8
+      quantity: 1
+      leverage: 3
+      compound: false
+      earnBase: true
+      feeRate: 0.020%
+      skipSpreadCheck: false
+
+      # Hummingbot grid_strike-style: only keep nearest N within ±bounds of mid
+      maxOpenOrders: 4
+      activationBounds: 0.007   # 0.7% of mid ≈ ±5 USD around 724
+      maxOrdersPerBatch: 2
+      orderFrequency: 1s
+
+      # Close whole grid after +1.5% from open mid (~735 when opened near 724)
+      takeProfitRatio: 0.015
+
+      # Optional: uncomment to derive bounds from Bollinger instead of fixed prices
+      # autoBollinger:
+      #   interval: 15m
+      #   window: 40
+      #   bandWidth: 2.0
+
+      resetPositionWhenStart: true
+      clearOpenOrdersWhenStart: true
+      keepOrdersWhenShutdown: false
+      recoverOrdersWhenStart: false

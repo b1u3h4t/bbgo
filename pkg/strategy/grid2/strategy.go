@@ -115,6 +115,28 @@ type Strategy struct {
 	StopLossPrice   fixedpoint.Value `json:"stopLossPrice"`
 	TakeProfitPrice fixedpoint.Value `json:"takeProfitPrice"`
 
+	// TakeProfitRatio closes the whole grid when price moves this fraction from the open mid.
+	// e.g. 0.02 = +2% from open mid (Hummingbot-style barrier exit). 0 disables.
+	TakeProfitRatio fixedpoint.Value `json:"takeProfitRatio"`
+
+	// MaxOpenOrders keeps only N nearest orders to mid on the book (0 = unlimited).
+	// Inspired by Hummingbot grid_strike.max_open_orders.
+	MaxOpenOrders int `json:"maxOpenOrders"`
+
+	// ActivationBounds is a fraction of mid (e.g. 0.01 = 1%). Only place orders within mid±bounds.
+	// Inspired by Hummingbot activation_bounds. 0 disables.
+	ActivationBounds fixedpoint.Value `json:"activationBounds"`
+
+	// MaxOrdersPerBatch limits how many orders are submitted per batch when opening the grid.
+	// 0 = submit all at once. Inspired by Hummingbot max_orders_per_batch.
+	MaxOrdersPerBatch int `json:"maxOrdersPerBatch"`
+
+	// OrderFrequency is the pause between batches when MaxOrdersPerBatch > 0 (live only).
+	OrderFrequency types.Duration `json:"orderFrequency"`
+
+	// AutoBollinger sets upper/lower from Bollinger bands at start (Hummingbot bollingrid-like).
+	AutoBollinger *AutoBollinger `json:"autoBollinger"`
+
 	// KeepOrdersWhenShutdown option is used for keeping the grid orders when shutting down bbgo
 	KeepOrdersWhenShutdown bool `json:"keepOrdersWhenShutdown"`
 
@@ -202,6 +224,9 @@ type Strategy struct {
 
 	recoverC chan struct{}
 
+	// takeProfitAnchor is the mid price when the grid was opened (for TakeProfitRatio).
+	takeProfitAnchor fixedpoint.Value
+
 	// this ensures that bbgo.Sync to lock the object
 	sync.Mutex
 }
@@ -211,7 +236,7 @@ func (s *Strategy) ID() string {
 }
 
 func (s *Strategy) Validate() error {
-	if s.AutoRange == nil {
+	if s.AutoRange == nil && s.AutoBollinger == nil {
 		if s.UpperPrice.IsZero() {
 			return errors.New("upperPrice can not be zero, you forgot to set?")
 		}
@@ -229,7 +254,7 @@ func (s *Strategy) Validate() error {
 		return fmt.Errorf("gridNum can not be zero or one")
 	}
 
-	if !s.SkipSpreadCheck {
+	if !s.SkipSpreadCheck && !s.UpperPrice.IsZero() && !s.LowerPrice.IsZero() {
 		if err := s.checkSpread(); err != nil {
 			return errors.Wrapf(err, "spread is too small, please try to reduce your gridNum or increase the price range (upperPrice and lowerPrice)")
 		}
@@ -273,7 +298,7 @@ func (s *Strategy) getPrometheusLabels() prometheus.Labels {
 }
 
 func (s *Strategy) Subscribe(session *bbgo.ExchangeSession) {
-	if !s.TriggerPrice.IsZero() || !s.StopLossPrice.IsZero() || !s.TakeProfitPrice.IsZero() {
+	if !s.TriggerPrice.IsZero() || !s.StopLossPrice.IsZero() || !s.TakeProfitPrice.IsZero() || !s.TakeProfitRatio.IsZero() {
 		session.Subscribe(types.KLineChannel, s.Symbol, types.SubscribeOptions{Interval: types.Interval1m})
 	}
 
@@ -281,15 +306,23 @@ func (s *Strategy) Subscribe(session *bbgo.ExchangeSession) {
 		interval := s.AutoRange.Interval()
 		session.Subscribe(types.KLineChannel, s.Symbol, types.SubscribeOptions{Interval: interval})
 	}
+
+	if s.AutoBollinger != nil {
+		s.AutoBollinger.defaults()
+		session.Subscribe(types.KLineChannel, s.Symbol, types.SubscribeOptions{Interval: s.AutoBollinger.Interval})
+	}
 }
 
 // InstanceID returns the instance identifier from the current grid configuration parameters
 func (s *Strategy) InstanceID() string {
 	id := fmt.Sprintf("%s-%s-size-%d", ID, s.Symbol, s.GridNum)
 
-	if s.AutoRange != nil {
+	switch {
+	case s.AutoBollinger != nil:
+		id += "-autoBoll-" + s.AutoBollinger.String()
+	case s.AutoRange != nil:
 		id += "-autoRange-" + s.AutoRange.String()
-	} else {
+	default:
 		id += "-" + s.UpperPrice.String() + "-" + s.LowerPrice.String()
 	}
 
@@ -1033,6 +1066,14 @@ func (s *Strategy) newOrderUpdateHandler(ctx context.Context, session *bbgo.Exch
 
 		s.handleOrderFilled(o)
 
+		if s.MaxOpenOrders > 0 {
+			lastPrice, err := s.getLastTradePrice(ctx, session)
+			if err != nil {
+				lastPrice = o.Price
+			}
+			s.trimExcessOpenOrders(ctx, lastPrice)
+		}
+
 		// sync the profits to redis
 		bbgo.Sync(ctx, s)
 
@@ -1277,12 +1318,28 @@ func (s *Strategy) openGrid(ctx context.Context, session *bbgo.ExchangeSession) 
 		return err
 	}
 
+	submitOrders = s.filterGridSubmitOrders(submitOrders, lastPrice)
+	if !s.TakeProfitRatio.IsZero() {
+		// Prefer live mid when inside the band; otherwise use grid midpoint so a
+		// below-band open does not immediately trip a small takeProfitRatio.
+		if lastPrice.Compare(s.LowerPrice) >= 0 && lastPrice.Compare(s.UpperPrice) <= 0 {
+			s.takeProfitAnchor = lastPrice
+		} else {
+			s.takeProfitAnchor = s.LowerPrice.Add(s.UpperPrice).Div(fixedpoint.NewFromInt(2))
+		}
+		s.logger.Infof("takeProfitRatio %s anchored at %s (target %s)",
+			s.TakeProfitRatio.Percentage(),
+			s.takeProfitAnchor.String(),
+			s.takeProfitAnchor.Mul(fixedpoint.One.Add(s.TakeProfitRatio)).String(),
+		)
+	}
+
 	s.debugGridOrders(submitOrders, lastPrice)
 
 	writeCtx := s.getWriteContext(ctx)
 
 	s.lockWriteOrders()
-	createdOrders, err2 := s.orderExecutor.SubmitOrders(writeCtx, submitOrders...)
+	createdOrders, err2 := s.submitGridOrders(writeCtx, submitOrders)
 	s.unlockWriteOrders()
 	if err2 != nil {
 		s.EmitGridError(err2)
@@ -1687,6 +1744,10 @@ func (s *Strategy) Run(ctx context.Context, _ bbgo.OrderExecutor, session *bbgo.
 		s.logger.Infof("autoRange is enabled, using pivot high %f and pivot low %f", s.UpperPrice.Float64(), s.LowerPrice.Float64())
 	}
 
+	if err := s.applyAutoBollinger(session); err != nil {
+		return err
+	}
+
 	s.logger.Infof("market info: %+v", s.Market)
 
 	if s.ProfitSpread.Sign() > 0 {
@@ -1794,6 +1855,10 @@ func (s *Strategy) Run(ctx context.Context, _ bbgo.OrderExecutor, session *bbgo.
 
 	if !s.TakeProfitPrice.IsZero() {
 		session.MarketDataStream.OnKLineClosed(s.newTakeProfitHandler(ctx, session))
+	}
+
+	if !s.TakeProfitRatio.IsZero() {
+		session.MarketDataStream.OnKLineClosed(s.newTakeProfitRatioHandler(ctx, session))
 	}
 
 	// detect if there are previous grid orders on the order book
