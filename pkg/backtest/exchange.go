@@ -41,6 +41,7 @@ import (
 	"github.com/c9s/bbgo/pkg/cache"
 
 	"github.com/c9s/bbgo/pkg/bbgo"
+	"github.com/c9s/bbgo/pkg/fixedpoint"
 	"github.com/c9s/bbgo/pkg/service"
 	"github.com/c9s/bbgo/pkg/types"
 )
@@ -145,8 +146,21 @@ func (e *Exchange) _addMatchingBook(symbol string, market types.Market) {
 		closedOrders:         make(map[uint64]types.Order),
 		feeModeFunction:      getFeeModeFunction(e.config.FeeMode),
 		pessimisticMakerFill: e.config.GetAccount(e.sourceName.String()).PessimisticMakerFill,
+		Leverage:             fixedpoint.One,
 	}
 	e.matchingBooks[symbol] = matching
+}
+
+// SetSymbolLeverage sets matching leverage for a coin-m symbol (initial margin).
+func (e *Exchange) SetSymbolLeverage(symbol string, leverage int) {
+	if leverage <= 0 {
+		return
+	}
+	e.matchingBooksMutex.Lock()
+	defer e.matchingBooksMutex.Unlock()
+	if m, ok := e.matchingBooks[symbol]; ok {
+		m.Leverage = fixedpoint.NewFromInt(int64(leverage))
+	}
 }
 
 func (e *Exchange) NewStream() types.Stream {

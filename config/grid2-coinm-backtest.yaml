@@ -1,0 +1,49 @@
+---
+# Coin-M (delivery) grid2 backtest example.
+# Requires delivery klines synced into the backtest DB (or use unit regression tests).
+#
+#   bbgo backtest --config config/grid2-coinm-backtest.yaml --sync
+#
+persistence:
+  redis:
+    host: 127.0.0.1
+    port: 6379
+    db: 0
+
+sessions:
+  binance_cm:
+    exchange: binance
+    envVarPrefix: BINANCE
+    futures: true
+    delivery: true
+    symbolLeverage:
+      BNBUSD_PERP: 3
+
+backtest:
+  startTime: "2026-08-01"
+  endTime: "2026-09-01"
+  symbols:
+    - BNBUSD_PERP
+  sessions:
+    - binance_cm
+  feeMode: native
+  accounts:
+    binance_cm:
+      makerFeeRate: 0.02%
+      takerFeeRate: 0.05%
+      balances:
+        BNB: 1.0
+
+exchangeStrategies:
+  - on: binance_cm
+    grid2:
+      symbol: BNBUSD_PERP
+      upperPrice: 720.80
+      lowerPrice: 718.80
+      gridNumber: 4
+      quantity: 1
+      leverage: 3
+      compound: false
+      earnBase: true
+      feeRate: 0.020%
+      skipSpreadCheck: false

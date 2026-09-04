@@ -70,6 +70,9 @@ type SimplePriceMatching struct {
 
 	pessimisticMakerFill bool
 
+	// Leverage is used for coin-m initial margin. Zero/negative means 1x.
+	Leverage fixedpoint.Value
+
 	account *types.Account
 
 	tradeUpdateCallbacks   []func(trade types.Trade)
@@ -132,15 +135,21 @@ func (m *SimplePriceMatching) CancelOrder(o types.Order) (types.Order, error) {
 		return o, fmt.Errorf("cancel order failed, order %d not found: %+v", o.OrderID, o)
 	}
 
-	switch o.Side {
-	case types.SideTypeBuy:
-		if err := m.account.UnlockBalance(m.Market.QuoteCurrency, o.Price.Mul(o.Quantity)); err != nil {
+	if m.isCoinM() {
+		if err := m.unlockCoinMMargin(o.Quantity, o.Price); err != nil {
 			return o, err
 		}
+	} else {
+		switch o.Side {
+		case types.SideTypeBuy:
+			if err := m.account.UnlockBalance(m.Market.QuoteCurrency, o.Price.Mul(o.Quantity)); err != nil {
+				return o, err
+			}
 
-	case types.SideTypeSell:
-		if err := m.account.UnlockBalance(m.Market.BaseCurrency, o.Quantity); err != nil {
-			return o, err
+		case types.SideTypeSell:
+			if err := m.account.UnlockBalance(m.Market.BaseCurrency, o.Quantity); err != nil {
+				return o, err
+			}
 		}
 	}
 
@@ -183,20 +192,30 @@ func (m *SimplePriceMatching) PlaceOrder(o types.SubmitOrder) (*types.Order, *ty
 		return nil, nil, fmt.Errorf("order quantity %s is less than minQuantity %s, order: %+v", o.Quantity.String(), m.Market.MinQuantity.String(), o)
 	}
 
-	quoteQuantity := o.Quantity.Mul(price)
-	if quoteQuantity.Compare(m.Market.MinNotional) < 0 {
-		return nil, nil, fmt.Errorf("order amount %s is less than minNotional %s, order: %+v", quoteQuantity.String(), m.Market.MinNotional.String(), o)
-	}
-
-	switch o.Side {
-	case types.SideTypeBuy:
-		if err := m.account.LockBalance(m.Market.QuoteCurrency, quoteQuantity); err != nil {
+	if m.isCoinM() {
+		notional := m.coinMNotionalUSD(o.Quantity)
+		if notional.Compare(m.Market.MinNotional) < 0 {
+			return nil, nil, fmt.Errorf("order notional %s is less than minNotional %s, order: %+v", notional.String(), m.Market.MinNotional.String(), o)
+		}
+		if err := m.lockCoinMMargin(o.Quantity, price); err != nil {
 			return nil, nil, err
 		}
+	} else {
+		quoteQuantity := o.Quantity.Mul(price)
+		if quoteQuantity.Compare(m.Market.MinNotional) < 0 {
+			return nil, nil, fmt.Errorf("order amount %s is less than minNotional %s, order: %+v", quoteQuantity.String(), m.Market.MinNotional.String(), o)
+		}
 
-	case types.SideTypeSell:
-		if err := m.account.LockBalance(m.Market.BaseCurrency, o.Quantity); err != nil {
-			return nil, nil, err
+		switch o.Side {
+		case types.SideTypeBuy:
+			if err := m.account.LockBalance(m.Market.QuoteCurrency, quoteQuantity); err != nil {
+				return nil, nil, err
+			}
+
+		case types.SideTypeSell:
+			if err := m.account.LockBalance(m.Market.BaseCurrency, o.Quantity); err != nil {
+				return nil, nil, err
+			}
 		}
 	}
 
@@ -234,33 +253,56 @@ func (m *SimplePriceMatching) PlaceOrder(o types.SubmitOrder) (*types.Order, *ty
 
 		// emit trade before we publish order
 		trade := m.newTradeFromOrder(&order2, false, price)
-		m.executeTrade(trade)
 
-		// unlock the rest balances for limit taker
-		if order.Type == types.OrderTypeLimit {
+		// For coin-m limit takers, adjust locked margin to the fill price before release.
+		if m.isCoinM() && order.Type == types.OrderTypeLimit {
 			if order.AveragePrice.IsZero() {
 				return nil, nil, fmt.Errorf("the average price of the given limit taker order can not be zero")
 			}
+			locked := m.coinMInitialMargin(order.Quantity, order.Price)
+			needed := m.coinMInitialMargin(order.Quantity, order.AveragePrice)
+			diff := locked.Sub(needed)
+			if diff.Sign() > 0 {
+				if err := m.account.UnlockBalance(m.Market.BaseCurrency, diff); err != nil {
+					return nil, nil, err
+				}
+				m.EmitBalanceUpdate(m.account.Balances())
+			} else if diff.Sign() < 0 {
+				if err := m.account.LockBalance(m.Market.BaseCurrency, diff.Abs()); err != nil {
+					return nil, nil, err
+				}
+				m.EmitBalanceUpdate(m.account.Balances())
+			}
+			m.executeTrade(trade)
+		} else {
+			m.executeTrade(trade)
 
-			switch o.Side {
-			case types.SideTypeBuy:
-				// limit buy taker, the order price is higher than the current best ask price
-				// the executed price is lower than the given price, so we will use less quote currency to buy the base asset.
-				amount := order.Price.Sub(order.AveragePrice).Mul(order.Quantity)
-				if amount.Sign() > 0 {
-					if err := m.account.UnlockBalance(m.Market.QuoteCurrency, amount); err != nil {
-						return nil, nil, err
-					}
-					m.EmitBalanceUpdate(m.account.Balances())
+			// unlock the rest balances for limit taker (linear / spot)
+			if order.Type == types.OrderTypeLimit {
+				if order.AveragePrice.IsZero() {
+					return nil, nil, fmt.Errorf("the average price of the given limit taker order can not be zero")
 				}
 
-			case types.SideTypeSell:
-				// limit sell taker, the order price is lower than the current best bid price
-				// the executed price is higher than the given price, so we will get more quote currency back
-				amount := order.AveragePrice.Sub(order.Price).Mul(order.Quantity)
-				if amount.Sign() > 0 {
-					m.account.AddBalance(m.Market.QuoteCurrency, amount)
-					m.EmitBalanceUpdate(m.account.Balances())
+				switch o.Side {
+				case types.SideTypeBuy:
+					// limit buy taker, the order price is higher than the current best ask price
+					// the executed price is lower than the given price, so we will use less quote currency to buy the base asset.
+					amount := order.Price.Sub(order.AveragePrice).Mul(order.Quantity)
+					if amount.Sign() > 0 {
+						if err := m.account.UnlockBalance(m.Market.QuoteCurrency, amount); err != nil {
+							return nil, nil, err
+						}
+						m.EmitBalanceUpdate(m.account.Balances())
+					}
+
+				case types.SideTypeSell:
+					// limit sell taker, the order price is lower than the current best bid price
+					// the executed price is higher than the given price, so we will get more quote currency back
+					amount := order.AveragePrice.Sub(order.Price).Mul(order.Quantity)
+					if amount.Sign() > 0 {
+						m.account.AddBalance(m.Market.QuoteCurrency, amount)
+						m.EmitBalanceUpdate(m.account.Balances())
+					}
 				}
 			}
 		}
@@ -295,6 +337,15 @@ func (m *SimplePriceMatching) PlaceOrder(o types.SubmitOrder) (*types.Order, *ty
 }
 
 func (m *SimplePriceMatching) executeTrade(trade types.Trade) {
+	if m.isCoinM() {
+		if err := m.executeCoinMTrade(trade, trade.Price); err != nil {
+			panic(errors.Wrapf(err, "executeTrade coin-m exception, wanted to unlock more than the locked margin"))
+		}
+		m.EmitTradeUpdate(trade)
+		m.EmitBalanceUpdate(m.account.Balances())
+		return
+	}
+
 	var err error
 	// execute trade, update account balances
 	if trade.IsBuyer {
@@ -348,11 +399,15 @@ func (m *SimplePriceMatching) newTradeFromOrder(order *types.Order, isMaker bool
 	// BINANCE uses 0.1% for both maker and taker
 	// MAX uses 0.050% for maker and 0.15% for taker
 	var feeRate = m.getFeeRate(isMaker)
+	// Keep price*contracts for Position average-cost math (same as live delivery trades).
 	var quoteQuantity = order.Quantity.Mul(price)
 	var fee fixedpoint.Value
 	var feeCurrency string
 
-	if m.feeModeFunction != nil {
+	if m.isCoinM() {
+		fee = coinMFeeInBase(order.Quantity, price, m.Market.ContractValue, feeRate)
+		feeCurrency = m.Market.BaseCurrency
+	} else if m.feeModeFunction != nil {
 		fee, feeCurrency = m.feeModeFunction(order, &m.Market, feeRate)
 	} else {
 		fee, feeCurrency = feeModeFunctionQuote(order, &m.Market, feeRate)
@@ -376,6 +431,7 @@ func (m *SimplePriceMatching) newTradeFromOrder(order *types.Order, isMaker bool
 		Time:          types.Time(m.currentTime),
 		Fee:           fee,
 		FeeCurrency:   feeCurrency,
+		IsFutures:     m.isCoinM(),
 	}
 }
 
@@ -658,6 +714,11 @@ func (m *SimplePriceMatching) getOrder(orderID uint64) (types.Order, bool) {
 	}
 
 	return types.Order{}, false
+}
+
+// ProcessKLine drives the matching engine with one kline (used by tests and custom drivers).
+func (m *SimplePriceMatching) ProcessKLine(kline types.KLine) {
+	m.processKLine(kline)
 }
 
 func (m *SimplePriceMatching) processKLine(kline types.KLine) {

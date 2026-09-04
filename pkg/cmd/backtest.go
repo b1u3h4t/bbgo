@@ -214,14 +214,20 @@ var BacktestCmd = &cobra.Command{
 			}
 			sourceExchanges[exName] = publicExchange
 
-			// Set exchange to use futures
+			// Set exchange to use futures / coin-m delivery
 			if e, ok := userConfig.Sessions[exName.String()]; ok && e.Futures {
 				futuresExchange, ok := publicExchange.(types.FuturesExchange)
 				if !ok {
 					return fmt.Errorf("exchange %s does not support futures", publicExchange.Name())
 				}
 
-				futuresExchange.UseFutures()
+				if e.Delivery {
+					futuresExchange.UseDelivery()
+				} else if e.IsolatedFutures {
+					futuresExchange.UseIsolatedFutures(e.IsolatedFuturesSymbol)
+				} else {
+					futuresExchange.UseFutures()
+				}
 			}
 		}
 
@@ -301,6 +307,10 @@ var BacktestCmd = &cobra.Command{
 			if exchangeFromConfig != nil {
 				session.UseHeikinAshi = exchangeFromConfig.UseHeikinAshi
 				session.Futures = exchangeFromConfig.Futures
+				session.Delivery = exchangeFromConfig.Delivery
+				session.IsolatedFutures = exchangeFromConfig.IsolatedFutures
+				session.IsolatedFuturesSymbol = exchangeFromConfig.IsolatedFuturesSymbol
+				session.SymbolLeverage = exchangeFromConfig.SymbolLeverage
 			}
 		}
 
@@ -314,6 +324,11 @@ var BacktestCmd = &cobra.Command{
 			backtestEx := session.Exchange.(*backtest.Exchange)
 			backtestEx.MarketDataStream = session.MarketDataStream.(types.StandardStreamEmitter)
 			backtestEx.BindUserData(userDataStream)
+			if session.Delivery {
+				for symbol, leverage := range session.SymbolLeverage {
+					backtestEx.SetSymbolLeverage(symbol, leverage)
+				}
+			}
 			if err := backtestEx.Prepare(userConfig); err != nil {
 				log.WithError(err).Warn("failed to prepare backtest exchange")
 			}
