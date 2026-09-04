@@ -3,8 +3,8 @@
 # Session key must be the exchange name ("binance") for bbgo backtest CLI.
 #
 # Sync delivery klines then run:
-#   bbgo backtest --config config/grid2-coinm-backtest.yaml --sync --sync-from 2026-08-25 -v
-#   bbgo backtest --config config/grid2-coinm-backtest.yaml -v
+#   bbgo backtest --config config/grid2-coinm-backtest.yaml --sync --sync-from 2026-08-27 -v
+#   bbgo backtest --config config/grid2-coinm-backtest.yaml --force -v
 #
 sessions:
   binance:
@@ -34,9 +34,10 @@ exchangeStrategies:
   - on: binance
     grid2:
       symbol: BNBUSD_PERP
-      upperPrice: 720.80
-      lowerPrice: 718.80
-      gridNumber: 4
+      # Aug 28–Sep 1 spot range ~678–719; grid spans mid band
+      upperPrice: 710.00
+      lowerPrice: 690.00
+      gridNumber: 6
       quantity: 1
       leverage: 3
       compound: false

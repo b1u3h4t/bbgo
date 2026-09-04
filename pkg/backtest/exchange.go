@@ -425,7 +425,11 @@ func (e *Exchange) SubscribeMarketData(
 	}
 
 	if isFutures {
-		log.Infof("querying futures klines from database with exchange: %v symbols: %v and intervals: %v for back-testing", e.Name(), symbols, intervals)
+		kind := "futures"
+		if futuresExchange, ok := e.publicExchange.(types.FuturesExchange); ok && futuresExchange.GetFuturesSettings().IsDelivery {
+			kind = "delivery"
+		}
+		log.Infof("querying %s klines from database with exchange: %v symbols: %v and intervals: %v for back-testing", kind, e.Name(), symbols, intervals)
 	} else {
 		log.Infof("querying klines from database with exchange: %v symbols: %v and intervals: %v for back-testing", e.Name(), symbols, intervals)
 	}
