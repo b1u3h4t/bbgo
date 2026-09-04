@@ -56,19 +56,39 @@ func TestStrategy_coinMInitialMargin(t *testing.T) {
 func TestStrategy_calculateProfit_coinM(t *testing.T) {
 	s := newCoinMTestStrategy()
 	// buy 100000, sell 105000, qty 10, CV 100
-	// profit = 100 * 10 * (1/100000 - 1/105000) ≈ 0.000047619 BTC
-	profit := s.calculateProfit(types.Order{
+	profit := s.calculateCoinMRoundTripProfit(number(100000), number(105000), number(10), types.Order{
 		SubmitOrder: types.SubmitOrder{
 			Quantity: number(10),
 			Price:    number(105000),
 		},
-	}, number(100000), number(10))
+	})
 
 	assert.Equal(t, "BTC", profit.Currency)
 	expected := s.Market.ContractValue.Mul(number(10)).Mul(
 		fixedpoint.One.Div(number(100000)).Sub(fixedpoint.One.Div(number(105000))),
 	)
 	assert.Equal(t, expected.String(), profit.Profit.String())
+}
+
+func TestStrategy_coinMPositionBeforeFill(t *testing.T) {
+	s := newCoinMTestStrategy()
+	s.Position = types.NewPositionFromMarket(s.Market)
+	s.Position.Base = number(-2) // after sells already applied
+
+	before, ok := s.coinMPositionBeforeFill(types.Order{
+		SubmitOrder: types.SubmitOrder{Side: types.SideTypeSell, Quantity: number(1)},
+	}, number(1))
+	assert.True(t, ok)
+	assert.Equal(t, number(-1).String(), before.String()) // was already short — opening more, not closing long
+	assert.False(t, before.Sign() > 0)
+
+	s.Position.Base = number(-1)
+	before, ok = s.coinMPositionBeforeFill(types.Order{
+		SubmitOrder: types.SubmitOrder{Side: types.SideTypeBuy, Quantity: number(1)},
+	}, number(1))
+	assert.True(t, ok)
+	assert.Equal(t, number(-2).String(), before.String()) // was short — buy closes short
+	assert.True(t, before.Sign() < 0)
 }
 
 func TestStrategy_generateCoinMGridOrders(t *testing.T) {

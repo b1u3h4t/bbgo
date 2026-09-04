@@ -324,20 +324,11 @@ func (s *Strategy) checkSpread() error {
 
 func (s *Strategy) calculateProfit(o types.Order, buyPrice, buyQuantity fixedpoint.Value) *GridProfit {
 	if s.isCoinM() {
-		// Inverse PnL in base: contractValue * qty * (1/buyPrice - 1/sellPrice)
 		qty := o.Quantity
 		if buyQuantity.Sign() > 0 {
 			qty = fixedpoint.Min(qty, buyQuantity)
 		}
-		profitQuantity := s.Market.ContractValue.Mul(qty).Mul(
-			fixedpoint.One.Div(buyPrice).Sub(fixedpoint.One.Div(o.Price)),
-		)
-		return &GridProfit{
-			Currency: s.Market.BaseCurrency,
-			Profit:   profitQuantity,
-			Time:     o.UpdateTime.Time(),
-			Order:    o,
-		}
+		return s.calculateCoinMRoundTripProfit(buyPrice, o.Price, qty, o)
 	}
 
 	if s.EarnBase {
@@ -362,6 +353,43 @@ func (s *Strategy) calculateProfit(o types.Order, buyPrice, buyQuantity fixedpoi
 		Order:    o,
 	}
 	return profit
+}
+
+// calculateCoinMRoundTripProfit computes realized inverse PnL in base:
+//
+//	contractValue * qty * (1/buyPrice - 1/sellPrice)
+func (s *Strategy) calculateCoinMRoundTripProfit(
+	buyPrice, sellPrice, qty fixedpoint.Value, o types.Order,
+) *GridProfit {
+	if buyPrice.IsZero() || sellPrice.IsZero() || qty.IsZero() || s.Market.ContractValue.IsZero() {
+		return nil
+	}
+	profitQuantity := s.Market.ContractValue.Mul(qty).Mul(
+		fixedpoint.One.Div(buyPrice).Sub(fixedpoint.One.Div(sellPrice)),
+	)
+	return &GridProfit{
+		Currency: s.Market.BaseCurrency,
+		Profit:   profitQuantity,
+		Time:     o.UpdateTime.Time(),
+		Order:    o,
+	}
+}
+
+// coinMPositionBeforeFill reconstructs position base before this fill was applied
+// (trade collector updates Position before ActiveOrderBook OnFilled).
+func (s *Strategy) coinMPositionBeforeFill(o types.Order, executedQuantity fixedpoint.Value) (fixedpoint.Value, bool) {
+	if s.Position == nil {
+		return fixedpoint.Zero, false
+	}
+	base := s.Position.GetBase()
+	switch o.Side {
+	case types.SideTypeSell:
+		return base.Add(executedQuantity), true
+	case types.SideTypeBuy:
+		return base.Sub(executedQuantity), true
+	default:
+		return fixedpoint.Zero, false
+	}
 }
 
 func (s *Strategy) verifyOrderTrades(o types.Order, trades []types.Trade) bool {
@@ -508,6 +536,11 @@ func (s *Strategy) processFilledOrder(o types.Order) {
 			if s.QuantityOrAmount.Quantity.Sign() > 0 {
 				newQuantity = fixedpoint.Max(s.QuantityOrAmount.Quantity, o.Quantity)
 			}
+			// Only realize PnL when this sell closes/reduces a long. Opening/increasing a short
+			// is not realized profit (reverse buy has not filled yet).
+			if before, ok := s.coinMPositionBeforeFill(o, executedQuantity); ok && before.Sign() > 0 {
+				profit = s.calculateCoinMRoundTripProfit(newPrice, o.Price, newQuantity, o)
+			}
 		} else if s.Compound || s.EarnBase {
 			// use the profit to buy more inventory in the grid
 			// if it's not using the platform fee currency, reduce the quote quantity for the buy order
@@ -535,8 +568,10 @@ func (s *Strategy) processFilledOrder(o types.Order) {
 			newQuantity = fixedpoint.Max(newQuantity, o.Quantity)
 		}
 
-		// TODO: need to consider sell order fee for the profit calculation
-		profit = s.calculateProfit(o, newPrice, newQuantity)
+		if !coinM {
+			// TODO: need to consider sell order fee for the profit calculation
+			profit = s.calculateProfit(o, newPrice, newQuantity)
+		}
 
 	case types.SideTypeBuy:
 		newSide = types.SideTypeSell
@@ -554,6 +589,11 @@ func (s *Strategy) processFilledOrder(o types.Order) {
 				newQuantity = s.QuantityOrAmount.Quantity
 			}
 			newQuantity = newQuantity.Round(s.Market.VolumePrecision, fixedpoint.Down)
+			// Realize PnL only when this buy closes/reduces a short (round-trip complete).
+			if before, ok := s.coinMPositionBeforeFill(o, executedQuantity); ok && before.Sign() < 0 {
+				// Twin sell pin (newPrice) approximates the short entry / closing sell price.
+				profit = s.calculateCoinMRoundTripProfit(o.Price, newPrice, newQuantity, o)
+			}
 		} else {
 			if feeCurrency == s.Market.BaseCurrency && fee.Sign() > 0 {
 				newQuantity = newQuantity.Sub(fee)
@@ -604,7 +644,11 @@ func (s *Strategy) processFilledOrder(o types.Order) {
 	// we calculate profit only when the order is placed successfully
 	if profit != nil {
 		s.GridProfitStats.AddProfit(profit)
-		s.logger.Infof("GENERATED GRID PROFIT: %+v; TOTAL GRID PROFIT BECOMES: %f", profit, s.GridProfitStats.TotalQuoteProfit.Float64())
+		total := s.GridProfitStats.TotalQuoteProfit
+		if profit.Currency == s.Market.BaseCurrency {
+			total = s.GridProfitStats.TotalBaseProfit
+		}
+		s.logger.Infof("GENERATED GRID PROFIT: %+v; TOTAL GRID PROFIT BECOMES: %f %s", profit, total.Float64(), profit.Currency)
 		s.EmitGridProfit(s.GridProfitStats, profit)
 	}
 }
