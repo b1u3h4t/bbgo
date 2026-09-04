@@ -167,7 +167,13 @@ func (s *Strategy) recover(ctx context.Context) error {
 	defer s.mu.Unlock()
 
 	activeOrdersInTwinOrderBook, err := buildTwinOrderBook(pins, activeOrders)
+	if err != nil {
+		return errors.Wrapf(err, "[Recover] failed to build twin orderbook from active orders")
+	}
 	openOrdersInTwinOrderBook, err := buildTwinOrderBook(pins, openOrders)
+	if err != nil {
+		return errors.Wrapf(err, "[Recover] failed to build twin orderbook from open orders")
+	}
 
 	s.logger.Infof("[Recover] active orders' twin orderbook\n%s", activeOrdersInTwinOrderBook.String())
 	s.logger.Infof("[Recover] open orders in twin orderbook\n%s", openOrdersInTwinOrderBook.String())
@@ -343,7 +349,11 @@ func buildTwinOrderBook(pins []grid2types.Pin, orders []types.Order) (*TwinOrder
 
 	for _, order := range orders {
 		if err := book.AddOrder(order, true); err != nil {
-			return nil, err
+			// Skip orders that do not map onto the current grid pins (e.g. leftover
+			// duplicates from older runs, or unexpected algo-order history entries).
+			// Failing the whole recover on one bad order previously caused panic.
+			log.WithError(err).Warnf("[Recover] skip order #%d @ %s when building twin orderbook", order.OrderID, order.Price)
+			continue
 		}
 	}
 

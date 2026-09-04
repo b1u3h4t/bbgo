@@ -682,7 +682,9 @@ func (e *Exchange) queryFuturesOpenOrders(ctx context.Context, symbol string) (o
 	}
 	orders = append(orders, globalOrders...)
 
-	reqAlgo := e.futuresClient.NewListAllAlgoOrdersService().Symbol(symbol)
+	// Only list OPEN algo orders. ListAllAlgoOrders includes historical entries
+	// that can break recover twin-orderbook matching (empty/invalid prices).
+	reqAlgo := e.futuresClient.NewListOpenAlgoOrdersService().Symbol(symbol)
 	binanceAlgoOrders, err := reqAlgo.Do(ctx)
 	if err != nil {
 		return orders, err
