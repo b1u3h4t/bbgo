@@ -234,3 +234,61 @@ func TestStrategy_checkRequiredInvestmentByQuantityCoinM(t *testing.T) {
 	_, err = s.checkRequiredInvestmentByQuantityCoinM(number(1.0), number(10), number(100000), pins)
 	assert.NoError(t, err)
 }
+
+func TestStrategy_makerOnly_orderTypeAndTIF(t *testing.T) {
+	spot := newTestStrategy()
+	ot, tif := spot.gridLimitOrderTypeAndTIF()
+	assert.Equal(t, types.OrderTypeLimit, ot)
+	assert.Equal(t, types.TimeInForceGTC, tif)
+
+	spot.MakerOnly = true
+	ot, tif = spot.gridLimitOrderTypeAndTIF()
+	assert.Equal(t, types.OrderTypeLimitMaker, ot)
+	assert.Equal(t, types.TimeInForceGTC, tif)
+
+	um := newUSDTMTestStrategy()
+	um.MakerOnly = true
+	ot, tif = um.gridLimitOrderTypeAndTIF()
+	assert.Equal(t, types.OrderTypeLimit, ot)
+	assert.Equal(t, types.TimeInForceGTX, tif)
+
+	cm := newCoinMTestStrategy()
+	cm.MakerOnly = true
+	ot, tif = cm.gridLimitOrderTypeAndTIF()
+	assert.Equal(t, types.OrderTypeLimit, ot)
+	assert.Equal(t, types.TimeInForceGTX, tif)
+}
+
+func TestStrategy_generateGridOrders_makerOnly_USDTM(t *testing.T) {
+	s := newUSDTMTestStrategy()
+	s.MakerOnly = true
+	s.grid = grid2types.NewGrid(s.LowerPrice, s.UpperPrice, fixedpoint.NewFromInt(s.GridNum), s.Market.TickSize)
+	s.grid.CalculateArithmeticPins()
+
+	orders, err := s.generateGridOrders(number(100_000), number(0), number(86))
+	assert.NoError(t, err)
+	assert.NotEmpty(t, orders)
+	for _, o := range orders {
+		assert.Equal(t, types.OrderTypeLimit, o.Type)
+		assert.Equal(t, types.TimeInForceGTX, o.TimeInForce, "futures makerOnly must use GTX")
+	}
+}
+
+func TestStrategy_generateGridOrders_makerOnly_spot(t *testing.T) {
+	s := newTestStrategy("BTCUSDT")
+	s.MakerOnly = true
+	s.UpperPrice = number(15_000.0)
+	s.LowerPrice = number(10_000.0)
+	s.GridNum = 5
+	s.QuantityOrAmount.Quantity = number(0.1)
+	s.grid = grid2types.NewGrid(s.LowerPrice, s.UpperPrice, fixedpoint.NewFromInt(s.GridNum), s.Market.TickSize)
+	s.grid.CalculateArithmeticPins()
+
+	orders, err := s.generateGridOrders(number(100_000), number(1.0), number(13_000.0))
+	assert.NoError(t, err)
+	assert.NotEmpty(t, orders)
+	for _, o := range orders {
+		assert.Equal(t, types.OrderTypeLimitMaker, o.Type)
+		assert.Equal(t, types.TimeInForceGTC, o.TimeInForce)
+	}
+}

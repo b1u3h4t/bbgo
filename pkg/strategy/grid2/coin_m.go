@@ -35,6 +35,40 @@ func (s *Strategy) isUSDTMFutures() bool {
 	return false
 }
 
+// isFutures reports whether the grid runs on USDT-M or Coin-M futures.
+func (s *Strategy) isFutures() bool {
+	return s.isUSDTMFutures() || s.isCoinM()
+}
+
+// gridLimitOrderTypeAndTIF returns order type / TIF for grid limit orders.
+// With MakerOnly: spot uses LIMIT_MAKER; Binance futures use LIMIT + GTX (post-only).
+func (s *Strategy) gridLimitOrderTypeAndTIF() (types.OrderType, types.TimeInForce) {
+	if !s.MakerOnly {
+		return types.OrderTypeLimit, types.TimeInForceGTC
+	}
+	if s.isFutures() {
+		return types.OrderTypeLimit, types.TimeInForceGTX
+	}
+	return types.OrderTypeLimitMaker, types.TimeInForceGTC
+}
+
+// newGridLimitOrder builds a tagged grid limit order (optionally post-only).
+func (s *Strategy) newGridLimitOrder(side types.SideType, price, quantity fixedpoint.Value) types.SubmitOrder {
+	orderType, tif := s.gridLimitOrderTypeAndTIF()
+	return types.SubmitOrder{
+		Symbol:        s.Symbol,
+		Market:        s.Market,
+		Type:          orderType,
+		Side:          side,
+		Price:         price,
+		Quantity:      quantity,
+		TimeInForce:   tif,
+		Tag:           orderTag,
+		GroupID:       s.OrderGroupID,
+		ClientOrderID: s.newClientOrderID(),
+	}
+}
+
 func (s *Strategy) leverageOrOne() fixedpoint.Value {
 	if s.Leverage.Sign() <= 0 {
 		return fixedpoint.One
@@ -165,18 +199,7 @@ func (s *Strategy) generateCoinMGridOrders(totalBase, lastPrice fixedpoint.Value
 
 			margin := s.coinMInitialMargin(quantity, sellPrice)
 			if usedMargin.Add(margin).Compare(totalBase) <= 0 {
-				submitOrders = append(submitOrders, types.SubmitOrder{
-					Symbol:        s.Symbol,
-					Type:          types.OrderTypeLimit,
-					Side:          types.SideTypeSell,
-					Price:         sellPrice,
-					Quantity:      quantity,
-					Market:        s.Market,
-					TimeInForce:   types.TimeInForceGTC,
-					Tag:           orderTag,
-					GroupID:       s.OrderGroupID,
-					ClientOrderID: s.newClientOrderID(),
-				})
+				submitOrders = append(submitOrders, s.newGridLimitOrder(types.SideTypeSell, sellPrice, quantity))
 				usedMargin = usedMargin.Add(margin)
 				continue
 			}
@@ -190,18 +213,7 @@ func (s *Strategy) generateCoinMGridOrders(totalBase, lastPrice fixedpoint.Value
 					usedMargin.Float64(), margin.Float64(), totalBase.Float64(), s.Market.BaseCurrency,
 				)
 			}
-			submitOrders = append(submitOrders, types.SubmitOrder{
-				Symbol:        s.Symbol,
-				Type:          types.OrderTypeLimit,
-				Side:          types.SideTypeBuy,
-				Price:         nextPrice,
-				Quantity:      quantity,
-				Market:        s.Market,
-				TimeInForce:   types.TimeInForceGTC,
-				Tag:           orderTag,
-				GroupID:       s.OrderGroupID,
-				ClientOrderID: s.newClientOrderID(),
-			})
+			submitOrders = append(submitOrders, s.newGridLimitOrder(types.SideTypeBuy, nextPrice, quantity))
 			usedMargin = usedMargin.Add(margin)
 			continue
 		}
@@ -221,18 +233,7 @@ func (s *Strategy) generateCoinMGridOrders(totalBase, lastPrice fixedpoint.Value
 			)
 		}
 
-		submitOrders = append(submitOrders, types.SubmitOrder{
-			Symbol:        s.Symbol,
-			Type:          types.OrderTypeLimit,
-			Side:          types.SideTypeBuy,
-			Price:         price,
-			Quantity:      quantity,
-			Market:        s.Market,
-			TimeInForce:   types.TimeInForceGTC,
-			Tag:           orderTag,
-			GroupID:       s.OrderGroupID,
-			ClientOrderID: s.newClientOrderID(),
-		})
+		submitOrders = append(submitOrders, s.newGridLimitOrder(types.SideTypeBuy, price, quantity))
 		usedMargin = usedMargin.Add(margin)
 	}
 

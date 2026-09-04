@@ -193,6 +193,10 @@ type Strategy struct {
 	// Debug enables the debug mode
 	Debug bool `json:"debug"`
 
+	// MakerOnly forces post-only grid orders so fills are maker.
+	// Spot/margin: LIMIT_MAKER. Binance USDT-M / Coin-M: LIMIT with timeInForce=GTX.
+	MakerOnly bool `json:"makerOnly"`
+
 	GridProfitStats *GridProfitStats `persistence:"grid_profit_stats"`
 	Position        *types.Position  `persistence:"position"`
 	PersistenceTTL  types.Duration   `json:"persistenceTTL"`
@@ -689,18 +693,7 @@ func (s *Strategy) processFilledOrder(o types.Order) {
 		s.logger.Infof("new quantity %s @ price %s is less than min base quantity %s, please check it. it may due to trading fee or the min base quantity setting changes", newQuantity.String(), newPrice.String(), s.Market.MinQuantity.String())
 	}
 
-	orderForm := types.SubmitOrder{
-		Symbol:        s.Symbol,
-		Market:        s.Market,
-		Type:          types.OrderTypeLimit,
-		Price:         newPrice,
-		Side:          newSide,
-		TimeInForce:   types.TimeInForceGTC,
-		Quantity:      newQuantity,
-		Tag:           orderTag,
-		GroupID:       s.OrderGroupID,
-		ClientOrderID: s.newClientOrderID(),
-	}
+	orderForm := s.newGridLimitOrder(newSide, newPrice, newQuantity)
 
 	s.logger.Infof("SUBMIT GRID REVERSE ORDER: %s", orderForm.String())
 
@@ -1535,18 +1528,7 @@ func (s *Strategy) generateGridOrders(totalQuote, totalBase, lastPrice fixedpoin
 			}
 
 			if usedBase.Add(quantity).Compare(totalBase) <= 0 {
-				submitOrders = append(submitOrders, types.SubmitOrder{
-					Symbol:        s.Symbol,
-					Type:          types.OrderTypeLimit,
-					Side:          types.SideTypeSell,
-					Price:         sellPrice,
-					Quantity:      quantity,
-					Market:        s.Market,
-					TimeInForce:   types.TimeInForceGTC,
-					Tag:           orderTag,
-					GroupID:       s.OrderGroupID,
-					ClientOrderID: s.newClientOrderID(),
-				})
+				submitOrders = append(submitOrders, s.newGridLimitOrder(types.SideTypeSell, sellPrice, quantity))
 				usedBase = usedBase.Add(quantity)
 			} else if s.isUSDTMFutures() {
 				// USDT-M futures: open short with quote margin; never convert to a
@@ -1563,35 +1545,13 @@ func (s *Strategy) generateGridOrders(totalQuote, totalBase, lastPrice fixedpoin
 						totalQuote.Float64(), s.Market.QuoteCurrency, sellPrice.String(),
 					)
 				}
-				submitOrders = append(submitOrders, types.SubmitOrder{
-					Symbol:        s.Symbol,
-					Type:          types.OrderTypeLimit,
-					Side:          types.SideTypeSell,
-					Price:         sellPrice,
-					Quantity:      quantity,
-					Market:        s.Market,
-					TimeInForce:   types.TimeInForceGTC,
-					Tag:           orderTag,
-					GroupID:       s.OrderGroupID,
-					ClientOrderID: s.newClientOrderID(),
-				})
+				submitOrders = append(submitOrders, s.newGridLimitOrder(types.SideTypeSell, sellPrice, quantity))
 				usedQuote = usedQuote.Add(roundUpQuoteQuantity)
 			} else {
 				// Spot: if we don't have enough base asset, place a buy at the next price.
 				nextPin := pins[i-1]
 				nextPrice := fixedpoint.Value(nextPin)
-				submitOrders = append(submitOrders, types.SubmitOrder{
-					Symbol:        s.Symbol,
-					Type:          types.OrderTypeLimit,
-					Side:          types.SideTypeBuy,
-					Price:         nextPrice,
-					Quantity:      quantity,
-					Market:        s.Market,
-					TimeInForce:   types.TimeInForceGTC,
-					Tag:           orderTag,
-					GroupID:       s.OrderGroupID,
-					ClientOrderID: s.newClientOrderID(),
-				})
+				submitOrders = append(submitOrders, s.newGridLimitOrder(types.SideTypeBuy, nextPrice, quantity))
 				quoteQuantity := quantity.Mul(nextPrice)
 
 				// because the precision issue, we need to round up quote quantity and add it into used quote
@@ -1628,18 +1588,7 @@ func (s *Strategy) generateGridOrders(totalQuote, totalBase, lastPrice fixedpoin
 				}
 			}
 
-			submitOrders = append(submitOrders, types.SubmitOrder{
-				Symbol:        s.Symbol,
-				Type:          types.OrderTypeLimit,
-				Side:          types.SideTypeBuy,
-				Price:         price,
-				Quantity:      quantity,
-				Market:        s.Market,
-				TimeInForce:   types.TimeInForceGTC,
-				Tag:           orderTag,
-				GroupID:       s.OrderGroupID,
-				ClientOrderID: s.newClientOrderID(),
-			})
+			submitOrders = append(submitOrders, s.newGridLimitOrder(types.SideTypeBuy, price, quantity))
 			usedQuote = usedQuote.Add(roundUpQuoteQuantity)
 		}
 	}

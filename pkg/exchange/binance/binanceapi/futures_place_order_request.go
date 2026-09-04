@@ -28,6 +28,7 @@ const (
 	TimeInForceTypeIOC TimeInForceType = "IOC" // Immediate or Cancel
 	TimeInForceTypeFOK TimeInForceType = "FOK" // Fill or Kill
 	TimeInForceTypeGTD TimeInForceType = "GTD" // Good Till Date
+	TimeInForceTypeGTX TimeInForceType = "GTX" // Good Till Crossing (Post Only)
 )
 
 type PriceMatchType string

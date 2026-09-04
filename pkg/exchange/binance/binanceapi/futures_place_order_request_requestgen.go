@@ -211,7 +211,7 @@ func (f *FuturesPlaceOrderRequest) GetParameters() (map[string]interface{}, erro
 
 		// TEMPLATE check-valid-values
 		switch timeInForce {
-		case TimeInForceTypeGTC, TimeInForceTypeIOC, TimeInForceTypeFOK, TimeInForceTypeGTD:
+		case TimeInForceTypeGTC, TimeInForceTypeIOC, TimeInForceTypeFOK, TimeInForceTypeGTD, TimeInForceTypeGTX:
 			params["timeInForce"] = timeInForce
 
 		default:

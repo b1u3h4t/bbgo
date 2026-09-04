@@ -37,6 +37,7 @@ var (
 	TimeInForceIOC TimeInForce = "IOC"
 	TimeInForceFOK TimeInForce = "FOK"
 	TimeInForceGTT TimeInForce = "GTT" // for coinbase exchange api
+	TimeInForceGTX TimeInForce = "GTX" // Good Till Crossing / post-only (Binance futures)
 )
 
 // MarginOrderSideEffectType define side effect type for orders
