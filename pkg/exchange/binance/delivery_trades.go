@@ -109,7 +109,9 @@ func toGlobalDeliveryAccountTrade(t deliveryAccountTrade, isIsolated bool) (*typ
 		return nil, errors.Wrapf(err, "quantity parse error: %v", t.Quantity)
 	}
 
-	// Coin-M: qty is contracts; QuoteQuantity keeps USD notional (price * contracts).
+	// Coin-M: qty is contracts. QuoteQuantity uses price*contracts so Position
+	// average-cost math stays linear (avg = sum(pq)/sum(q)). True USD notional
+	// is contracts * ContractValue — use Position.DisplayNotional() for UI.
 	quoteQuantity := price.Mul(quantity)
 
 	fee, err := fixedpoint.NewFromString(t.Commission)

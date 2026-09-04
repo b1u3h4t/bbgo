@@ -419,6 +419,31 @@ func TestPosition_GetBaseAndAverageCost(t *testing.T) {
 	assert.Equal(t, pos.AverageCost, avgCost)
 }
 
+func TestPosition_DisplayNotional(t *testing.T) {
+	t.Run("coin-m uses contracts times contract value", func(t *testing.T) {
+		pos := Position{
+			Base:  fixedpoint.NewFromInt(-2),
+			Quote: fixedpoint.NewFromFloat(1440.93), // linear-style pseudo quote
+			Market: Market{
+				ContractValue: fixedpoint.NewFromInt(10),
+				QuoteCurrency: "USD",
+			},
+		}
+		assert.Equal(t, 20.0, pos.DisplayNotional().Float64())
+	})
+
+	t.Run("linear uses accumulated quote", func(t *testing.T) {
+		pos := Position{
+			Base:  fixedpoint.NewFromFloat(0.01),
+			Quote: fixedpoint.NewFromFloat(720.46),
+			Market: Market{
+				QuoteCurrency: "USDT",
+			},
+		}
+		assert.Equal(t, 720.46, pos.DisplayNotional().Float64())
+	})
+}
+
 func TestPosition_ExcludeFeeFromCostMode(t *testing.T) {
 	// unit tests for the PnL calculation when the PnLMode is set to ExcludeFeeFromCost
 	newPosition := func() *Position {

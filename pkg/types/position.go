@@ -465,13 +465,23 @@ func (p *Position) Side() SideType {
 	return SideTypeNone
 }
 
+// DisplayNotional returns the USD/quote notional for UI.
+// For coin-m (inverse) markets with ContractValue, notional = |contracts| * ContractValue.
+// Otherwise falls back to the accumulated Quote (linear markets).
+func (p *Position) DisplayNotional() fixedpoint.Value {
+	if p.Market.ContractValue.Sign() > 0 {
+		return p.Base.Abs().Mul(p.Market.ContractValue)
+	}
+	return p.Quote.Abs()
+}
+
 func (p *Position) SlackAttachment() slack.Attachment {
 	p.Lock()
 	defer p.Unlock()
 
 	averageCost := p.AverageCost
 	base := p.Base
-	quote := p.Quote
+	notional := p.DisplayNotional()
 
 	var posType = p.Type()
 	var color = ""
@@ -488,7 +498,7 @@ func (p *Position) SlackAttachment() slack.Attachment {
 	title := templateutil.Render(string(posType)+` Position {{ .Symbol }} `, p) + " @ " + p.Market.FormatPrice(averageCost) + " " + p.QuoteCurrency
 
 	desc := p.Market.FormatQuantity(base) + " @ " + p.Market.FormatPrice(averageCost) + " " + p.QuoteCurrency
-	desc += " (" + quote.String() + " " + p.QuoteCurrency + ")"
+	desc += " (" + notional.String() + " " + p.QuoteCurrency + ")"
 
 	fields := []slack.AttachmentField{
 		{Title: p.BaseCurrency + " / Average Cost", Value: desc, Short: false},
@@ -534,12 +544,13 @@ func (p *Position) SlackAttachment() slack.Attachment {
 
 func (p *Position) PlainText() (msg string) {
 	posType := p.Type()
-	msg = fmt.Sprintf("%s Position %s: average cost = %v, base = %v, quote = %v, opened at %s",
+	msg = fmt.Sprintf("%s Position %s: average cost = %v, base = %v, notional = %v %s, opened at %s",
 		posType,
 		p.Symbol,
 		p.AverageCost,
 		p.Base,
-		p.Quote,
+		p.DisplayNotional(),
+		p.QuoteCurrency,
 		p.OpenedAt,
 	)
 

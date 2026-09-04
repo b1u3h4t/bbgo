@@ -32,7 +32,7 @@ func TestToGlobalDeliveryAccountTrade(t *testing.T) {
 	assert.Equal(t, "BTC", trade.FeeCurrency)
 	assert.Equal(t, 0.0001, trade.Fee.Float64())
 	assert.Equal(t, 10.0, trade.Quantity.Float64())
-	// QuoteQuantity keeps USD notional = price * contracts
+	// QuoteQuantity is price*contracts for linear avg-cost math (not contract USD notional).
 	assert.Equal(t, 1_000_000.0, trade.QuoteQuantity.Float64())
 	assert.Equal(t, fixedpoint.NewFromFloat(100000), trade.Price)
 }
