@@ -55,11 +55,19 @@ func (s *BacktestService) SyncKLineByInterval(
 		symbol = isolatedSymbol
 	}
 
-	if isFutures {
-		log.Infof("synchronizing %s futures klines with interval %s: %s <=> %s", exchange.Name(), interval, startTime, endTime)
-	} else {
-		log.Infof("synchronizing %s klines with interval %s: %s <=> %s", exchange.Name(), interval, startTime, endTime)
+	tableKind := "spot"
+	if futuresExchange, ok := exchange.(types.FuturesExchange); ok {
+		settings := futuresExchange.GetFuturesSettings()
+		if settings.IsDelivery {
+			tableKind = "delivery"
+		} else if settings.IsFutures || isFutures {
+			tableKind = "futures"
+		}
 	}
+
+	log.Infof("synchronizing %s %s klines (%s) with interval %s: %s <=> %s",
+		exchange.Name(), tableKind, targetKlineTable(exchange), interval, startTime, endTime)
+
 
 	if s.DB.DriverName() == "sqlite3" {
 		_, _ = s.DB.Exec("PRAGMA journal_mode = WAL")
@@ -342,14 +350,17 @@ func (s *BacktestService) scanRows(rows *sqlx.Rows) (klines []types.KLine, err e
 }
 
 func targetKlineTable(exchange types.Exchange) string {
-	_, isFutures, _, _ := exchange2.GetSessionAttributes(exchange)
-
 	tableName := strings.ToLower(exchange.Name().String())
-	if isFutures {
-		return tableName + "_futures_klines"
-	} else {
-		return tableName + "_klines"
+	if futuresExchange, ok := exchange.(types.FuturesExchange); ok {
+		settings := futuresExchange.GetFuturesSettings()
+		if settings.IsDelivery {
+			return tableName + "_delivery_klines"
+		}
+		if settings.IsFutures {
+			return tableName + "_futures_klines"
+		}
 	}
+	return tableName + "_klines"
 }
 
 var errExchangeFieldIsUnset = errors.New("kline.Exchange field should not be empty")

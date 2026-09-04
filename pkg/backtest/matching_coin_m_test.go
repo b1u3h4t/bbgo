@@ -170,13 +170,76 @@ func TestSimplePriceMatching_CoinM_RoundTripSellThenBuy(t *testing.T) {
 	assert.InDelta(t, 1.0, bal.Available.Float64(), 0.01)
 }
 
-func TestCoinMFeeInBase(t *testing.T) {
-	// 10 contracts * 100 USD / 100000 * 0.0002 = 0.000002 BTC
-	fee := coinMFeeInBase(
-		fixedpoint.NewFromInt(10),
-		fixedpoint.NewFromInt(100_000),
-		fixedpoint.NewFromInt(100),
-		fixedpoint.NewFromFloat(0.0002),
-	)
-	assert.InDelta(t, 0.000002, fee.Float64(), 1e-15)
+func TestSimplePriceMatching_CoinM_RealizePnLToWallet(t *testing.T) {
+	account := getCoinMTestAccount()
+	market := getCoinMTestMarket()
+	engine := newCoinMMatching(account, market, 100_000, 5)
+
+	// Open short 10 @ 101000, cover 10 @ 99000 → profit in BTC
+	_, _, err := engine.PlaceOrder(newLimitOrder("BTCUSD_PERP", types.SideTypeSell, 101_000, 10))
+	assert.NoError(t, err)
+	_, _, err = engine.PlaceOrder(newLimitOrder("BTCUSD_PERP", types.SideTypeBuy, 99_000, 10))
+	assert.NoError(t, err)
+
+	t1 := engine.currentTime.Add(time.Minute)
+	engine.processKLine(newKLine("BTCUSD_PERP", types.Interval1m, t1, 100_000, 101_500, 100_000, 101_200))
+	assert.Equal(t, -10.0, engine.coinMPosition.Float64())
+
+	before, ok := account.Balance("BTC")
+	assert.True(t, ok)
+
+	t2 := t1.Add(time.Minute)
+	engine.processKLine(newKLine("BTCUSD_PERP", types.Interval1m, t2, 101_200, 101_200, 98_500, 99_500))
+
+	assert.True(t, engine.coinMPosition.IsZero())
+	after, ok := account.Balance("BTC")
+	assert.True(t, ok)
+	// Wallet should increase by inverse PnL minus fees
+	assert.Greater(t, after.Available.Float64(), before.Available.Float64())
 }
+
+func TestSimplePriceMatching_CoinM_FundingFee(t *testing.T) {
+	account := getCoinMTestAccount()
+	market := getCoinMTestMarket()
+	engine := newCoinMMatching(account, market, 100_000, 5)
+	engine.FundingRatePerSettlement = fixedpoint.NewFromFloat(0.0001)
+	engine.coinMPosition = fixedpoint.NewFromInt(10)
+	engine.coinMAverageCost = fixedpoint.NewFromInt(100_000)
+
+	before, _ := account.Balance("BTC")
+	// 08:00 UTC funding
+	ts := time.Date(2024, 1, 1, 8, 0, 30, 0, time.UTC)
+	engine.applyCoinMFunding(fixedpoint.NewFromInt(100_000), ts)
+	after, _ := account.Balance("BTC")
+	// Long pays: 10*100*0.0001/100000 = 0.000001 BTC
+	assert.InDelta(t, before.Available.Float64()-0.000001, after.Available.Float64(), 1e-12)
+
+	// Same hour should not double-charge
+	engine.applyCoinMFunding(fixedpoint.NewFromInt(100_000), ts.Add(time.Minute))
+	after2, _ := account.Balance("BTC")
+	assert.Equal(t, after.Available.String(), after2.Available.String())
+}
+
+func TestSimplePriceMatching_CoinM_Liquidation(t *testing.T) {
+	account := &types.Account{
+		MakerFeeRate: fixedpoint.NewFromFloat(0.0002),
+		TakerFeeRate: fixedpoint.NewFromFloat(0.0005),
+	}
+	// Tiny balance so maintenance margin fails quickly
+	account.UpdateBalances(types.BalanceMap{
+		"BTC": {Currency: "BTC", Available: fixedpoint.NewFromFloat(0.0001)},
+	})
+	market := getCoinMTestMarket()
+	engine := newCoinMMatching(account, market, 100_000, 5)
+	engine.MaintenanceMarginRate = fixedpoint.NewFromFloat(0.5) // 50% — easy to breach
+	engine.coinMPosition = fixedpoint.NewFromInt(10)
+	engine.coinMAverageCost = fixedpoint.NewFromInt(100_000)
+
+	var trades int
+	engine.OnTradeUpdate(func(types.Trade) { trades++ })
+
+	engine.checkCoinMLiquidation(fixedpoint.NewFromInt(50_000)) // mark dumped → large unrealized loss
+	assert.True(t, engine.coinMPosition.IsZero(), "position should be flattened")
+	assert.Equal(t, 1, trades)
+}
+

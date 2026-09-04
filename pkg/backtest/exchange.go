@@ -180,7 +180,7 @@ func (e *Exchange) Prepare(userConfig *bbgo.Config) error {
 		if _, found := symbols[m.Symbol]; !found {
 			continue
 		}
-		if err := m.Prepare(e.srv, e, startTime); err != nil {
+		if err := m.Prepare(e.srv, e.publicExchange, startTime); err != nil {
 			return fmt.Errorf("failed to prepare backtest exchange for %s: %w", e.sourceName, err)
 		}
 	}
@@ -282,12 +282,13 @@ func (e *Exchange) QueryAccountBalances(ctx context.Context) (types.BalanceMap, 
 func (e *Exchange) QueryKLines(
 	ctx context.Context, symbol string, interval types.Interval, options types.KLineQueryOptions,
 ) ([]types.KLine, error) {
+	// Use publicExchange so FuturesSettings (delivery/futures) select the correct kline table.
 	if options.EndTime != nil {
-		return e.srv.QueryKLinesBackward(e, symbol, interval, *options.EndTime, 1000)
+		return e.srv.QueryKLinesBackward(e.publicExchange, symbol, interval, *options.EndTime, 1000)
 	}
 
 	if options.StartTime != nil {
-		return e.srv.QueryKLinesForward(e, symbol, interval, *options.StartTime, 1000)
+		return e.srv.QueryKLinesForward(e.publicExchange, symbol, interval, *options.StartTime, 1000)
 	}
 
 	return nil, errors.New("endTime or startTime can not be nil")

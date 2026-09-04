@@ -73,6 +73,15 @@ type SimplePriceMatching struct {
 	// Leverage is used for coin-m initial margin. Zero/negative means 1x.
 	Leverage fixedpoint.Value
 
+	// Coin-M book-keeping for wallet PnL / funding / liquidation.
+	coinMPosition    fixedpoint.Value // signed contracts
+	coinMAverageCost fixedpoint.Value
+	// FundingRatePerSettlement is applied at 00/08/16 UTC when non-zero (e.g. 0.0001 = 0.01%).
+	FundingRatePerSettlement fixedpoint.Value
+	// MaintenanceMarginRate triggers liquidation when equity falls below notional/price * rate (default 0.5%).
+	MaintenanceMarginRate fixedpoint.Value
+	lastFundingHour      int // -1 unset; tracks last applied funding hour-of-day
+
 	account *types.Account
 
 	tradeUpdateCallbacks   []func(trade types.Trade)
@@ -80,7 +89,7 @@ type SimplePriceMatching struct {
 	balanceUpdateCallbacks []func(balances types.BalanceMap)
 }
 
-func (m *SimplePriceMatching) Prepare(srv service.BackTestable, exchange *Exchange, startTime time.Time) error {
+func (m *SimplePriceMatching) Prepare(srv service.BackTestable, exchange types.Exchange, startTime time.Time) error {
 	if !m.lastPrice.IsZero() {
 		// no prepare work needed
 		return nil
@@ -766,6 +775,11 @@ func (m *SimplePriceMatching) processKLine(kline types.KLine) {
 	}
 
 	m.lastKLine = kline
+
+	if m.isCoinM() {
+		m.applyCoinMFunding(m.lastPrice, m.currentTime)
+		m.checkCoinMLiquidation(m.lastPrice)
+	}
 }
 
 func (m *SimplePriceMatching) shouldFillRestingBuy(o types.Order, price fixedpoint.Value) bool {
