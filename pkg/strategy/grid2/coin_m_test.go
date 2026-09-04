@@ -137,6 +137,38 @@ func TestStrategy_isUSDTMFutures(t *testing.T) {
 	assert.True(t, cm.isCoinM())
 }
 
+func TestStrategy_USDTM_profitOnlyWhenClosing(t *testing.T) {
+	s := newUSDTMTestStrategy()
+	s.Position = types.NewPositionFromMarket(s.Market)
+	s.grid = grid2types.NewGrid(s.LowerPrice, s.UpperPrice, fixedpoint.NewFromInt(s.GridNum), s.Market.TickSize)
+	s.grid.CalculateArithmeticPins()
+
+	// Opening short: flat -> sell — must NOT count twin-pin spread as profit
+	s.Position.Base = number(-20) // after fill already applied
+	before, ok := s.positionBeforeFill(types.Order{
+		SubmitOrder: types.SubmitOrder{Side: types.SideTypeSell, Quantity: number(20)},
+	}, number(20))
+	assert.True(t, ok)
+	assert.True(t, before.IsZero() || before.Sign() <= 0, "before open-short fill, base should be flat/non-long")
+	assert.False(t, before.Sign() > 0, "opening short must not look like closing a long")
+
+	// Closing short: short -> buy — should count
+	s.Position.Base = number(0) // after buy closed short
+	before, ok = s.positionBeforeFill(types.Order{
+		SubmitOrder: types.SubmitOrder{Side: types.SideTypeBuy, Quantity: number(20)},
+	}, number(20))
+	assert.True(t, ok)
+	assert.True(t, before.Sign() < 0, "before close-short buy, position should be short")
+
+	// Phantom that matched the screenshot: spread*qty with no inventory
+	sell := number(1.4482)
+	buyPin := number(1.4440) // next lower ~spread
+	phantom := s.calculateProfit(types.Order{
+		SubmitOrder: types.SubmitOrder{Price: sell, Quantity: number(1200)},
+	}, buyPin, number(1200))
+	assert.InDelta(t, 5.04, phantom.Profit.Float64(), 0.05)
+}
+
 func TestStrategy_generateGridOrders_USDTM_noBase(t *testing.T) {
 	s := newUSDTMTestStrategy()
 	s.grid = grid2types.NewGrid(s.LowerPrice, s.UpperPrice, fixedpoint.NewFromInt(s.GridNum), s.Market.TickSize)

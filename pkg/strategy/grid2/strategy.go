@@ -422,9 +422,9 @@ func (s *Strategy) calculateCoinMRoundTripProfit(
 	}
 }
 
-// coinMPositionBeforeFill reconstructs position base before this fill was applied
+// positionBeforeFill reconstructs position base before this fill was applied
 // (trade collector updates Position before ActiveOrderBook OnFilled).
-func (s *Strategy) coinMPositionBeforeFill(o types.Order, executedQuantity fixedpoint.Value) (fixedpoint.Value, bool) {
+func (s *Strategy) positionBeforeFill(o types.Order, executedQuantity fixedpoint.Value) (fixedpoint.Value, bool) {
 	if s.Position == nil {
 		return fixedpoint.Zero, false
 	}
@@ -437,6 +437,11 @@ func (s *Strategy) coinMPositionBeforeFill(o types.Order, executedQuantity fixed
 	default:
 		return fixedpoint.Zero, false
 	}
+}
+
+// coinMPositionBeforeFill is kept as an alias for existing tests/callers.
+func (s *Strategy) coinMPositionBeforeFill(o types.Order, executedQuantity fixedpoint.Value) (fixedpoint.Value, bool) {
+	return s.positionBeforeFill(o, executedQuantity)
 }
 
 func (s *Strategy) verifyOrderTrades(o types.Order, trades []types.Trade) bool {
@@ -585,7 +590,7 @@ func (s *Strategy) processFilledOrder(o types.Order) {
 			}
 			// Only realize PnL when this sell closes/reduces a long. Opening/increasing a short
 			// is not realized profit (reverse buy has not filled yet).
-			if before, ok := s.coinMPositionBeforeFill(o, executedQuantity); ok && before.Sign() > 0 {
+			if before, ok := s.positionBeforeFill(o, executedQuantity); ok && before.Sign() > 0 {
 				profit = s.calculateCoinMRoundTripProfit(newPrice, o.Price, newQuantity, o)
 			}
 		} else if s.Compound || s.EarnBase {
@@ -616,8 +621,14 @@ func (s *Strategy) processFilledOrder(o types.Order) {
 		}
 
 		if !coinM {
-			// TODO: need to consider sell order fee for the profit calculation
-			profit = s.calculateProfit(o, newPrice, newQuantity)
+			// Spot: a filled sell implies prior inventory — keep legacy twin-pin profit.
+			// USDT-M: only realize when this sell closes/reduces a long; opening a short is not profit.
+			if !s.isUSDTMFutures() {
+				profit = s.calculateProfit(o, newPrice, newQuantity)
+			} else if before, ok := s.positionBeforeFill(o, executedQuantity); ok && before.Sign() > 0 {
+				closeQty := fixedpoint.Min(executedQuantity, before)
+				profit = s.calculateProfit(o, newPrice, closeQty)
+			}
 		}
 
 	case types.SideTypeBuy:
@@ -637,7 +648,7 @@ func (s *Strategy) processFilledOrder(o types.Order) {
 			}
 			newQuantity = newQuantity.Round(s.Market.VolumePrecision, fixedpoint.Down)
 			// Realize PnL only when this buy closes/reduces a short (round-trip complete).
-			if before, ok := s.coinMPositionBeforeFill(o, executedQuantity); ok && before.Sign() < 0 {
+			if before, ok := s.positionBeforeFill(o, executedQuantity); ok && before.Sign() < 0 {
 				// Twin sell pin (newPrice) approximates the short entry / closing sell price.
 				profit = s.calculateCoinMRoundTripProfit(o.Price, newPrice, newQuantity, o)
 			}
@@ -655,6 +666,22 @@ func (s *Strategy) processFilledOrder(o types.Order) {
 			origQuantity := newQuantity
 			newQuantity = newQuantity.Round(s.Market.VolumePrecision, fixedpoint.Down)
 			s.logger.Infof("round down sell order quantity %s to %s by base quantity precision %d", origQuantity.String(), newQuantity.String(), s.Market.VolumePrecision)
+
+			// USDT-M short grid: realize quote profit when buy closes/reduces a short.
+			// Twin higher pin (newPrice) is the prior sell level.
+			if s.isUSDTMFutures() {
+				if before, ok := s.positionBeforeFill(o, executedQuantity); ok && before.Sign() < 0 {
+					closeQty := fixedpoint.Min(executedQuantity, before.Abs())
+					profit = s.calculateProfit(types.Order{
+						SubmitOrder: types.SubmitOrder{
+							Price:    newPrice,
+							Quantity: closeQty,
+							Side:     types.SideTypeSell,
+						},
+						UpdateTime: o.UpdateTime,
+					}, o.Price, closeQty)
+				}
+			}
 		}
 	}
 
