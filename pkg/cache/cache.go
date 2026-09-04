@@ -176,6 +176,12 @@ func ExchangeCacheKey(ex types.ExchangeMinimal) string {
 		key += "_margin"
 	} else if isFutures {
 		key += "_futures"
+		// Coin-M (delivery) must not share the USDT-M futures market cache.
+		if futuresExchange, ok := ex.(types.FuturesExchange); ok {
+			if futuresExchange.GetFuturesSettings().IsDelivery {
+				key += "_delivery"
+			}
+		}
 	}
 
 	if isIsolated {

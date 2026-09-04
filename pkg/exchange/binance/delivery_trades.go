@@ -145,13 +145,19 @@ func (e *Exchange) queryDeliveryUserTrades(
 		params.Set("orderId", strconv.FormatInt(orderID, 10))
 	}
 	if options != nil {
-		if options.StartTime != nil {
-			params.Set("startTime", strconv.FormatInt(options.StartTime.UnixMilli(), 10))
-		}
-		if options.EndTime != nil {
-			params.Set("endTime", strconv.FormatInt(options.EndTime.UnixMilli(), 10))
-		}
-		if options.LastTradeID > 0 {
+		// Binance dapi: fromId cannot be combined with startTime/endTime.
+		// Prefer time range (same as USDT-M futures QueryTrades).
+		if options.StartTime != nil || options.EndTime != nil {
+			if options.StartTime != nil {
+				params.Set("startTime", strconv.FormatInt(options.StartTime.UnixMilli(), 10))
+			}
+			if options.EndTime != nil {
+				params.Set("endTime", strconv.FormatInt(options.EndTime.UnixMilli(), 10))
+			}
+			if options.LastTradeID > 0 {
+				log.Warning("coin-m: ignoring LastTradeID because startTime/endTime is set (fromId cannot be combined)")
+			}
+		} else if options.LastTradeID > 0 {
 			params.Set("fromId", strconv.FormatUint(options.LastTradeID, 10))
 		}
 		if options.Limit > 0 {
