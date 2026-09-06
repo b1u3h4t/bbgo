@@ -46,6 +46,11 @@ exchangeStrategies:
       compressionLookback: 10
       enableLong: true
       enableShort: true
+      enableRange: true
+      rangeBuyZonePct: 0.25
+      rangeSellZonePct: 0.25
+      rangeQtyRatio: 0.5
+      rangeTakeMid: true
       useNestFilter: true
       nestInterval: 1d
       nestEMAWindow: 20

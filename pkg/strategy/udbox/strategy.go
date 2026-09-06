@@ -21,17 +21,20 @@ func init() {
 	bbgo.RegisterStrategy(ID, &Strategy{})
 }
 
-// Strategy implements UD优道-style 箱体突破 as a trend-following system.
+// Phase is the runtime regime: range (箱内震荡) or trend (突破跟随).
+type Phase string
+
+const (
+	PhaseRange Phase = "range"
+	PhaseTrend Phase = "trend"
+)
+
+// Strategy implements UD优道-style box trading with optional hybrid mode:
 //
-// Core mapping from channel logic (Darvas + UD daily practice):
-//  1. 主做周期 Interval: build consolidation box from recent N bars
-//  2. 嵌套过滤 NestInterval + NestEMAWindow: only long when HTF EMA rising, short when falling
-//  3. 箱内不做: wait for close breakout of box top/bottom (出方向)
-//  4. 起涨点: optional volatility compression before breakout
-//  5. 停损: opposite side of the triggering box
-//  6. 移动停损: after breakout, trail stop to new box bottom (long) / top (short)
+//   - range: lock a consolidation box, buy lower zone / sell upper zone (高抛低吸)
+//   - trend: on close breakout, follow direction with box-edge stop + trail
 //
-// This is intentionally NOT a grid: it holds directional inventory with defined risk.
+// EnableRange=true switches between the two; false keeps pure breakout (classic Darvas).
 type Strategy struct {
 	Environment *bbgo.Environment
 	Market      types.Market
@@ -51,27 +54,35 @@ type Strategy struct {
 	// BreakBufferPct requires close beyond box edge by this fraction (e.g. 0.001 = 0.1%)
 	BreakBufferPct float64 `json:"breakBufferPct"`
 
-	// RequireCompression enables 起涨点-style range compression filter
-	RequireCompression bool `json:"requireCompression"`
+	// RequireCompression enables 起涨点-style range compression filter (trend entries)
+	RequireCompression  bool `json:"requireCompression"`
 	CompressionLookback int  `json:"compressionLookback"`
 
 	// EnableLong / EnableShort — UD: 上涨结构做多为主, 下跌结构做空为主
 	EnableLong  bool `json:"enableLong"`
 	EnableShort bool `json:"enableShort"`
 
-	// Nested (优道嵌套): higher timeframe trend filter
+	// Nested (优道嵌套): higher timeframe trend filter (mainly for trend phase)
 	NestInterval  types.Interval `json:"nestInterval"`
 	NestEMAWindow int            `json:"nestEMAWindow"`
 	UseNestFilter bool           `json:"useNestFilter"`
 
-	// Position sizing
+	// Position sizing (trend). Range uses RangeQuantity or Quantity*RangeQtyRatio.
 	Quantity fixedpoint.Value `json:"quantity"`
 	Leverage fixedpoint.Value `json:"leverage"`
 
-	// Exit
-	UseBoxStop     bool    `json:"useBoxStop"`
-	TrailNewBox    bool    `json:"trailNewBox"`
-	RoiTakeProfit  float64 `json:"roiTakeProfit"` // e.g. 0.05 = +5% ROI, 0 to disable
+	// Hybrid range (箱内震荡)
+	EnableRange     bool             `json:"enableRange"`
+	RangeBuyZonePct float64          `json:"rangeBuyZonePct"`  // bottom fraction of box width
+	RangeSellZonePct float64         `json:"rangeSellZonePct"` // top fraction
+	RangeQuantity   fixedpoint.Value `json:"rangeQuantity"`    // if zero, Quantity * RangeQtyRatio
+	RangeQtyRatio   float64          `json:"rangeQtyRatio"`    // default 0.5
+	RangeTakeMid    bool             `json:"rangeTakeMid"`     // TP at box mid; else opposite zone
+
+	// Exit (trend)
+	UseBoxStop    bool    `json:"useBoxStop"`
+	TrailNewBox   bool    `json:"trailNewBox"`
+	RoiTakeProfit float64 `json:"roiTakeProfit"` // e.g. 0.05 = +5% ROI, 0 to disable
 
 	// Persistence
 	Position    *types.Position    `persistence:"position"`
@@ -82,12 +93,16 @@ type Strategy struct {
 	session       *bbgo.ExchangeSession
 	orderExecutor *bbgo.GeneralOrderExecutor
 
-	klineBuf   []types.KLine
-	activeBox  Box
-	hasBox     bool
-	stopPrice  float64 // trailed stop
-	entryBox   Box
-	mu         sync.Mutex
+	klineBuf []types.KLine
+
+	// lockedBox is frozen while ranging until breakout (avoids rolling window drift)
+	lockedBox    Box
+	hasLockedBox bool
+	phase        Phase
+	stopPrice    float64
+	entryBox     Box
+
+	mu sync.Mutex
 
 	nestEMA types.Float64Indicator
 
@@ -118,10 +133,10 @@ func (s *Strategy) Defaults() error {
 		s.BoxWindow = 20
 	}
 	if s.MinBoxWidthPct <= 0 {
-		s.MinBoxWidthPct = 0.008 // 0.8%
+		s.MinBoxWidthPct = 0.008
 	}
 	if s.MaxBoxWidthPct <= 0 {
-		s.MaxBoxWidthPct = 0.08 // 8%
+		s.MaxBoxWidthPct = 0.08
 	}
 	if s.CompressionLookback <= 0 {
 		s.CompressionLookback = 10
@@ -129,16 +144,38 @@ func (s *Strategy) Defaults() error {
 	if s.NestEMAWindow <= 0 {
 		s.NestEMAWindow = 20
 	}
-	// default both sides on for futures; spot users can disable short
 	if !s.EnableLong && !s.EnableShort {
 		s.EnableLong = true
 		s.EnableShort = true
 	}
-	// Prefer enabling stops in yaml; if neither sizing field set, keep leverage default
 	if s.Leverage.IsZero() && s.Quantity.IsZero() {
 		s.Leverage = fixedpoint.NewFromInt(1)
 	}
+	if s.RangeBuyZonePct <= 0 {
+		s.RangeBuyZonePct = 0.25
+	}
+	if s.RangeSellZonePct <= 0 {
+		s.RangeSellZonePct = 0.25
+	}
+	if s.RangeQtyRatio <= 0 {
+		s.RangeQtyRatio = 0.5
+	}
+	if s.EnableRange {
+		s.phase = PhaseRange
+	} else {
+		s.phase = PhaseTrend
+	}
 	return nil
+}
+
+func (s *Strategy) rangeQty() fixedpoint.Value {
+	if !s.RangeQuantity.IsZero() {
+		return s.RangeQuantity
+	}
+	if !s.Quantity.IsZero() {
+		return s.Quantity.Mul(fixedpoint.NewFromFloat(s.RangeQtyRatio))
+	}
+	return s.Quantity
 }
 
 func (s *Strategy) Run(ctx context.Context, _ bbgo.OrderExecutor, session *bbgo.ExchangeSession) error {
@@ -180,8 +217,8 @@ func (s *Strategy) Run(ctx context.Context, _ bbgo.OrderExecutor, session *bbgo.
 		s.onKLineClosed(ctx, k)
 	}))
 
-	log.Infof("%s udbox started interval=%s boxWindow=%d nest=%v long=%v short=%v",
-		s.Symbol, s.Interval, s.BoxWindow, s.UseNestFilter, s.EnableLong, s.EnableShort)
+	log.Infof("%s udbox started interval=%s boxWindow=%d range=%v nest=%v long=%v short=%v",
+		s.Symbol, s.Interval, s.BoxWindow, s.EnableRange, s.UseNestFilter, s.EnableLong, s.EnableShort)
 	return nil
 }
 
@@ -199,51 +236,217 @@ func (s *Strategy) onKLineClosed(ctx context.Context, k types.KLine) {
 		s.klineBuf = s.klineBuf[len(s.klineBuf)-maxKeep:]
 	}
 
-	// Build box from bars BEFORE the current closed kline so the breakout bar
-	// does not inflate the box high/low (classic Darvas / UD "出方向" semantics).
 	hist := s.klineBuf
 	if len(hist) > 1 {
 		hist = hist[:len(hist)-1]
 	}
-	box, ok := DetectBox(hist, s.BoxWindow, s.MinBoxWidthPct, s.MaxBoxWidthPct)
-	s.hasBox = ok
-	if ok {
-		s.activeBox = box
-		log.Debugf("%s box top=%.6g bottom=%.6g width=%.3f%%",
-			s.Symbol, box.Top, box.Bottom, box.WidthPct()*100)
-	}
+	detected, okDetect := DetectBox(hist, s.BoxWindow, s.MinBoxWidthPct, s.MaxBoxWidthPct)
 
 	closePx := k.Close.Float64()
+
+	// Acquire / keep locked box for hybrid range
+	if s.EnableRange {
+		if !s.hasLockedBox && okDetect && detected.IsInside(closePx) {
+			s.lockedBox = detected
+			s.hasLockedBox = true
+			s.phase = PhaseRange
+			log.Infof("%s lock range box [%.6g, %.6g] width=%.3f%%",
+				s.Symbol, detected.Bottom, detected.Top, detected.WidthPct()*100)
+		}
+	}
+
+	box := detected
+	hasBox := okDetect
+	if s.hasLockedBox {
+		box = s.lockedBox
+		hasBox = true
+	}
+
 	posOpen := s.Position.IsOpened(k.Close)
 
-	// manage open position: stop / trail / ROI
+	// --- breakout vs locked/detected box → trend ---
+	if hasBox && (box.BreakLong(closePx, s.BreakBufferPct) || box.BreakShort(closePx, s.BreakBufferPct)) {
+		s.handleBreakout(ctx, k, box, hist)
+		return
+	}
+
+	// --- manage open positions ---
 	if posOpen {
-		s.managePosition(ctx, k, box, ok)
+		if s.phase == PhaseTrend || !s.EnableRange {
+			s.manageTrendPosition(ctx, k, detected, okDetect)
+		} else {
+			s.manageRangePosition(ctx, k, box)
+		}
 		return
 	}
 
-	if !ok {
+	if !hasBox {
 		return
 	}
 
-	if s.RequireCompression && !VolatilityCompressing(hist, s.CompressionLookback) {
-		log.Debugf("%s skip: no volatility compression", s.Symbol)
+	// --- flat: range or wait for breakout ---
+	if s.EnableRange && s.phase == PhaseRange && box.IsInside(closePx) {
+		s.tryRangeEntry(ctx, k, box)
 		return
 	}
 
-	// inside box → 箱内观望
-	if box.IsInside(closePx) {
-		return
+	// pure trend mode (or unlocked): wait outside box
+	if !s.EnableRange {
+		if s.RequireCompression && !VolatilityCompressing(hist, s.CompressionLookback) {
+			return
+		}
+		if box.IsInside(closePx) {
+			return
+		}
+		nestOKLong, nestOKShort := s.nestBias(closePx)
+		if s.EnableLong && box.BreakLong(closePx, s.BreakBufferPct) && nestOKLong {
+			s.openTrend(ctx, true, k, box)
+		} else if s.EnableShort && box.BreakShort(closePx, s.BreakBufferPct) && nestOKShort {
+			s.openTrend(ctx, false, k, box)
+		}
+	}
+}
+
+func (s *Strategy) handleBreakout(ctx context.Context, k types.KLine, box Box, hist []types.KLine) {
+	closePx := k.Close.Float64()
+	up := box.BreakLong(closePx, s.BreakBufferPct)
+	down := box.BreakShort(closePx, s.BreakBufferPct)
+
+	if s.RequireCompression && s.phase != PhaseTrend && !VolatilityCompressing(hist, s.CompressionLookback) {
+		// still allow breakout when already ranging with locked box
+		if !(s.EnableRange && s.hasLockedBox) {
+			return
+		}
 	}
 
 	nestOKLong, nestOKShort := s.nestBias(closePx)
-
-	if s.EnableLong && box.BreakLong(closePx, s.BreakBufferPct) && nestOKLong {
-		s.open(ctx, true, k, box)
+	wantLong := up && s.EnableLong && nestOKLong
+	wantShort := down && s.EnableShort && nestOKShort
+	if !wantLong && !wantShort {
+		// unlock failed breakout attempt if price clearly left
+		if s.hasLockedBox && !box.IsInside(closePx) {
+			log.Infof("%s breakout ignored by nest/side filter, unlock box", s.Symbol)
+			s.unlockBox()
+		}
 		return
 	}
-	if s.EnableShort && box.BreakShort(closePx, s.BreakBufferPct) && nestOKShort {
-		s.open(ctx, false, k, box)
+
+	s.phase = PhaseTrend
+
+	// Flip / align inventory from range → trend
+	if s.Position.IsOpened(k.Close) {
+		if wantLong && s.Position.IsShort() {
+			bbgo.Notify("%s udbox break UP — close short, flip long", s.Symbol)
+			_ = s.orderExecutor.ClosePosition(ctx, one, "breakFlip")
+		} else if wantShort && s.Position.IsLong() {
+			bbgo.Notify("%s udbox break DOWN — close long, flip short", s.Symbol)
+			_ = s.orderExecutor.ClosePosition(ctx, one, "breakFlip")
+		} else if wantLong && s.Position.IsLong() {
+			// already aligned: promote to trend stops
+			s.entryBox = box
+			s.stopPrice = box.Bottom
+			bbgo.Notify("%s udbox break UP — promote long to trend stop=%.6g", s.Symbol, s.stopPrice)
+			s.unlockBox()
+			return
+		} else if wantShort && s.Position.IsShort() {
+			s.entryBox = box
+			s.stopPrice = box.Top
+			bbgo.Notify("%s udbox break DOWN — promote short to trend stop=%.6g", s.Symbol, s.stopPrice)
+			s.unlockBox()
+			return
+		}
+	}
+
+	if wantLong {
+		s.openTrend(ctx, true, k, box)
+	} else if wantShort {
+		s.openTrend(ctx, false, k, box)
+	}
+	s.unlockBox()
+}
+
+func (s *Strategy) unlockBox() {
+	s.hasLockedBox = false
+	s.lockedBox = Box{}
+}
+
+func (s *Strategy) tryRangeEntry(ctx context.Context, k types.KLine, box Box) {
+	closePx := k.Close.Float64()
+	qty := s.rangeQty()
+
+	if s.EnableLong && box.InLowerZone(closePx, s.RangeBuyZonePct) {
+		bbgo.Notify("%s udbox RANGE buy zone close=%s box=[%.6g, %.6g]",
+			s.Symbol, k.Close.String(), box.Bottom, box.Top)
+		opt := bbgo.OpenPositionOptions{
+			Long: true, Quantity: qty, Leverage: s.Leverage, Price: k.Close,
+			Tags: []string{"udbox-range-buy"},
+		}
+		if _, err := s.orderExecutor.OpenPosition(ctx, opt); err != nil {
+			log.WithError(err).Error("range long open failed")
+			return
+		}
+		s.stopPrice = box.Bottom * (1 - s.BreakBufferPct) // soft stop under box
+		s.entryBox = box
+		return
+	}
+
+	if s.EnableShort && box.InUpperZone(closePx, s.RangeSellZonePct) {
+		bbgo.Notify("%s udbox RANGE sell zone close=%s box=[%.6g, %.6g]",
+			s.Symbol, k.Close.String(), box.Bottom, box.Top)
+		opt := bbgo.OpenPositionOptions{
+			Short: true, Quantity: qty, Leverage: s.Leverage, Price: k.Close,
+			Tags: []string{"udbox-range-sell"},
+		}
+		if _, err := s.orderExecutor.OpenPosition(ctx, opt); err != nil {
+			log.WithError(err).Error("range short open failed")
+			return
+		}
+		s.stopPrice = box.Top * (1 + s.BreakBufferPct)
+		s.entryBox = box
+	}
+}
+
+func (s *Strategy) manageRangePosition(ctx context.Context, k types.KLine, box Box) {
+	closePx := k.Close.Float64()
+
+	// Hard stop: leave box against us without confirmed breakout handling
+	// (breakout path already ran first; here handle TP)
+	if s.Position.IsLong() {
+		tp := box.Mid()
+		if !s.RangeTakeMid {
+			tp = box.Top - box.Width()*s.RangeSellZonePct
+		}
+		if closePx >= tp {
+			bbgo.Notify("%s udbox RANGE long TP @ %s", s.Symbol, k.Close.String())
+			_ = s.orderExecutor.ClosePosition(ctx, one, "rangeTP")
+			s.stopPrice = 0
+			return
+		}
+		if closePx < box.Bottom {
+			// failed support — close; breakout handler may also flip
+			bbgo.Notify("%s udbox RANGE long stop under box @ %s", s.Symbol, k.Close.String())
+			_ = s.orderExecutor.ClosePosition(ctx, one, "rangeStop")
+			s.stopPrice = 0
+			return
+		}
+	}
+
+	if s.Position.IsShort() {
+		tp := box.Mid()
+		if !s.RangeTakeMid {
+			tp = box.Bottom + box.Width()*s.RangeBuyZonePct
+		}
+		if closePx <= tp {
+			bbgo.Notify("%s udbox RANGE short TP @ %s", s.Symbol, k.Close.String())
+			_ = s.orderExecutor.ClosePosition(ctx, one, "rangeTP")
+			s.stopPrice = 0
+			return
+		}
+		if closePx > box.Top {
+			bbgo.Notify("%s udbox RANGE short stop above box @ %s", s.Symbol, k.Close.String())
+			_ = s.orderExecutor.ClosePosition(ctx, one, "rangeStop")
+			s.stopPrice = 0
+		}
 	}
 }
 
@@ -256,13 +459,13 @@ func (s *Strategy) nestBias(price float64) (longOK, shortOK bool) {
 	if ema <= 0 {
 		return
 	}
-	// simple nest: price vs HTF EMA — UD nested structure filter
 	longOK = price >= ema
 	shortOK = price <= ema
 	return
 }
 
-func (s *Strategy) open(ctx context.Context, long bool, k types.KLine, box Box) {
+func (s *Strategy) openTrend(ctx context.Context, long bool, k types.KLine, box Box) {
+	s.phase = PhaseTrend
 	opt := bbgo.OpenPositionOptions{
 		Long:     long,
 		Short:    !long,
@@ -275,7 +478,7 @@ func (s *Strategy) open(ctx context.Context, long bool, k types.KLine, box Box) 
 	if !long {
 		side = "short"
 	}
-	bbgo.Notify("%s udbox %s breakout close=%s box=[%.6g, %.6g]",
+	bbgo.Notify("%s udbox TREND %s breakout close=%s box=[%.6g, %.6g]",
 		s.Symbol, side, k.Close.String(), box.Bottom, box.Top)
 
 	if _, err := s.orderExecutor.OpenPosition(ctx, opt); err != nil {
@@ -291,10 +494,9 @@ func (s *Strategy) open(ctx context.Context, long bool, k types.KLine, box Box) 
 	}
 }
 
-func (s *Strategy) managePosition(ctx context.Context, k types.KLine, box Box, hasBox bool) {
+func (s *Strategy) manageTrendPosition(ctx context.Context, k types.KLine, box Box, hasBox bool) {
 	closePx := k.Close.Float64()
 
-	// trail stop to new box edge after expansion (移动停损到新箱底/顶)
 	if s.TrailNewBox && hasBox {
 		if s.Position.IsLong() && box.Bottom > s.stopPrice {
 			s.stopPrice = box.Bottom
@@ -320,11 +522,11 @@ func (s *Strategy) managePosition(ctx context.Context, k types.KLine, box Box, h
 			if err := s.orderExecutor.ClosePosition(ctx, one, "boxStop"); err != nil {
 				log.WithError(err).Error("boxStop close failed")
 			}
-			// Clear any dust left by base-denominated fees in backtest/spot-like fee mode.
 			if s.Position.IsOpened(k.Close) {
 				_ = s.orderExecutor.ClosePosition(ctx, one, "boxStopDust")
 			}
 			s.stopPrice = 0
+			s.phase = PhaseRange
 			return
 		}
 	}
@@ -335,6 +537,7 @@ func (s *Strategy) managePosition(ctx context.Context, k types.KLine, box Box, h
 			bbgo.Notify("%s udbox ROI take profit %.2f%%", s.Symbol, roi.Float64()*100)
 			_ = s.orderExecutor.ClosePosition(ctx, one, "roiTakeProfit")
 			s.stopPrice = 0
+			s.phase = PhaseRange
 		}
 	}
 }

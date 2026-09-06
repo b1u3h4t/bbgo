@@ -1,34 +1,23 @@
-# udbox — UD优道箱体突破（趋势策略）
+# udbox — UD优道箱体：震荡 + 趋势混合
 
-独立于 `grid2` 的趋势策略，把 [UD优道-交易室](https://www.youtube.com/@UDTrading) 的箱体交易逻辑自动化为 **突破跟随**，不是箱内高抛低吸。
+独立于 `grid2`。默认可只做突破；打开 `enableRange` 后：
 
-## 频道逻辑 → 代码映射
+| 阶段 | 行为 |
+|------|------|
+| **Range（箱内）** | 锁定箱体，下沿附近买入、上沿附近卖出（高抛低吸），中线或对侧区止盈 |
+| **Trend（突破）** | 收盘突破箱顶/底 → 顺势；与震荡仓同向则晋升趋势停损，反向则平仓翻转 |
 
-| UD / Darvas 要点 | 实现 |
-|------------------|------|
-| 先选主做周期 | `interval`（建议 `4h` / `1d`） |
-| 横盘画出箱顶箱底 | `DetectBox`：最近 `boxWindow` 根高低点 |
-| 箱内不做、等「出方向」 | 收盘价严格在箱内则忽略 |
-| 向上突破箱顶做多 / 跌破箱底做空 | `BreakLong` / `BreakShort` |
-| 起涨点：横盘 + 波动收敛 + 破压力 | `requireCompression` |
-| 优道嵌套（大周期定方向） | `useNestFilter` + `nestInterval` EMA |
-| 停损在箱另一侧 | `useBoxStop`，初始 stop=箱底(多)/箱顶(空) |
-| 新箱形成后上移停损 | `trailNewBox` |
-| 下跌趋势以空为主 | `enableShort: true`，嵌套空头过滤 |
+## 状态机
 
-参考视频（频道内）：
-- 《箱体理论交易系统，10分钟学会！》
-- 《箱体理论鼻祖：尼古拉斯·达瓦斯》
-- 《优道嵌套策略》
-- 《起涨点，有哪些特征？》
-- 日常盘面：压力/支撑箱体，突破继续、跌破转向
+```
+检测箱体且价格在内 → 锁定 lockedBox，phase=range
+  ├─ 下区做多 / 上区做空（rangeQuantity）
+  ├─ 到中线或对侧区 → 平仓止盈
+  └─ 收盘突破 → phase=trend，对齐仓位，箱边停损 + 新箱移动停损
+趋势停损触发 → phase=range，等待重新锁箱
+```
 
-## 与网格的区别
-
-- **grid2**：箱内做市，吃震荡；趋势单边会堆仓浮亏。
-- **udbox**：箱外突破才开仓；单边是顺势，假突破用箱边停损。
-
-## 示例配置
+## 配置示例（混合）
 
 ```yaml
 exchangeStrategies:
@@ -37,26 +26,30 @@ exchangeStrategies:
       symbol: BTCUSDT
       interval: 4h
       boxWindow: 20
-      minBoxWidthPct: 0.008   # 0.8%
-      maxBoxWidthPct: 0.06    # 6%
-      breakBufferPct: 0.001   # 收盘需越过边界 0.1%
-      requireCompression: true
-      compressionLookback: 10
+      minBoxWidthPct: 0.008
+      maxBoxWidthPct: 0.06
+      breakBufferPct: 0.001
       enableLong: true
       enableShort: true
-      useNestFilter: true
+      enableRange: true          # 箱内震荡
+      rangeBuyZonePct: 0.25      # 箱体下部 25%
+      rangeSellZonePct: 0.25
+      rangeQtyRatio: 0.5         # 震荡仓 = quantity * 0.5
+      rangeTakeMid: true         # true=中线止盈；false=对侧区
+      useNestFilter: true        # 主要过滤趋势突破方向
       nestInterval: 1d
       nestEMAWindow: 20
-      leverage: 2
-      # quantity: 0.01       # 固定数量优先于 leverage；回测建议用 quantity
-      useBoxStop: true       # 建议开启
-      trailNewBox: true      # 建议开启
-      roiTakeProfit: 0        # >0 时按 ROI 止盈，如 0.08
+      quantity: 0.05             # 趋势仓
+      useBoxStop: true
+      trailNewBox: true
 ```
 
-回测配置见 [`config/udbox-backtest.yaml`](../../../config/udbox-backtest.yaml)。
+纯趋势：设 `enableRange: false`（或省略）。
+
+回测：`config/udbox-backtest.yaml`
+
 ## 注意
 
-- 无字幕可扒，逻辑来自公开视频标题/简介 + Darvas 经典规则 + UD 每日「箱体震荡→突破/跌破」话术归纳，**不是会员密训原文逐字复刻**。
-- 假突破常见，期望是低胜率顺势；勿把 `roiTakeProfit` 设太小把利润砍死。
-- 先回测/小仓位，再与现有 grid 并行。
+- 箱内震荡会增加交易次数与假突破前的磨损；突破时若持反向仓会先平再开。
+- 锁定箱体避免滚动窗口把箱顶箱底不断拉开。
+- 与 `grid2` 仍不同：单仓位、分区限价逻辑用市价收盘信号，不是挂满网格。

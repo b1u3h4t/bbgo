@@ -39,15 +39,22 @@ func TestDetectBoxTooWide(t *testing.T) {
 	assert.False(t, ok)
 }
 
+func TestZones(t *testing.T) {
+	box := Box{Top: 100, Bottom: 90}
+	assert.True(t, box.InLowerZone(91, 0.25)) // 90 + 2.5 = 92.5
+	assert.False(t, box.InLowerZone(93, 0.25))
+	assert.True(t, box.InUpperZone(98, 0.25))
+	assert.False(t, box.InUpperZone(96, 0.25))
+}
+
 func TestVolatilityCompressing(t *testing.T) {
 	var ks []types.KLine
-	// prior wide
 	for i := 0; i < 10; i++ {
 		ks = append(ks, k(110, 90, 100))
 	}
-	// recent tight
 	for i := 0; i < 10; i++ {
 		ks = append(ks, k(101, 99, 100))
 	}
 	assert.True(t, VolatilityCompressing(ks, 10))
 }
+

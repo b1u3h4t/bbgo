@@ -70,6 +70,22 @@ func (b Box) IsInside(price float64) bool {
 	return price > b.Bottom && price < b.Top
 }
 
+// InLowerZone: near box bottom (range long entry). zonePct is fraction of box width, e.g. 0.25.
+func (b Box) InLowerZone(price, zonePct float64) bool {
+	if !b.Valid() || zonePct <= 0 {
+		return false
+	}
+	return price <= b.Bottom+b.Width()*zonePct
+}
+
+// InUpperZone: near box top (range short entry / long take-profit).
+func (b Box) InUpperZone(price, zonePct float64) bool {
+	if !b.Valid() || zonePct <= 0 {
+		return false
+	}
+	return price >= b.Top-b.Width()*zonePct
+}
+
 // BreakLong: close above top (向上突破箱顶 → 多信号)
 func (b Box) BreakLong(close float64, bufferPct float64) bool {
 	return close > b.Top*(1+bufferPct)
