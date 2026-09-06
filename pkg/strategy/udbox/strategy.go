@@ -131,6 +131,9 @@ func (s *Strategy) Subscribe(session *bbgo.ExchangeSession) {
 }
 
 func (s *Strategy) Defaults() error {
+	if s.Interval == "" {
+		s.Interval = types.Interval4h
+	}
 	if s.BoxWindow <= 0 {
 		s.BoxWindow = 20
 	}
@@ -145,6 +148,9 @@ func (s *Strategy) Defaults() error {
 	}
 	if s.NestEMAWindow <= 0 {
 		s.NestEMAWindow = 20
+	}
+	if s.UseNestFilter && s.NestInterval == "" {
+		s.NestInterval = types.Interval1d
 	}
 	if !s.EnableLong && !s.EnableShort {
 		s.EnableLong = true
@@ -169,6 +175,110 @@ func (s *Strategy) Defaults() error {
 	}
 	return nil
 }
+
+// Validate rejects configs that cannot trade correctly. Soft suitability
+// warnings are emitted later in logParamHealth (startup).
+func (s *Strategy) Validate() error {
+	_ = s.Defaults()
+
+	if s.Symbol == "" {
+		return fmt.Errorf("udbox: symbol is required")
+	}
+	if s.BoxWindow < 3 {
+		return fmt.Errorf("udbox: boxWindow=%d must be >= 3", s.BoxWindow)
+	}
+	if s.MinBoxWidthPct <= 0 || s.MaxBoxWidthPct <= 0 {
+		return fmt.Errorf("udbox: minBoxWidthPct and maxBoxWidthPct must be > 0")
+	}
+	if s.MinBoxWidthPct >= s.MaxBoxWidthPct {
+		return fmt.Errorf("udbox: minBoxWidthPct (%.4f) must be < maxBoxWidthPct (%.4f)",
+			s.MinBoxWidthPct, s.MaxBoxWidthPct)
+	}
+	if s.BreakBufferPct < 0 || s.BreakBufferPct > 0.05 {
+		return fmt.Errorf("udbox: breakBufferPct=%.4f out of range [0, 0.05]", s.BreakBufferPct)
+	}
+	if s.RangeBuyZonePct <= 0 || s.RangeBuyZonePct > 0.5 {
+		return fmt.Errorf("udbox: rangeBuyZonePct=%.4f must be in (0, 0.5]", s.RangeBuyZonePct)
+	}
+	if s.RangeSellZonePct <= 0 || s.RangeSellZonePct > 0.5 {
+		return fmt.Errorf("udbox: rangeSellZonePct=%.4f must be in (0, 0.5]", s.RangeSellZonePct)
+	}
+	if s.RangeQtyRatio <= 0 || s.RangeQtyRatio > 1 {
+		return fmt.Errorf("udbox: rangeQtyRatio=%.4f must be in (0, 1]", s.RangeQtyRatio)
+	}
+	if s.RoiTakeProfit < 0 {
+		return fmt.Errorf("udbox: roiTakeProfit=%.4f must be >= 0", s.RoiTakeProfit)
+	}
+	if (s.RequireCompression || s.RangeRequireCompression) && s.CompressionLookback < 4 {
+		return fmt.Errorf("udbox: compressionLookback=%d must be >= 4 when compression filters are on",
+			s.CompressionLookback)
+	}
+	if s.Quantity.IsZero() && s.Leverage.IsZero() {
+		return fmt.Errorf("udbox: set quantity or leverage for position sizing")
+	}
+	if s.UseNestFilter && s.NestInterval != "" && s.NestInterval == s.Interval {
+		return fmt.Errorf("udbox: nestInterval (%s) must differ from interval (%s)", s.NestInterval, s.Interval)
+	}
+	return nil
+}
+
+func (s *Strategy) isShortInterval() bool {
+	switch s.Interval {
+	case types.Interval1m, types.Interval3m, types.Interval5m, types.Interval15m, types.Interval30m:
+		return true
+	default:
+		return false
+	}
+}
+
+// logParamHealth prints a startup checklist and soft warnings (does not fail).
+func (s *Strategy) logParamHealth() {
+	mode := "trend-only"
+	if s.EnableRange {
+		mode = "hybrid(range+trend)"
+	}
+	qtyDesc := "leverage=" + s.Leverage.String()
+	if !s.Quantity.IsZero() {
+		qtyDesc = "quantity=" + s.Quantity.String()
+		if s.EnableRange {
+			qtyDesc += fmt.Sprintf(" rangeQty≈%s", s.rangeQty().String())
+		}
+	}
+
+	log.Infof("%s udbox health: mode=%s interval=%s nest=%v/%s boxWindow=%d boxWidth=[%.3f%%, %.3f%%] "+
+		"breakBuf=%.3f%% compress(trend=%v range=%v lookback=%d) zones=buy%.0f%%/sell%.0f%% takeMid=%v %s long=%v short=%v stop=%v trail=%v",
+		s.Symbol, mode, s.Interval, s.UseNestFilter, s.NestInterval,
+		s.BoxWindow, s.MinBoxWidthPct*100, s.MaxBoxWidthPct*100,
+		s.BreakBufferPct*100, s.RequireCompression, s.RangeRequireCompression, s.CompressionLookback,
+		s.RangeBuyZonePct*100, s.RangeSellZonePct*100, s.RangeTakeMid, qtyDesc,
+		s.EnableLong, s.EnableShort, s.UseBoxStop, s.TrailNewBox)
+
+	if s.isShortInterval() && s.EnableRange {
+		log.Warnf("%s udbox health WARN: interval=%s with enableRange=true usually raises churn/MDD; prefer enableRange=false on 15m or use tightened short-TF params (boxWindow≥32, minBox≥2%%)",
+			s.Symbol, s.Interval)
+	}
+	if s.isShortInterval() && s.BoxWindow < 32 {
+		log.Warnf("%s udbox health WARN: short interval %s with boxWindow=%d is tight; consider boxWindow≥32",
+			s.Symbol, s.Interval, s.BoxWindow)
+	}
+	if s.EnableRange && s.RangeTakeMid && s.MinBoxWidthPct < 0.012 {
+		log.Warnf("%s udbox health WARN: rangeTakeMid + minBoxWidthPct=%.3f%% → mid-target may not cover taker fees; raise minBox or set rangeTakeMid=false",
+			s.Symbol, s.MinBoxWidthPct*100)
+	}
+	if s.EnableRange && !s.RangeRequireCompression {
+		log.Warnf("%s udbox health WARN: enableRange without rangeRequireCompression tends to overtrade; set rangeRequireCompression=true",
+			s.Symbol)
+	}
+	if !s.isShortInterval() && s.MinBoxWidthPct < 0.01 && s.EnableRange {
+		log.Warnf("%s udbox health WARN: minBoxWidthPct=%.3f%% is narrow for hybrid on %s; fee drag risk",
+			s.Symbol, s.MinBoxWidthPct*100, s.Interval)
+	}
+	if s.Quantity.IsZero() && !s.Leverage.IsZero() {
+		log.Warnf("%s udbox health WARN: sizing by leverage=%s (no fixed quantity); backtest/live margin usage can surprise — prefer fixed quantity for first live run",
+			s.Symbol, s.Leverage.String())
+	}
+}
+
 
 func (s *Strategy) rangeQty() fixedpoint.Value {
 	if !s.RangeQuantity.IsZero() {
@@ -248,8 +358,7 @@ func (s *Strategy) Run(ctx context.Context, _ bbgo.OrderExecutor, session *bbgo.
 		s.onKLineClosed(ctx, k)
 	}))
 
-	log.Infof("%s udbox started interval=%s boxWindow=%d range=%v nest=%v long=%v short=%v",
-		s.Symbol, s.Interval, s.BoxWindow, s.EnableRange, s.UseNestFilter, s.EnableLong, s.EnableShort)
+	s.logParamHealth()
 	return nil
 }
 

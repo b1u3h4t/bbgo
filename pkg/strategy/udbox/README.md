@@ -65,6 +65,17 @@ exchangeStrategies:
 | `rangeQtyRatio` | 0.35 | 0.35 |
 | `enableRange` | **false（推荐）** | 可 true，但 MDD 通常仍高于纯趋势 |
 
+## 启动体检
+
+`Validate()`（启动失败）：
+- `symbol` 必填；`minBoxWidthPct < maxBoxWidthPct`
+- zone / `rangeQtyRatio` 合法；压缩 lookback ≥ 4（若开启压缩）
+- `quantity` 或 `leverage` 至少一个；嵌套周期必须 ≠ 主周期
+
+`logParamHealth()`（启动日志，不阻断）：
+- 打印 mode / 箱宽门槛 / 压缩 / zone / 仓位摘要
+- 短周期 + Hybrid、过窄中线止盈、未开 `rangeRequireCompression` 等会打 **WARN**
+
 ## 注意
 
 - 箱内震荡会增加交易次数与假突破前的磨损；突破时若持反向仓会先平再开。

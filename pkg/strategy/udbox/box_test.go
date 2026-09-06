@@ -69,3 +69,50 @@ func TestVolatilityCompressing_Expanding(t *testing.T) {
 	assert.False(t, VolatilityCompressing(ks, 10))
 }
 
+func TestValidate_OK(t *testing.T) {
+	s := &Strategy{
+		Symbol:         "BTCUSDT",
+		Interval:       types.Interval4h,
+		BoxWindow:      20,
+		MinBoxWidthPct: 0.015,
+		MaxBoxWidthPct: 0.05,
+		Quantity:       fixedpoint.NewFromFloat(0.05),
+		EnableRange:    true,
+		UseNestFilter:  true,
+		NestInterval:   types.Interval1d,
+	}
+	assert.NoError(t, s.Validate())
+}
+
+func TestValidate_RejectsBadBox(t *testing.T) {
+	s := &Strategy{
+		Symbol:         "BTCUSDT",
+		MinBoxWidthPct: 0.08,
+		MaxBoxWidthPct: 0.02,
+		Quantity:       fixedpoint.NewFromFloat(0.01),
+	}
+	err := s.Validate()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "minBoxWidthPct")
+}
+
+func TestValidate_RejectsSameNestInterval(t *testing.T) {
+	s := &Strategy{
+		Symbol:         "BTCUSDT",
+		Interval:       types.Interval1d,
+		MinBoxWidthPct: 0.015,
+		MaxBoxWidthPct: 0.05,
+		Quantity:       fixedpoint.NewFromFloat(0.01),
+		UseNestFilter:  true,
+		NestInterval:   types.Interval1d,
+	}
+	err := s.Validate()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "nestInterval")
+}
+
+func TestValidate_RejectsMissingSymbol(t *testing.T) {
+	s := &Strategy{Quantity: fixedpoint.NewFromFloat(0.01)}
+	assert.Error(t, s.Validate())
+}
+
