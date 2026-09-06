@@ -1,0 +1,56 @@
+---
+# udbox short-TF backtest (30m) — tightened vs 4h defaults
+#
+# Hybrid can edge return on some symbols; MDD usually still worse than trend.
+#
+#   ./bbgo backtest --config config/udbox-backtest-30m.yaml --sync --force
+#
+sessions:
+  binance:
+    exchange: binance
+    envVarPrefix: BINANCE
+    futures: true
+    symbolLeverage:
+      BTCUSDT: 2
+
+backtest:
+  startTime: "2026-08-01"
+  endTime: "2026-09-01"
+  symbols:
+    - BTCUSDT
+  sessions:
+    - binance
+  feeMode: native
+  accounts:
+    binance:
+      makerFeeRate: 0.02%
+      takerFeeRate: 0.05%
+      balances:
+        USDT: 10000.0
+
+exchangeStrategies:
+  - on: binance
+    udbox:
+      symbol: BTCUSDT
+      interval: 30m
+      boxWindow: 32
+      minBoxWidthPct: 0.02
+      maxBoxWidthPct: 0.06
+      breakBufferPct: 0.0015
+      requireCompression: true
+      compressionLookback: 20
+      enableLong: true
+      enableShort: true
+      enableRange: true
+      rangeRequireCompression: true
+      rangeBuyZonePct: 0.10
+      rangeSellZonePct: 0.10
+      rangeQtyRatio: 0.35
+      rangeTakeMid: false
+      useNestFilter: true
+      nestInterval: 1d
+      nestEMAWindow: 20
+      quantity: 0.05
+      useBoxStop: true
+      trailNewBox: true
+      roiTakeProfit: 0

@@ -47,7 +47,23 @@ exchangeStrategies:
 
 纯趋势：设 `enableRange: false`（或省略）。
 
-回测：`config/udbox-backtest.yaml`
+回测：
+- 4h 混合：`config/udbox-backtest.yaml`
+- 15m（默认纯趋势，更低 MDD）：`config/udbox-backtest-15m.yaml`
+- 30m（收紧 Hybrid）：`config/udbox-backtest-30m.yaml`
+
+## 短周期（15m / 30m）
+
+4h 参数直接搬到分时会刷单、回撤变大。短周期建议：
+
+| 参数 | 15m | 30m |
+|------|-----|-----|
+| `boxWindow` | 40 | 32 |
+| `minBoxWidthPct` | 0.025 | 0.02 |
+| `compressionLookback` | 20 | 20 |
+| `rangeBuy/SellZonePct` | 0.10 | 0.10 |
+| `rangeQtyRatio` | 0.35 | 0.35 |
+| `enableRange` | **false（推荐）** | 可 true，但 MDD 通常仍高于纯趋势 |
 
 ## 注意
 

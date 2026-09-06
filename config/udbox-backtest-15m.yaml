@@ -1,0 +1,59 @@
+---
+# udbox short-TF backtest (15m) — tightened vs 4h defaults
+#
+# Findings (2026-08): 15m prefers trend-only for return+MDD;
+# hybrid still trades more and typically has higher drawdown.
+#
+#   ./bbgo backtest --config config/udbox-backtest-15m.yaml --sync --force
+#
+sessions:
+  binance:
+    exchange: binance
+    envVarPrefix: BINANCE
+    futures: true
+    symbolLeverage:
+      BTCUSDT: 2
+
+backtest:
+  startTime: "2026-08-01"
+  endTime: "2026-09-01"
+  symbols:
+    - BTCUSDT
+  sessions:
+    - binance
+  feeMode: native
+  accounts:
+    binance:
+      makerFeeRate: 0.02%
+      takerFeeRate: 0.05%
+      balances:
+        USDT: 10000.0
+
+exchangeStrategies:
+  - on: binance
+    udbox:
+      symbol: BTCUSDT
+      interval: 15m
+      # Longer box + wider min width → fewer thin intraday boxes
+      boxWindow: 40
+      minBoxWidthPct: 0.025
+      maxBoxWidthPct: 0.06
+      breakBufferPct: 0.0015
+      requireCompression: true
+      compressionLookback: 20
+      enableLong: true
+      enableShort: true
+      # For 15m, set false for lower MDD / fewer fees (recommended default)
+      enableRange: false
+      rangeRequireCompression: true
+      rangeBuyZonePct: 0.10
+      rangeSellZonePct: 0.10
+      rangeQtyRatio: 0.35
+      rangeTakeMid: false
+      useNestFilter: true
+      nestInterval: 1d
+      nestEMAWindow: 20
+      quantity: 0.05
+      useBoxStop: true
+      trailNewBox: true
+      roiTakeProfit: 0
