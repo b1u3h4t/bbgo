@@ -151,7 +151,16 @@ func (e *Exchange) _addMatchingBook(symbol string, market types.Market) {
 	e.matchingBooks[symbol] = matching
 }
 
-// SetSymbolLeverage sets matching leverage for a coin-m symbol (initial margin).
+// SetFutures enables USDT-M linear margin matching (sells lock quote, not base).
+func (e *Exchange) SetFutures(futures bool) {
+	e.matchingBooksMutex.Lock()
+	defer e.matchingBooksMutex.Unlock()
+	for _, m := range e.matchingBooks {
+		m.futures = futures
+	}
+}
+
+// SetSymbolLeverage sets matching leverage for a futures symbol (initial margin).
 func (e *Exchange) SetSymbolLeverage(symbol string, leverage int) {
 	if leverage <= 0 {
 		return

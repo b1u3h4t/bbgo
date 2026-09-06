@@ -6,8 +6,8 @@
 #     --sync --sync-from 2026-08-01 --force -v
 #
 # Notes:
-# - Prefer fixed `quantity` in backtest: futures engine may lock full notional
-#   when sizing by leverage, causing insufficient-balance retries.
+# - Prefer fixed `quantity` in backtest.
+# - USDT-M futures backtest locks quote margin (qty*price/leverage), not base.
 # - Sync needs BINANCE_API_KEY/SECRET and DB_DRIVER/DB_DSN in .env.local.
 #
 sessions:

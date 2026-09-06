@@ -178,6 +178,35 @@ func (s *Strategy) rangeQty() fixedpoint.Value {
 	return s.Quantity
 }
 
+// closePositionFully closes and retries once to clear residual dust that can
+// block the next short (spot-style wallets) or leave a dust long open.
+func (s *Strategy) closePositionFully(ctx context.Context, tag string) {
+	if err := s.orderExecutor.ClosePosition(ctx, one, tag); err != nil {
+		log.WithError(err).Errorf("%s close failed", tag)
+	}
+	if s.Position == nil {
+		return
+	}
+	base := s.Position.GetBase()
+	if base.IsZero() {
+		return
+	}
+	if err := s.orderExecutor.ClosePosition(ctx, one, tag+"Dust"); err != nil {
+		log.WithError(err).Warnf("%s dust scrub failed base=%s", tag, base.String())
+	}
+}
+
+// scrubBeforeShort closes any residual long/dust so a fresh short can open.
+func (s *Strategy) scrubBeforeShort(ctx context.Context) {
+	if s.Position == nil {
+		return
+	}
+	base := s.Position.GetBase()
+	if base.Sign() > 0 {
+		s.closePositionFully(ctx, "preShortScrub")
+	}
+}
+
 func (s *Strategy) Run(ctx context.Context, _ bbgo.OrderExecutor, session *bbgo.ExchangeSession) error {
 	_ = s.Defaults()
 	s.session = session
@@ -202,7 +231,7 @@ func (s *Strategy) Run(ctx context.Context, _ bbgo.OrderExecutor, session *bbgo.
 	s.Status = types.StrategyStatusRunning
 	s.OnSuspend(func() { _ = s.orderExecutor.GracefulCancel(ctx) })
 	s.OnEmergencyStop(func() {
-		_ = s.orderExecutor.ClosePosition(context.Background(), one, "emergency")
+		s.closePositionFully(context.Background(), "emergency")
 		_ = s.Suspend()
 	})
 
@@ -337,10 +366,10 @@ func (s *Strategy) handleBreakout(ctx context.Context, k types.KLine, box Box, h
 	if s.Position.IsOpened(k.Close) {
 		if wantLong && s.Position.IsShort() {
 			bbgo.Notify("%s udbox break UP — close short, flip long", s.Symbol)
-			_ = s.orderExecutor.ClosePosition(ctx, one, "breakFlip")
+			s.closePositionFully(ctx, "breakFlip")
 		} else if wantShort && s.Position.IsLong() {
 			bbgo.Notify("%s udbox break DOWN — close long, flip short", s.Symbol)
-			_ = s.orderExecutor.ClosePosition(ctx, one, "breakFlip")
+			s.closePositionFully(ctx, "breakFlip")
 		} else if wantLong && s.Position.IsLong() {
 			// already aligned: promote to trend stops
 			s.entryBox = box
@@ -355,6 +384,9 @@ func (s *Strategy) handleBreakout(ctx context.Context, k types.KLine, box Box, h
 			s.unlockBox()
 			return
 		}
+	} else if wantShort {
+		// dust long can still occupy base in spot-style wallets
+		s.scrubBeforeShort(ctx)
 	}
 
 	if wantLong {
@@ -391,6 +423,7 @@ func (s *Strategy) tryRangeEntry(ctx context.Context, k types.KLine, box Box) {
 	}
 
 	if s.EnableShort && box.InUpperZone(closePx, s.RangeSellZonePct) {
+		s.scrubBeforeShort(ctx)
 		bbgo.Notify("%s udbox RANGE sell zone close=%s box=[%.6g, %.6g]",
 			s.Symbol, k.Close.String(), box.Bottom, box.Top)
 		opt := bbgo.OpenPositionOptions{
@@ -418,14 +451,14 @@ func (s *Strategy) manageRangePosition(ctx context.Context, k types.KLine, box B
 		}
 		if closePx >= tp {
 			bbgo.Notify("%s udbox RANGE long TP @ %s", s.Symbol, k.Close.String())
-			_ = s.orderExecutor.ClosePosition(ctx, one, "rangeTP")
+			s.closePositionFully(ctx, "rangeTP")
 			s.stopPrice = 0
 			return
 		}
 		if closePx < box.Bottom {
 			// failed support — close; breakout handler may also flip
 			bbgo.Notify("%s udbox RANGE long stop under box @ %s", s.Symbol, k.Close.String())
-			_ = s.orderExecutor.ClosePosition(ctx, one, "rangeStop")
+			s.closePositionFully(ctx, "rangeStop")
 			s.stopPrice = 0
 			return
 		}
@@ -438,13 +471,13 @@ func (s *Strategy) manageRangePosition(ctx context.Context, k types.KLine, box B
 		}
 		if closePx <= tp {
 			bbgo.Notify("%s udbox RANGE short TP @ %s", s.Symbol, k.Close.String())
-			_ = s.orderExecutor.ClosePosition(ctx, one, "rangeTP")
+			s.closePositionFully(ctx, "rangeTP")
 			s.stopPrice = 0
 			return
 		}
 		if closePx > box.Top {
 			bbgo.Notify("%s udbox RANGE short stop above box @ %s", s.Symbol, k.Close.String())
-			_ = s.orderExecutor.ClosePosition(ctx, one, "rangeStop")
+			s.closePositionFully(ctx, "rangeStop")
 			s.stopPrice = 0
 		}
 	}
@@ -466,6 +499,9 @@ func (s *Strategy) nestBias(price float64) (longOK, shortOK bool) {
 
 func (s *Strategy) openTrend(ctx context.Context, long bool, k types.KLine, box Box) {
 	s.phase = PhaseTrend
+	if !long {
+		s.scrubBeforeShort(ctx)
+	}
 	opt := bbgo.OpenPositionOptions{
 		Long:     long,
 		Short:    !long,
@@ -519,12 +555,7 @@ func (s *Strategy) manageTrendPosition(ctx context.Context, k types.KLine, box B
 			hit = true
 		}
 		if hit {
-			if err := s.orderExecutor.ClosePosition(ctx, one, "boxStop"); err != nil {
-				log.WithError(err).Error("boxStop close failed")
-			}
-			if s.Position.IsOpened(k.Close) {
-				_ = s.orderExecutor.ClosePosition(ctx, one, "boxStopDust")
-			}
+			s.closePositionFully(ctx, "boxStop")
 			s.stopPrice = 0
 			s.phase = PhaseRange
 			return
@@ -535,7 +566,7 @@ func (s *Strategy) manageTrendPosition(ctx context.Context, k types.KLine, box B
 		roi := s.Position.ROI(k.Close)
 		if roi.Float64() >= s.RoiTakeProfit {
 			bbgo.Notify("%s udbox ROI take profit %.2f%%", s.Symbol, roi.Float64()*100)
-			_ = s.orderExecutor.ClosePosition(ctx, one, "roiTakeProfit")
+			s.closePositionFully(ctx, "roiTakeProfit")
 			s.stopPrice = 0
 			s.phase = PhaseRange
 		}

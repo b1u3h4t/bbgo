@@ -324,7 +324,8 @@ var BacktestCmd = &cobra.Command{
 			backtestEx := session.Exchange.(*backtest.Exchange)
 			backtestEx.MarketDataStream = session.MarketDataStream.(types.StandardStreamEmitter)
 			backtestEx.BindUserData(userDataStream)
-			if session.Delivery {
+			if session.Futures || session.Delivery {
+				backtestEx.SetFutures(true)
 				for symbol, leverage := range session.SymbolLeverage {
 					backtestEx.SetSymbolLeverage(symbol, leverage)
 				}

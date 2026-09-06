@@ -70,12 +70,18 @@ type SimplePriceMatching struct {
 
 	pessimisticMakerFill bool
 
-	// Leverage is used for coin-m initial margin. Zero/negative means 1x.
+	// Leverage is used for futures initial margin. Zero/negative means 1x.
 	Leverage fixedpoint.Value
+
+	// futures enables USDT-M linear margin accounting (no base inventory for shorts).
+	futures bool
 
 	// Coin-M book-keeping for wallet PnL / funding / liquidation.
 	coinMPosition    fixedpoint.Value // signed contracts
 	coinMAverageCost fixedpoint.Value
+	// USDT-M book-keeping: signed base qty; wallet stays in quote margin only.
+	usdtMPosition    fixedpoint.Value
+	usdtMAverageCost fixedpoint.Value
 	// FundingRatePerSettlement is applied at 00/08/16 UTC when non-zero (e.g. 0.0001 = 0.01%).
 	FundingRatePerSettlement fixedpoint.Value
 	// MaintenanceMarginRate triggers liquidation when equity falls below notional/price * rate (default 0.5%).
@@ -148,6 +154,10 @@ func (m *SimplePriceMatching) CancelOrder(o types.Order) (types.Order, error) {
 		if err := m.unlockCoinMMargin(o.Quantity, o.Price); err != nil {
 			return o, err
 		}
+	} else if m.isUSDTM() {
+		if err := m.unlockUSDTMMargin(o.Quantity, o.Price); err != nil {
+			return o, err
+		}
 	} else {
 		switch o.Side {
 		case types.SideTypeBuy:
@@ -209,6 +219,14 @@ func (m *SimplePriceMatching) PlaceOrder(o types.SubmitOrder) (*types.Order, *ty
 		if err := m.lockCoinMMargin(o.Quantity, price); err != nil {
 			return nil, nil, err
 		}
+	} else if m.isUSDTM() {
+		quoteQuantity := o.Quantity.Mul(price)
+		if quoteQuantity.Compare(m.Market.MinNotional) < 0 {
+			return nil, nil, fmt.Errorf("order amount %s is less than minNotional %s, order: %+v", quoteQuantity.String(), m.Market.MinNotional.String(), o)
+		}
+		if err := m.lockUSDTMMargin(o.Quantity, price); err != nil {
+			return nil, nil, err
+		}
 	} else {
 		quoteQuantity := o.Quantity.Mul(price)
 		if quoteQuantity.Compare(m.Market.MinNotional) < 0 {
@@ -263,7 +281,7 @@ func (m *SimplePriceMatching) PlaceOrder(o types.SubmitOrder) (*types.Order, *ty
 		// emit trade before we publish order
 		trade := m.newTradeFromOrder(&order2, false, price)
 
-		// For coin-m limit takers, adjust locked margin to the fill price before release.
+		// For futures limit takers, adjust locked margin to the fill price before release.
 		if m.isCoinM() && order.Type == types.OrderTypeLimit {
 			if order.AveragePrice.IsZero() {
 				return nil, nil, fmt.Errorf("the average price of the given limit taker order can not be zero")
@@ -283,10 +301,29 @@ func (m *SimplePriceMatching) PlaceOrder(o types.SubmitOrder) (*types.Order, *ty
 				m.EmitBalanceUpdate(m.account.Balances())
 			}
 			m.executeTrade(trade)
+		} else if m.isUSDTM() && order.Type == types.OrderTypeLimit {
+			if order.AveragePrice.IsZero() {
+				return nil, nil, fmt.Errorf("the average price of the given limit taker order can not be zero")
+			}
+			locked := m.usdtMInitialMargin(order.Quantity, order.Price)
+			needed := m.usdtMInitialMargin(order.Quantity, order.AveragePrice)
+			diff := locked.Sub(needed)
+			if diff.Sign() > 0 {
+				if err := m.account.UnlockBalance(m.Market.QuoteCurrency, diff); err != nil {
+					return nil, nil, err
+				}
+				m.EmitBalanceUpdate(m.account.Balances())
+			} else if diff.Sign() < 0 {
+				if err := m.account.LockBalance(m.Market.QuoteCurrency, diff.Abs()); err != nil {
+					return nil, nil, err
+				}
+				m.EmitBalanceUpdate(m.account.Balances())
+			}
+			m.executeTrade(trade)
 		} else {
 			m.executeTrade(trade)
 
-			// unlock the rest balances for limit taker (linear / spot)
+			// unlock the rest balances for limit taker (spot)
 			if order.Type == types.OrderTypeLimit {
 				if order.AveragePrice.IsZero() {
 					return nil, nil, fmt.Errorf("the average price of the given limit taker order can not be zero")
@@ -354,6 +391,14 @@ func (m *SimplePriceMatching) executeTrade(trade types.Trade) {
 		m.EmitBalanceUpdate(m.account.Balances())
 		return
 	}
+	if m.isUSDTM() {
+		if err := m.executeUSDTMTrade(trade, trade.Price); err != nil {
+			panic(errors.Wrapf(err, "executeTrade usdt-m exception, wanted to unlock more than the locked margin"))
+		}
+		m.EmitTradeUpdate(trade)
+		m.EmitBalanceUpdate(m.account.Balances())
+		return
+	}
 
 	var err error
 	// execute trade, update account balances
@@ -416,6 +461,9 @@ func (m *SimplePriceMatching) newTradeFromOrder(order *types.Order, isMaker bool
 	if m.isCoinM() {
 		fee = coinMFeeInBase(order.Quantity, price, m.Market.ContractValue, feeRate)
 		feeCurrency = m.Market.BaseCurrency
+	} else if m.isUSDTM() {
+		// USDT-M fees are always in quote (Binance USD-M).
+		fee, feeCurrency = feeModeFunctionQuote(order, &m.Market, feeRate)
 	} else if m.feeModeFunction != nil {
 		fee, feeCurrency = m.feeModeFunction(order, &m.Market, feeRate)
 	} else {
@@ -440,7 +488,7 @@ func (m *SimplePriceMatching) newTradeFromOrder(order *types.Order, isMaker bool
 		Time:          types.Time(m.currentTime),
 		Fee:           fee,
 		FeeCurrency:   feeCurrency,
-		IsFutures:     m.isCoinM(),
+		IsFutures:     m.isCoinM() || m.isUSDTM(),
 	}
 }
 
