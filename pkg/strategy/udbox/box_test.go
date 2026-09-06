@@ -58,3 +58,14 @@ func TestVolatilityCompressing(t *testing.T) {
 	assert.True(t, VolatilityCompressing(ks, 10))
 }
 
+func TestVolatilityCompressing_Expanding(t *testing.T) {
+	var ks []types.KLine
+	for i := 0; i < 10; i++ {
+		ks = append(ks, k(101, 99, 100))
+	}
+	for i := 0; i < 10; i++ {
+		ks = append(ks, k(110, 90, 100))
+	}
+	assert.False(t, VolatilityCompressing(ks, 10))
+}
+

@@ -39,22 +39,25 @@ exchangeStrategies:
       symbol: BTCUSDT
       interval: 4h
       boxWindow: 20
-      minBoxWidthPct: 0.008
-      maxBoxWidthPct: 0.08
+      # Wider floor / tighter ceiling → fewer thin fee-eating boxes
+      minBoxWidthPct: 0.015
+      maxBoxWidthPct: 0.05
       breakBufferPct: 0.001
       requireCompression: true
       compressionLookback: 10
       enableLong: true
       enableShort: true
       enableRange: true
-      rangeBuyZonePct: 0.25
-      rangeSellZonePct: 0.25
+      # Only lock/trade range when volatility is compressing
+      rangeRequireCompression: true
+      rangeBuyZonePct: 0.15
+      rangeSellZonePct: 0.15
       rangeQtyRatio: 0.5
-      rangeTakeMid: true
+      # Opposite zone TP (larger R than mid)
+      rangeTakeMid: false
       useNestFilter: true
       nestInterval: 1d
       nestEMAWindow: 20
-      # Fixed qty avoids notional-lock failures under leverage sizing in backtest.
       quantity: 0.05
       useBoxStop: true
       trailNewBox: true

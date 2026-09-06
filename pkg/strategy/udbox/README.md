@@ -26,16 +26,17 @@ exchangeStrategies:
       symbol: BTCUSDT
       interval: 4h
       boxWindow: 20
-      minBoxWidthPct: 0.008
-      maxBoxWidthPct: 0.06
+      minBoxWidthPct: 0.015      # 过窄箱易被手续费吃掉
+      maxBoxWidthPct: 0.05
       breakBufferPct: 0.001
       enableLong: true
       enableShort: true
       enableRange: true          # 箱内震荡
-      rangeBuyZonePct: 0.25      # 箱体下部 25%
-      rangeSellZonePct: 0.25
+      rangeRequireCompression: true  # 仅波动收敛时锁箱/做震
+      rangeBuyZonePct: 0.15      # 更贴底才进
+      rangeSellZonePct: 0.15
       rangeQtyRatio: 0.5         # 震荡仓 = quantity * 0.5
-      rangeTakeMid: true         # true=中线止盈；false=对侧区
+      rangeTakeMid: false        # false=对侧区止盈（更大目标）
       useNestFilter: true        # 主要过滤趋势突破方向
       nestInterval: 1d
       nestEMAWindow: 20
@@ -51,5 +52,6 @@ exchangeStrategies:
 ## 注意
 
 - 箱内震荡会增加交易次数与假突破前的磨损；突破时若持反向仓会先平再开。
+- `rangeRequireCompression`：只在「起涨点」式波动收敛时锁箱做震，降低无压缩盘整的刷单。
 - 锁定箱体避免滚动窗口把箱顶箱底不断拉开。
 - 与 `grid2` 仍不同：单仓位、分区限价逻辑用市价收盘信号，不是挂满网格。

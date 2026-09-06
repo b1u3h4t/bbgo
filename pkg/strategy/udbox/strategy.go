@@ -72,12 +72,14 @@ type Strategy struct {
 	Leverage fixedpoint.Value `json:"leverage"`
 
 	// Hybrid range (箱内震荡)
-	EnableRange     bool             `json:"enableRange"`
-	RangeBuyZonePct float64          `json:"rangeBuyZonePct"`  // bottom fraction of box width
-	RangeSellZonePct float64         `json:"rangeSellZonePct"` // top fraction
-	RangeQuantity   fixedpoint.Value `json:"rangeQuantity"`    // if zero, Quantity * RangeQtyRatio
-	RangeQtyRatio   float64          `json:"rangeQtyRatio"`    // default 0.5
-	RangeTakeMid    bool             `json:"rangeTakeMid"`     // TP at box mid; else opposite zone
+	EnableRange      bool             `json:"enableRange"`
+	RangeBuyZonePct  float64          `json:"rangeBuyZonePct"`  // bottom fraction of box width
+	RangeSellZonePct float64          `json:"rangeSellZonePct"` // top fraction
+	RangeQuantity    fixedpoint.Value `json:"rangeQuantity"`    // if zero, Quantity * RangeQtyRatio
+	RangeQtyRatio    float64          `json:"rangeQtyRatio"`    // default 0.5
+	RangeTakeMid     bool             `json:"rangeTakeMid"`     // TP at box mid; else opposite zone
+	// RangeRequireCompression: only lock/trade range when VolatilityCompressing (起涨点收敛)
+	RangeRequireCompression bool `json:"rangeRequireCompression"`
 
 	// Exit (trend)
 	UseBoxStop    bool    `json:"useBoxStop"`
@@ -275,12 +277,16 @@ func (s *Strategy) onKLineClosed(ctx context.Context, k types.KLine) {
 
 	// Acquire / keep locked box for hybrid range
 	if s.EnableRange {
-		if !s.hasLockedBox && okDetect && detected.IsInside(closePx) {
+		canLock := okDetect && detected.IsInside(closePx)
+		if canLock && s.RangeRequireCompression && !VolatilityCompressing(hist, s.CompressionLookback) {
+			canLock = false
+		}
+		if !s.hasLockedBox && canLock {
 			s.lockedBox = detected
 			s.hasLockedBox = true
 			s.phase = PhaseRange
-			log.Infof("%s lock range box [%.6g, %.6g] width=%.3f%%",
-				s.Symbol, detected.Bottom, detected.Top, detected.WidthPct()*100)
+			log.Infof("%s lock range box [%.6g, %.6g] width=%.3f%% compress=%v",
+				s.Symbol, detected.Bottom, detected.Top, detected.WidthPct()*100, s.RangeRequireCompression)
 		}
 	}
 
@@ -403,6 +409,15 @@ func (s *Strategy) unlockBox() {
 }
 
 func (s *Strategy) tryRangeEntry(ctx context.Context, k types.KLine, box Box) {
+	if s.RangeRequireCompression {
+		hist := s.klineBuf
+		if len(hist) > 1 {
+			hist = hist[:len(hist)-1]
+		}
+		if !VolatilityCompressing(hist, s.CompressionLookback) {
+			return
+		}
+	}
 	closePx := k.Close.Float64()
 	qty := s.rangeQty()
 
