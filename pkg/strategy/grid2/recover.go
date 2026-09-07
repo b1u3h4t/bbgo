@@ -261,6 +261,10 @@ func (s *Strategy) recover(ctx context.Context) error {
 			return fmt.Errorf("[Recover] there is still empty grid in twin orderbook")
 		}
 
+		// EmitFilled places missing reverse orders; do not recount profit/Slack.
+		s.recovering = true
+		defer func() { s.recovering = false }()
+
 		for _, pin := range noTwinOrderPins {
 			twinOrder := activeOrdersInTwinOrderBook.GetTwinOrder(pin)
 			if twinOrder == nil {

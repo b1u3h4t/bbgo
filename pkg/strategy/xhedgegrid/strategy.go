@@ -192,6 +192,9 @@ type Strategy struct {
 	// filledOrderIDMap is used to prevent processing the same order ID twice.
 	filledOrderIDMap *types.SyncOrderMap
 
+	// recovering skips profit recount when recover re-emits historical fills.
+	recovering bool
+
 	// mu is used for locking the grid object field, avoid double grid opening
 	mu sync.Mutex
 
@@ -570,6 +573,10 @@ func (s *Strategy) processFilledOrder(o types.Order) {
 
 	// we calculate profit only when the order is placed successfully
 	if profit != nil {
+		if s.recovering {
+			s.logger.Infof("skip grid profit during recover (already counted live): %+v", profit)
+			return
+		}
 		s.GridProfitStats.AddProfit(profit)
 		s.logger.Infof("GENERATED GRID PROFIT: %+v; TOTAL GRID PROFIT BECOMES: %f", profit, s.GridProfitStats.TotalQuoteProfit.Float64())
 		s.EmitGridProfit(s.GridProfitStats, profit)
