@@ -1311,6 +1311,7 @@ func (s *Strategy) openGrid(ctx context.Context, session *bbgo.ExchangeSession) 
 	} else if s.QuantityOrAmount.IsSet() {
 		if quantity := s.QuantityOrAmount.Quantity; !quantity.IsZero() {
 			if _, _, err2 := s.checkRequiredInvestmentByQuantity(totalBase, totalQuote, s.QuantityOrAmount.Quantity, lastPrice, s.grid.Pins); err2 != nil {
+				s.logger.WithError(err2).Errorf("grid investment check failed")
 				s.EmitGridError(err2)
 				return err2
 			}
@@ -1396,11 +1397,20 @@ func (s *Strategy) openGrid(ctx context.Context, session *bbgo.ExchangeSession) 
 
 	writeCtx := s.getWriteContext(ctx)
 
+	// Release s.mu before network I/O. Holding it across submit/Sync deadlocks
+	// when order callbacks or persistence try to take the same lock.
+	s.mu.Unlock()
+	defer s.mu.Lock()
+
 	s.lockWriteOrders()
 	createdOrders, err2 := s.submitGridOrders(writeCtx, submitOrders)
 	s.unlockWriteOrders()
 	if err2 != nil {
 		s.EmitGridError(err2)
+		// clear grid so a later open can retry
+		s.mu.Lock()
+		s.grid = nil
+		s.mu.Unlock()
 		return err2
 	}
 

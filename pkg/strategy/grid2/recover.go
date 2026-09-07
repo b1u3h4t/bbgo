@@ -453,7 +453,11 @@ func queryTradesToUpdateTwinOrderBook(
 			fromTradeID = trade.ID + 1
 
 			if err := twinOrderBook.AddOrder(*order, true); err != nil {
-				return errors.Wrapf(err, "[Recover] failed to add queried order into twin orderbook: %s", order.String())
+				// Historical fills from a previous grid range must not abort recover.
+				if logger != nil {
+					logger("[Recover] skip queried order not on current pins: %s (%v)", order.String(), err)
+				}
+				continue
 			}
 		}
 
