@@ -1,0 +1,149 @@
+name: Sync Upstream
+
+# Auto-merge c9s/bbgo main when the merge is clean.
+# This is a GitHub Actions workflow (not a Cursor hook / not an upstream webhook).
+# Upstream cannot push webhooks into your fork without their cooperation; polling is the usual approach.
+on:
+  schedule:
+    # Every 6 hours UTC
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Fetch and try merge, but do not push"
+        type: boolean
+        default: false
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          # Needed so the push below authenticates as the workflow identity.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/c9s/bbgo.git
+          git fetch --no-tags upstream main
+          echo "local=$(git rev-parse HEAD)"
+          echo "upstream=$(git rev-parse upstream/main)"
+          echo "behind=$(git rev-list --count HEAD..upstream/main)"
+          echo "ahead=$(git rev-list --count upstream/main..HEAD)"
+
+      - name: Skip if already up to date
+        id: status
+        run: |
+          behind=$(git rev-list --count HEAD..upstream/main)
+          echo "behind=$behind" >> "$GITHUB_OUTPUT"
+          if [ "$behind" = "0" ]; then
+            echo "Already up to date with upstream/main"
+          fi
+
+      - name: Merge upstream/main
+        if: steps.status.outputs.behind != '0'
+        id: merge
+        run: |
+          set -euo pipefail
+          if git merge --no-edit --no-ff upstream/main; then
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
+            echo "Merged upstream/main cleanly"
+            git log -1 --oneline
+          else
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+            git merge --abort || true
+            echo "Merge has conflicts; will open an issue"
+            exit 0
+          fi
+
+      - name: Push main
+        if: >-
+          steps.status.outputs.behind != '0' &&
+          steps.merge.outputs.conflict == 'false' &&
+          !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+        run: |
+          git push origin HEAD:main
+          echo "Pushed merge to origin/main (Deploy may run on this push)"
+
+      - name: Dry-run notice
+        if: >-
+          steps.status.outputs.behind != '0' &&
+          steps.merge.outputs.conflict == 'false' &&
+          github.event_name == 'workflow_dispatch' &&
+          inputs.dry_run
+        run: echo "Dry run — merge succeeded locally but push was skipped"
+
+      - name: Open issue on conflict
+        if: steps.status.outputs.behind != '0' && steps.merge.outputs.conflict == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = 'upstream sync conflict: c9s/bbgo main';
+            const body = [
+              'Automated Sync Upstream could not merge `upstream/main` cleanly.',
+              '',
+              `- Workflow run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              '- Upstream: https://github.com/c9s/bbgo',
+              '',
+              'Please merge manually:',
+              '```bash',
+              'git fetch upstream main',
+              'git merge upstream/main',
+              '# resolve conflicts, then',
+              'git push origin main',
+              '```',
+            ].join('\n');
+
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'upstream-sync',
+              per_page: 10,
+            });
+            const existing = issues.data.find((i) => i.title === title);
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body: `Still conflicting as of run ${context.runId}.`,
+              });
+              core.warning(`Conflict issue already open: #${existing.number}`);
+              return;
+            }
+
+            // Label may not exist yet — create issue without it if needed.
+            try {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['upstream-sync'],
+              });
+            } catch (e) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+              });
+            }
