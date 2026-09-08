@@ -27,6 +27,8 @@ jobs:
       MYSQL_DATABASE: bbgo
       MYSQL_USER: "root"
       MYSQL_PASSWORD: "root" # pragma: allowlist secret
+      # Self-hosted runners (esp. nc2) often already bind host :3306; use a dedicated CI port.
+      MYSQL_HOST_PORT: ${{ github.event_name == 'pull_request' && 3306 || 13306 }}
 
     steps:
 
@@ -59,18 +61,18 @@ jobs:
       if: github.event_name != 'pull_request'
       run: |
         docker rm -f bbgo-ci-mysql >/dev/null 2>&1 || true
-        # Free host port if another MySQL already binds 3306
-        if ss -ltn | awk '{print $4}' | grep -qE '(:|^)3306$'; then
-          echo "port 3306 already in use; attempting to free conflicting listeners"
-          docker ps --format '{{.ID}} {{.Ports}}' | awk '/3306->/ {print $1}' | xargs -r docker rm -f || true
-        fi
-        docker run -d --name bbgo-ci-mysql \
-          -e MYSQL_ALLOW_EMPTY_PASSWORD=yes \
+        # Do not bind host :3306 — production/Harbor MySQL often owns it (docker exit 125).
+        if ! docker run -d --name bbgo-ci-mysql \
           -e MYSQL_ROOT_PASSWORD=${{ env.MYSQL_PASSWORD }} \
           -e MYSQL_DATABASE=${{ env.MYSQL_DATABASE }} \
-          -p 3306:3306 \
+          -p 127.0.0.1:${{ env.MYSQL_HOST_PORT }}:3306 \
           mysql:8.0 \
-          --default-authentication-plugin=mysql_native_password
+          --default-authentication-plugin=mysql_native_password; then
+          echo "docker run bbgo-ci-mysql failed"
+          ss -ltn | grep -E '(:|^)${{ env.MYSQL_HOST_PORT }}$' || true
+          docker ps -a --filter name=bbgo-ci-mysql || true
+          exit 1
+        fi
         ready=0
         for i in $(seq 1 45); do
           if docker exec bbgo-ci-mysql mysqladmin ping -uroot -p${{ env.MYSQL_PASSWORD }} --silent; then
@@ -132,7 +134,9 @@ jobs:
 
     - name: Test Migration SQL Files For MySQL
       run: |
-        rockhopper --config rockhopper_mysql.yaml up
+        # Point rockhopper at MYSQL_HOST_PORT (13306 on self-hosted, 3306 on ubuntu-latest).
+        sed "s@:3306)@:${MYSQL_HOST_PORT})@" rockhopper_mysql.yaml > /tmp/rockhopper_mysql_ci.yaml
+        rockhopper --config /tmp/rockhopper_mysql_ci.yaml up
 
     - name: Test Migration SQL Files For SQLite
       run: |
@@ -174,7 +178,7 @@ jobs:
     - name: Create dotenv file
       run: |
         echo "DB_DRIVER=mysql" >> .env.local
-        echo "DB_DSN=root:root@tcp(127.0.0.1:3306)/bbgo" >> .env.local
+        echo "DB_DSN=root:root@tcp(127.0.0.1:${MYSQL_HOST_PORT})/bbgo" >> .env.local
 
     - name: Cleanup CI containers
       if: always() && github.event_name != 'pull_request'
