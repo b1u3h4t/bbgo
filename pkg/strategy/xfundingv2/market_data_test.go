@@ -28,6 +28,10 @@ func Test_queryTopCapAssets(t *testing.T) {
 }
 
 func Test_queryPortfolioModeCollateralRates(t *testing.T) {
+	if os.Getenv("GITHUB_CI") != "" {
+		t.Skip("skip live Binance public API call on CI (geo/network flaky)")
+	}
+
 	ctx := context.Background()
 	symbols := []string{"BTC", "ETH", "BNB"}
 	collateralRates, err := queryPortfolioModeCollateralRates(ctx, symbols)
