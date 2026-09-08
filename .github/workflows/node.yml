@@ -14,7 +14,8 @@ on:
 
 jobs:
   build:
-    runs-on: [self-hosted, bbgo]
+    # Public repo: PRs on GitHub-hosted; push on dedicated bbgo runner
+    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || fromJSON('["self-hosted","bbgo"]') }}
 
     strategy:
       matrix:

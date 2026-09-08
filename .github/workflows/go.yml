@@ -8,9 +8,10 @@ on:
 
 jobs:
   build:
-    # Dedicated bbgo runner on nc3 (actions-runner-bbgo); not avalanchego-tuned
-    runs-on: [self-hosted, bbgo]
-    timeout-minutes: 45
+    # Public repo: never run untrusted fork PRs on self-hosted hardware.
+    # push / same-repo work → nc3 bbgo runner; pull_request → GitHub-hosted.
+    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || fromJSON('["self-hosted","bbgo"]') }}
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 15 || 45 }}
 
     strategy:
       matrix:
@@ -37,7 +38,20 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-go-
 
-    - name: Set up MySQL (Docker)
+    - name: Set up MySQL (ubuntu-latest)
+      if: github.event_name == 'pull_request'
+      run: |
+        sudo /etc/init.d/mysql start
+        mysql -e 'CREATE DATABASE ${{ env.MYSQL_DATABASE }};' -u${{ env.MYSQL_USER }} -p${{ env.MYSQL_PASSWORD }}
+
+    - name: Set up redis (ubuntu-latest)
+      if: github.event_name == 'pull_request'
+      uses: shogo82148/actions-setup-redis@v1
+      with:
+        redis-version: ${{ matrix.redis-version }}
+
+    - name: Set up MySQL (self-hosted Docker)
+      if: github.event_name != 'pull_request'
       run: |
         docker rm -f bbgo-ci-mysql >/dev/null 2>&1 || true
         docker run -d --name bbgo-ci-mysql \
@@ -55,7 +69,8 @@ jobs:
         done
         docker exec bbgo-ci-mysql mysql -uroot -p${{ env.MYSQL_PASSWORD }} -e "CREATE DATABASE IF NOT EXISTS ${{ env.MYSQL_DATABASE }};"
 
-    - name: Set up redis (Docker)
+    - name: Set up redis (self-hosted Docker)
+      if: github.event_name != 'pull_request'
       run: |
         docker rm -f bbgo-ci-redis >/dev/null 2>&1 || true
         docker run -d --name bbgo-ci-redis -p 6379:6379 redis:${{ matrix.redis-version }}
@@ -119,6 +134,6 @@ jobs:
         echo "DB_DSN=root:root@tcp(127.0.0.1:3306)/bbgo" >> .env.local
 
     - name: Cleanup CI containers
-      if: always()
+      if: always() && github.event_name != 'pull_request'
       run: |
         docker rm -f bbgo-ci-mysql bbgo-ci-redis >/dev/null 2>&1 || true

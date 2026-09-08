@@ -12,7 +12,8 @@ permissions:
 jobs:
   golangci:
     name: lint
-    runs-on: [self-hosted, bbgo]
+    # Public repo: PRs on GitHub-hosted; push on dedicated bbgo runner
+    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || fromJSON('["self-hosted","bbgo"]') }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
