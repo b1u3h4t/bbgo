@@ -39,19 +39,16 @@ jobs:
           go-version: "1.26"
 
       # Self-hosted runners run as github-runner (no sudo). Do not apt-install Node.
+      # Do not set cache: yarn here — setup-node requires yarn on PATH before install.
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "18"
-          cache: yarn
-          cache-dependency-path: apps/frontend/yarn.lock
 
       - name: Ensure yarn
         run: |
           set -euo pipefail
-          if ! command -v yarn >/dev/null 2>&1; then
-            npm install -g yarn@1.22.22
-          fi
+          npm install -g yarn@1.22.22
           node -v
           yarn -v
 
