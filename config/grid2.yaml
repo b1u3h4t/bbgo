@@ -125,4 +125,8 @@ exchangeStrategies:
     ## clearOpenOrdersWhenStart (optional)
     ## default to false
     clearOpenOrdersWhenStart: false
+
+    ## keepOrdersWhenShutdown (optional)
+    ## When true, bbgo forces recoverOrdersWhenStart=true at startup so leftover
+    ## exchange orders are recovered instead of opening a duplicate grid.
     keepOrdersWhenShutdown: false

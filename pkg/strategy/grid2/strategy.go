@@ -144,7 +144,9 @@ type Strategy struct {
 	// KeepOrdersWhenShutdown option is used for keeping the grid orders when shutting down bbgo
 	KeepOrdersWhenShutdown bool `json:"keepOrdersWhenShutdown"`
 
-	// RecoverOrdersWhenStart option is used for recovering grid orders
+	// RecoverOrdersWhenStart option is used for recovering grid orders.
+	// When KeepOrdersWhenShutdown is true, this is forced on at startup: otherwise
+	// openGrid would place a fresh book on top of leftover exchange orders.
 	RecoverOrdersWhenStart bool `json:"recoverOrdersWhenStart"`
 
 	// ClearOpenOrdersWhenStart
@@ -303,7 +305,39 @@ func (s *Strategy) Initialize() error {
 	s.filledOrderIDMap = types.NewSyncOrderMap()
 	s.logger = log.WithFields(s.LogFields)
 	s.mergedPrometheusLabels = s.newPrometheusLabels()
+	s.sanitizeLifecycleOptions()
 	return nil
+}
+
+// sanitizeLifecycleOptions corrects dangerous keep/recover/clear combinations that
+// historically caused duplicate pin orders after restart (keep leftovers + re-openGrid).
+func (s *Strategy) sanitizeLifecycleOptions() {
+	if s.logger == nil {
+		s.logger = log.WithFields(s.LogFields)
+	}
+
+	if s.KeepOrdersWhenShutdown && !s.RecoverOrdersWhenStart {
+		s.logger.Warnf(
+			"%s: keepOrdersWhenShutdown=true with recoverOrdersWhenStart=false would re-open the grid on restart and duplicate exchange orders; forcing recoverOrdersWhenStart=true",
+			s.Symbol,
+		)
+		s.RecoverOrdersWhenStart = true
+		if !s.ClearDuplicatedPriceOpenOrders {
+			s.logger.Warnf(
+				"%s: enabling clearDuplicatedPriceOpenOrders to cancel leftover duplicate prices on start",
+				s.Symbol,
+			)
+			s.ClearDuplicatedPriceOpenOrders = true
+		}
+	}
+
+	if s.KeepOrdersWhenShutdown && s.ClearOpenOrdersWhenStart {
+		s.logger.Warnf(
+			"%s: keepOrdersWhenShutdown=true with clearOpenOrdersWhenStart=true is contradictory (orders kept on stop would be cleared on start); disabling clearOpenOrdersWhenStart",
+			s.Symbol,
+		)
+		s.ClearOpenOrdersWhenStart = false
+	}
 }
 
 func (s *Strategy) getPrometheusLabels() prometheus.Labels {
@@ -1412,6 +1446,17 @@ func (s *Strategy) openGrid(ctx context.Context, session *bbgo.ExchangeSession) 
 	s.mu.Unlock()
 	defer s.mu.Lock()
 
+	// Defense in depth: never place on a pin price that already has an open order,
+	// even if recover was skipped or failed.
+	if !bbgo.IsBackTesting {
+		filtered, errOcc := s.excludeOccupiedPinOrders(writeCtx, session, submitOrders)
+		if errOcc != nil {
+			s.logger.WithError(errOcc).Warnf("unable to query open orders before openGrid; proceeding without occupancy filter")
+		} else {
+			submitOrders = filtered
+		}
+	}
+
 	s.lockWriteOrders()
 	createdOrders, err2 := s.submitGridOrders(writeCtx, submitOrders)
 	s.unlockWriteOrders()
@@ -1683,6 +1728,46 @@ func (s *Strategy) setGrid(grid *grid2types.Grid) {
 	s.mu.Lock()
 	s.grid = grid
 	s.mu.Unlock()
+}
+
+// excludeOccupiedPinOrders drops submit orders whose price already has an open
+// order on the exchange, so a mistaken openGrid cannot stack duplicate pins.
+func (s *Strategy) excludeOccupiedPinOrders(
+	ctx context.Context, session *bbgo.ExchangeSession, orders []types.SubmitOrder,
+) ([]types.SubmitOrder, error) {
+	if len(orders) == 0 {
+		return orders, nil
+	}
+
+	openOrders, err := session.Exchange.QueryOpenOrders(ctx, s.Symbol)
+	if err != nil {
+		return orders, err
+	}
+	if len(openOrders) == 0 {
+		return orders, nil
+	}
+
+	occupied := make(map[string]struct{}, len(openOrders))
+	for _, o := range openOrders {
+		occupied[o.Price.String()] = struct{}{}
+	}
+
+	filtered := make([]types.SubmitOrder, 0, len(orders))
+	skipped := 0
+	for _, o := range orders {
+		if _, ok := occupied[o.Price.String()]; ok {
+			skipped++
+			continue
+		}
+		filtered = append(filtered, o)
+	}
+	if skipped > 0 {
+		s.logger.Warnf(
+			"skipping %d/%d openGrid submit orders that collide with existing open order prices",
+			skipped, len(orders),
+		)
+	}
+	return filtered, nil
 }
 
 func (s *Strategy) getGrid() *grid2types.Grid {
