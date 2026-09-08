@@ -30,9 +30,10 @@ func TestToGlobalDeliveryAccountTrade(t *testing.T) {
 	assert.True(t, trade.IsBuyer)
 	assert.True(t, trade.IsMaker)
 	assert.Equal(t, "BTC", trade.FeeCurrency)
-	assert.Equal(t, 0.0001, trade.Fee.Float64())
-	assert.Equal(t, 10.0, trade.Quantity.Float64())
+	// Compare fixedpoint values directly: Float64() is lossy under -tags dnum.
+	assert.Equal(t, 0, trade.Fee.Compare(fixedpoint.MustNewFromString("0.0001")))
+	assert.Equal(t, 0, trade.Quantity.Compare(fixedpoint.MustNewFromString("10")))
 	// QuoteQuantity is price*contracts for linear avg-cost math (not contract USD notional).
-	assert.Equal(t, 1_000_000.0, trade.QuoteQuantity.Float64())
-	assert.Equal(t, fixedpoint.NewFromFloat(100000), trade.Price)
+	assert.Equal(t, 0, trade.QuoteQuantity.Compare(fixedpoint.MustNewFromString("1000000")))
+	assert.Equal(t, 0, trade.Price.Compare(fixedpoint.MustNewFromString("100000")))
 }
