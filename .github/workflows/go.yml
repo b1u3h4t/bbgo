@@ -60,24 +60,28 @@ jobs:
     - name: Set up MySQL (self-hosted Docker)
       if: github.event_name != 'pull_request'
       run: |
-        docker rm -f bbgo-ci-mysql >/dev/null 2>&1 || true
+        docker rm -fv bbgo-ci-mysql >/dev/null 2>&1 || true
         # Do not bind host :3306 — production/Harbor MySQL often owns it (docker exit 125).
         if ! docker run -d --name bbgo-ci-mysql \
           -e MYSQL_ROOT_PASSWORD=${{ env.MYSQL_PASSWORD }} \
           -e MYSQL_DATABASE=${{ env.MYSQL_DATABASE }} \
           -p 127.0.0.1:${{ env.MYSQL_HOST_PORT }}:3306 \
-          mysql:8.0 \
-          --default-authentication-plugin=mysql_native_password; then
+          mysql:8.0; then
           echo "docker run bbgo-ci-mysql failed"
           ss -ltn | grep -E '(:|^)${{ env.MYSQL_HOST_PORT }}$' || true
           docker ps -a --filter name=bbgo-ci-mysql || true
           exit 1
         fi
+        # mysqladmin ping can succeed during entrypoint's temporary server (or even with
+        # Access denied). Require a real authenticated query, twice, to pass the restart gap.
         ready=0
-        for i in $(seq 1 45); do
-          if docker exec bbgo-ci-mysql mysqladmin ping -uroot -p${{ env.MYSQL_PASSWORD }} --silent; then
-            ready=1
-            break
+        for i in $(seq 1 60); do
+          if docker exec bbgo-ci-mysql mysql -uroot -p${{ env.MYSQL_PASSWORD }} -e "SELECT 1" >/dev/null 2>&1; then
+            sleep 3
+            if docker exec bbgo-ci-mysql mysql -uroot -p${{ env.MYSQL_PASSWORD }} -e "SELECT 1" >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
           fi
           sleep 2
         done
