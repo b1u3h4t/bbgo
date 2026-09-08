@@ -88,13 +88,13 @@ func Test_QueryFuturesMarkPriceKLines(t *testing.T) {
 		Limit(10).
 		Do(ctx)
 
-	if len(os.Getenv("GITHUB_CI")) > 0 {
-		// US GitHub-hosted may be geo-blocked; EU self-hosted may succeed.
-		if err != nil {
-			return
+	if err != nil {
+		// CI / geo-blocked runners (HTTP 451) cannot hit Binance futures reliably.
+		if os.Getenv("GITHUB_CI") != "" || strings.Contains(err.Error(), "451") {
+			t.Skipf("binance futures mark klines unavailable: %v", err)
 		}
-	} else {
 		assert.NoError(t, err)
+		return
 	}
 	assert.NotEmpty(t, klines)
 	if len(klines) > 0 {
@@ -117,13 +117,12 @@ func Test_QueryFuturesIndexPriceKLines(t *testing.T) {
 		Limit(10).
 		Do(ctx)
 
-	if len(os.Getenv("GITHUB_CI")) > 0 {
-		// US GitHub-hosted may be geo-blocked; EU self-hosted may succeed.
-		if err != nil {
-			return
+	if err != nil {
+		if os.Getenv("GITHUB_CI") != "" || strings.Contains(err.Error(), "451") {
+			t.Skipf("binance futures index klines unavailable: %v", err)
 		}
-	} else {
 		assert.NoError(t, err)
+		return
 	}
 	assert.NotEmpty(t, klines)
 	if len(klines) > 0 {

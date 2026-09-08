@@ -13,8 +13,8 @@ import (
 )
 
 func TestKLineDumper(t *testing.T) {
-	tempDir := os.TempDir()
-	_ = os.Mkdir(tempDir, 0755)
+	// Private dir avoids permission denied when a prior root-owned /tmp/*.tsv exists.
+	tempDir := t.TempDir()
 	dumper := NewKLineDumper(tempDir)
 
 	t1 := time.Now()

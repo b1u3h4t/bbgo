@@ -163,8 +163,18 @@ jobs:
         if [ "${{ github.event_name }}" != "pull_request" ]; then
           docker exec "${CI_REDIS_NAME}" redis-cli ping | grep -q PONG
         fi
+        # Persist stdout on the runner so we can SSH-diagnose without waiting on API logs.
+        LOG="/tmp/bbgo-gotest-${{ github.run_id }}.txt"
+        set +e
         # count=1 is enough on CI; -count 3 triples wall time. -race stays for data races.
-        go test -count=1 -race -coverprofile coverage.txt -covermode atomic ./pkg/...
+        go test -count=1 -race -coverprofile coverage.txt -covermode atomic ./pkg/... 2>&1 | tee "$LOG"
+        ec=${PIPESTATUS[0]}
+        set -e
+        if [ "$ec" -ne 0 ]; then
+          echo "==== FAIL summary (${LOG}) ===="
+          grep -E '^--- FAIL:|^FAIL[[:space:]]' "$LOG" || true
+          exit "$ec"
+        fi
         sed -i -e '/_requestgen.go/d' coverage.txt
 
     - name: TestDnum
@@ -172,8 +182,17 @@ jobs:
         if [ "${{ github.event_name }}" != "pull_request" ]; then
           docker exec "${CI_REDIS_NAME}" redis-cli ping | grep -q PONG
         fi
+        LOG="/tmp/bbgo-gotest-dnum-${{ github.run_id }}.txt"
+        set +e
         # dnum checks decimal semantics; race is already covered by the Test step above.
-        go test -count=1 -coverprofile coverage_dnum.txt -covermode atomic -tags dnum ./pkg/...
+        go test -count=1 -coverprofile coverage_dnum.txt -covermode atomic -tags dnum ./pkg/... 2>&1 | tee "$LOG"
+        ec=${PIPESTATUS[0]}
+        set -e
+        if [ "$ec" -ne 0 ]; then
+          echo "==== FAIL summary (${LOG}) ===="
+          grep -E '^--- FAIL:|^FAIL[[:space:]]' "$LOG" || true
+          exit "$ec"
+        fi
         sed -i -e '/_requestgen.go/d' coverage_dnum.txt
 
     - name: Revive Check
