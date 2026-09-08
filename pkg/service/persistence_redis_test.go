@@ -1,6 +1,8 @@
 package service
 
 import (
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -20,7 +22,7 @@ func TestRedisPersistentService(t *testing.T) {
 	assert.NotNil(t, store)
 
 	err := store.Reset()
-	assert.NoError(t, err)
+	requireRedis(t, err)
 
 	var fp fixedpoint.Value
 	err = store.Load(fp)
@@ -29,6 +31,7 @@ func TestRedisPersistentService(t *testing.T) {
 
 	fp = fixedpoint.NewFromFloat(3.1415)
 	err = store.Save(&fp)
+	requireRedis(t, err)
 	assert.NoError(t, err, "should store value without error")
 
 	var fp2 fixedpoint.Value
@@ -38,4 +41,26 @@ func TestRedisPersistentService(t *testing.T) {
 
 	err = store.Reset()
 	assert.NoError(t, err)
+}
+
+func requireRedis(t *testing.T, err error) {
+	t.Helper()
+	if err == nil || !isRedisUnavailable(err) {
+		assert.NoError(t, err)
+		return
+	}
+	if os.Getenv("GITHUB_CI") != "" {
+		t.Fatalf("redis required in CI but unavailable: %v", err)
+	}
+	t.Skipf("redis not available on 127.0.0.1:6379: %v", err)
+}
+
+func isRedisUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "no such host") ||
+		strings.Contains(msg, "i/o timeout")
 }

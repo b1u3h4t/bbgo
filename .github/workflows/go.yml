@@ -29,6 +29,9 @@ jobs:
       MYSQL_PASSWORD: "root" # pragma: allowlist secret
       # Self-hosted runners (esp. nc2) often already bind host :3306; use a dedicated CI port.
       MYSQL_HOST_PORT: ${{ github.event_name == 'pull_request' && 3306 || 13306 }}
+      # Per-run names so a cancelled job's cleanup cannot docker-rm the new job's containers.
+      CI_MYSQL_NAME: bbgo-ci-mysql-${{ github.run_id }}
+      CI_REDIS_NAME: bbgo-ci-redis-${{ github.run_id }}
 
     steps:
 
@@ -60,25 +63,27 @@ jobs:
     - name: Set up MySQL (self-hosted Docker)
       if: github.event_name != 'pull_request'
       run: |
-        docker rm -fv bbgo-ci-mysql >/dev/null 2>&1 || true
+        docker rm -f "${CI_MYSQL_NAME}" >/dev/null 2>&1 || true
+        # Free 13306 only from prior bbgo-ci-mysql-* leftovers (do not touch host mysqld).
+        docker ps --filter name=bbgo-ci-mysql- --format '{{.ID}}' | xargs -r docker rm -f || true
         # Do not bind host :3306 — production/Harbor MySQL often owns it (docker exit 125).
-        if ! docker run -d --name bbgo-ci-mysql \
+        if ! docker run -d --name "${CI_MYSQL_NAME}" \
           -e MYSQL_ROOT_PASSWORD=${{ env.MYSQL_PASSWORD }} \
           -e MYSQL_DATABASE=${{ env.MYSQL_DATABASE }} \
           -p 127.0.0.1:${{ env.MYSQL_HOST_PORT }}:3306 \
           mysql:8.0; then
-          echo "docker run bbgo-ci-mysql failed"
+          echo "docker run ${CI_MYSQL_NAME} failed"
           ss -ltn | grep -E '(:|^)${{ env.MYSQL_HOST_PORT }}$' || true
-          docker ps -a --filter name=bbgo-ci-mysql || true
+          docker ps -a --filter name=bbgo-ci-mysql- || true
           exit 1
         fi
         # mysqladmin ping can succeed during entrypoint's temporary server (or even with
         # Access denied). Require a real authenticated query, twice, to pass the restart gap.
         ready=0
         for i in $(seq 1 60); do
-          if docker exec bbgo-ci-mysql mysql -uroot -p${{ env.MYSQL_PASSWORD }} -e "SELECT 1" >/dev/null 2>&1; then
+          if docker exec "${CI_MYSQL_NAME}" mysql -uroot -p${{ env.MYSQL_PASSWORD }} -e "SELECT 1" >/dev/null 2>&1; then
             sleep 3
-            if docker exec bbgo-ci-mysql mysql -uroot -p${{ env.MYSQL_PASSWORD }} -e "SELECT 1" >/dev/null 2>&1; then
+            if docker exec "${CI_MYSQL_NAME}" mysql -uroot -p${{ env.MYSQL_PASSWORD }} -e "SELECT 1" >/dev/null 2>&1; then
               ready=1
               break
             fi
@@ -87,23 +92,22 @@ jobs:
         done
         if [ "$ready" != "1" ]; then
           echo "MySQL did not become ready in time"
-          docker logs bbgo-ci-mysql || true
+          docker logs "${CI_MYSQL_NAME}" || true
           exit 1
         fi
-        docker exec bbgo-ci-mysql mysql -uroot -p${{ env.MYSQL_PASSWORD }} -e "CREATE DATABASE IF NOT EXISTS ${{ env.MYSQL_DATABASE }};"
+        docker exec "${CI_MYSQL_NAME}" mysql -uroot -p${{ env.MYSQL_PASSWORD }} -e "CREATE DATABASE IF NOT EXISTS ${{ env.MYSQL_DATABASE }};"
 
     - name: Set up redis (self-hosted Docker)
       if: github.event_name != 'pull_request'
       run: |
-        docker rm -f bbgo-ci-redis >/dev/null 2>&1 || true
-        if ss -ltn | awk '{print $4}' | grep -qE '(:|^)6379$'; then
-          echo "port 6379 already in use; attempting to free conflicting listeners"
-          docker ps --format '{{.ID}} {{.Ports}}' | awk '/6379->/ {print $1}' | xargs -r docker rm -f || true
-        fi
-        docker run -d --name bbgo-ci-redis -p 127.0.0.1:6379:6379 redis:${{ matrix.redis-version }}
+        docker rm -f "${CI_REDIS_NAME}" >/dev/null 2>&1 || true
+        # Drop only previous CI redis containers so a cancelled sibling cannot leave us
+        # bound, and so our later cleanup cannot kill another run's redis by a shared name.
+        docker ps --filter name=bbgo-ci-redis- --format '{{.ID}}' | xargs -r docker rm -f || true
+        docker run -d --name "${CI_REDIS_NAME}" -p 127.0.0.1:6379:6379 redis:${{ matrix.redis-version }}
         ready=0
         for i in $(seq 1 30); do
-          if docker exec bbgo-ci-redis redis-cli ping | grep -q PONG; then
+          if docker exec "${CI_REDIS_NAME}" redis-cli ping | grep -q PONG; then
             ready=1
             break
           fi
@@ -111,12 +115,10 @@ jobs:
         done
         if [ "$ready" != "1" ]; then
           echo "Redis did not become ready in time"
-          docker logs bbgo-ci-redis || true
+          docker logs "${CI_REDIS_NAME}" || true
           exit 1
         fi
-        # Also verify host port is reachable from the runner (tests dial 127.0.0.1:6379)
-        if ! redis-cli -h 127.0.0.1 -p 6379 ping 2>/dev/null | grep -q PONG; then
-          # redis-cli may be absent on host; fall back to docker network check via nc
+        if ! docker exec "${CI_REDIS_NAME}" redis-cli -h 127.0.0.1 ping 2>/dev/null | grep -q PONG; then
           if command -v nc >/dev/null 2>&1; then
             nc -z 127.0.0.1 6379 || { echo "Redis port 6379 not reachable on host"; exit 1; }
           fi
@@ -157,12 +159,19 @@ jobs:
 
     - name: Test
       run: |
+        # Re-check redis: a cancelled sibling job used to `docker rm` a shared bbgo-ci-redis name.
+        if [ "${{ github.event_name }}" != "pull_request" ]; then
+          docker exec "${CI_REDIS_NAME}" redis-cli ping | grep -q PONG
+        fi
         # count=1 is enough on CI; -count 3 triples wall time. -race stays for data races.
         go test -count=1 -race -coverprofile coverage.txt -covermode atomic ./pkg/...
         sed -i -e '/_requestgen.go/d' coverage.txt
 
     - name: TestDnum
       run: |
+        if [ "${{ github.event_name }}" != "pull_request" ]; then
+          docker exec "${CI_REDIS_NAME}" redis-cli ping | grep -q PONG
+        fi
         # dnum checks decimal semantics; race is already covered by the Test step above.
         go test -count=1 -coverprofile coverage_dnum.txt -covermode atomic -tags dnum ./pkg/...
         sed -i -e '/_requestgen.go/d' coverage_dnum.txt
@@ -187,4 +196,4 @@ jobs:
     - name: Cleanup CI containers
       if: always() && github.event_name != 'pull_request'
       run: |
-        docker rm -f bbgo-ci-mysql bbgo-ci-redis >/dev/null 2>&1 || true
+        docker rm -f "${CI_MYSQL_NAME}" "${CI_REDIS_NAME}" >/dev/null 2>&1 || true
