@@ -10,13 +10,12 @@ on:
   push:
     branches:
       - main
+    # Keep Deploy in the default main check set (Go / Docker / lint / Deploy).
+    # Only skip pure documentation so a workflow-only or code push never "loses" Deploy.
     paths-ignore:
       - "**/*.md"
       - "doc/**"
       - "apps/backtest-report/**"
-      - ".github/workflows/docker.yml"
-      - ".github/workflows/release-chart.yml"
-      - ".github/workflows/node.yml"
 
 concurrency:
   group: deploy-production
