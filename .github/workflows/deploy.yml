@@ -1,0 +1,51 @@
+name: Deploy Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "git ref to deploy"
+        required: false
+        default: "main"
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "**/*.md"
+      - "doc/**"
+      - "apps/frontend/**"
+      - "apps/backtest-report/**"
+      - ".github/workflows/docker.yml"
+      - ".github/workflows/release-chart.yml"
+      - ".github/workflows/node.yml"
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, bbgo]
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+
+      - name: Build + deploy binary to Tokyo
+        env:
+          BBGO_SSH_HOST: bbgo
+          BBGO_HOME: /home/admin/bbgo
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          chmod +x scripts/deploy-prod.sh scripts/deploy-prod-remote.sh
+          # Ensure runner can reach production over SSH (Host bbgo → IdentityFile bbgo_deploy)
+          ssh -o BatchMode=yes -o ConnectTimeout=10 bbgo 'echo ssh_ok; systemctl is-active bbgo'
+          scripts/deploy-prod.sh
