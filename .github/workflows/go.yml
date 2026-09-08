@@ -5,15 +5,12 @@ on:
     branches:
     - "main"
   pull_request:
-    # types: [synchronize, opened, reopened, edited]
-    # branches:
-    # - "main"
-    # - "v*"
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Dedicated bbgo runner on nc3 (actions-runner-bbgo); not avalanchego-tuned
+    runs-on: [self-hosted, bbgo]
+    timeout-minutes: 45
 
     strategy:
       matrix:
@@ -30,9 +27,6 @@ jobs:
     steps:
 
     - uses: actions/checkout@v7
-      with:
-        # lfs: 'true'
-        ssh-key: ${{ secrets.git_ssh_key }}
 
     - uses: actions/cache@v6
       with:
@@ -43,16 +37,34 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-go-
 
-    - name: Set up MySQL
+    - name: Set up MySQL (Docker)
       run: |
-        sudo /etc/init.d/mysql start
-        mysql -e 'CREATE DATABASE ${{ env.MYSQL_DATABASE }};' -u${{ env.MYSQL_USER }} -p${{ env.MYSQL_PASSWORD }}
+        docker rm -f bbgo-ci-mysql >/dev/null 2>&1 || true
+        docker run -d --name bbgo-ci-mysql \
+          -e MYSQL_ALLOW_EMPTY_PASSWORD=yes \
+          -e MYSQL_ROOT_PASSWORD=${{ env.MYSQL_PASSWORD }} \
+          -e MYSQL_DATABASE=${{ env.MYSQL_DATABASE }} \
+          -p 3306:3306 \
+          mysql:8.0 \
+          --default-authentication-plugin=mysql_native_password
+        for i in $(seq 1 30); do
+          if docker exec bbgo-ci-mysql mysqladmin ping -uroot -p${{ env.MYSQL_PASSWORD }} --silent; then
+            break
+          fi
+          sleep 2
+        done
+        docker exec bbgo-ci-mysql mysql -uroot -p${{ env.MYSQL_PASSWORD }} -e "CREATE DATABASE IF NOT EXISTS ${{ env.MYSQL_DATABASE }};"
 
-    - name: Set up redis
-      uses: shogo82148/actions-setup-redis@v1
-      with:
-        redis-version: ${{ matrix.redis-version }}
-        # auto-start: "false"
+    - name: Set up redis (Docker)
+      run: |
+        docker rm -f bbgo-ci-redis >/dev/null 2>&1 || true
+        docker run -d --name bbgo-ci-redis -p 6379:6379 redis:${{ matrix.redis-version }}
+        for i in $(seq 1 20); do
+          if docker exec bbgo-ci-redis redis-cli ping | grep -q PONG; then
+            break
+          fi
+          sleep 1
+        done
 
     - name: Set up Go
       uses: actions/setup-go@v7
@@ -76,7 +88,7 @@ jobs:
     - name: Link Market Data
       run: |
         mkdir -p ~/.bbgo/cache
-        ln -s $PWD/data/binance-markets.json ~/.bbgo/cache/binance-markets.json
+        ln -sfn $PWD/data/binance-markets.json ~/.bbgo/cache/binance-markets.json
         touch data/binance-markets.json
 
     - name: Test
@@ -99,9 +111,14 @@ jobs:
       uses: codecov/codecov-action@v7
       with:
         files: ./coverage.txt,./coverage_dnum.txt
+      continue-on-error: true
 
     - name: Create dotenv file
       run: |
         echo "DB_DRIVER=mysql" >> .env.local
-        echo "DB_DSN=root:root@/bbgo" >> .env.local
+        echo "DB_DSN=root:root@tcp(127.0.0.1:3306)/bbgo" >> .env.local
 
+    - name: Cleanup CI containers
+      if: always()
+      run: |
+        docker rm -f bbgo-ci-mysql bbgo-ci-redis >/dev/null 2>&1 || true
