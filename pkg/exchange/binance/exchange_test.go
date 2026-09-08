@@ -26,13 +26,17 @@ func Test_new(t *testing.T) {
 	ctx := context.Background()
 	ticker, err := ex.QueryTicker(ctx, "btcusdt")
 	if len(os.Getenv("GITHUB_CI")) > 0 {
-		// Github action runs in the US, and therefore binance api is not accessible
-		assert.Empty(t, ticker)
-		assert.Error(t, err)
-	} else {
+		// GitHub-hosted US runners often cannot reach Binance; self-hosted
+		// runners outside that geo-block may succeed. Accept either outcome.
+		if err != nil {
+			assert.Empty(t, ticker)
+			return
+		}
 		assert.NotEmpty(t, ticker)
-		assert.NoError(t, err)
+		return
 	}
+	assert.NotEmpty(t, ticker)
+	assert.NoError(t, err)
 }
 
 func Test_QueryPositionRisk(t *testing.T) {
@@ -85,17 +89,19 @@ func Test_QueryFuturesMarkPriceKLines(t *testing.T) {
 		Do(ctx)
 
 	if len(os.Getenv("GITHUB_CI")) > 0 {
-		// Github action runs in the US, and therefore binance api is not accessible
-		assert.Error(t, err)
+		// US GitHub-hosted may be geo-blocked; EU self-hosted may succeed.
+		if err != nil {
+			return
+		}
 	} else {
 		assert.NoError(t, err)
-		assert.NotEmpty(t, klines)
-		if len(klines) > 0 {
-			k := klines[0]
-			assert.False(t, k.OpenTime.Time().IsZero())
-			assert.False(t, k.CloseTime.Time().IsZero())
-			assert.False(t, k.Close.IsZero())
-		}
+	}
+	assert.NotEmpty(t, klines)
+	if len(klines) > 0 {
+		k := klines[0]
+		assert.False(t, k.OpenTime.Time().IsZero())
+		assert.False(t, k.CloseTime.Time().IsZero())
+		assert.False(t, k.Close.IsZero())
 	}
 }
 
@@ -112,16 +118,18 @@ func Test_QueryFuturesIndexPriceKLines(t *testing.T) {
 		Do(ctx)
 
 	if len(os.Getenv("GITHUB_CI")) > 0 {
-		// Github action runs in the US, and therefore binance api is not accessible
-		assert.Error(t, err)
+		// US GitHub-hosted may be geo-blocked; EU self-hosted may succeed.
+		if err != nil {
+			return
+		}
 	} else {
 		assert.NoError(t, err)
-		assert.NotEmpty(t, klines)
-		if len(klines) > 0 {
-			k := klines[0]
-			assert.False(t, k.OpenTime.Time().IsZero())
-			assert.False(t, k.CloseTime.Time().IsZero())
-			assert.False(t, k.Close.IsZero())
-		}
+	}
+	assert.NotEmpty(t, klines)
+	if len(klines) > 0 {
+		k := klines[0]
+		assert.False(t, k.OpenTime.Time().IsZero())
+		assert.False(t, k.CloseTime.Time().IsZero())
+		assert.False(t, k.Close.IsZero())
 	}
 }
