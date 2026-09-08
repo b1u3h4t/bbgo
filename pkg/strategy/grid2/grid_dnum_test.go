@@ -25,10 +25,12 @@ func TestGrid_HasPrice_Dnum(t *testing.T) {
 	})
 
 	t.Run("case2", func(t *testing.T) {
-		upper := number(0.9)
-		lower := number(0.1)
+		// Use decimal strings: float literals like 0.9 become 0.9000...1 under dnum
+		// and skip the penultimate pin in CalculateArithmeticPins.
+		upper := number("0.9")
+		lower := number("0.1")
 		size := number(7.0)
-		grid := grid2types.NewGrid(lower, upper, size, number(0.00000001))
+		grid := grid2types.NewGrid(lower, upper, size, number("0.00000001"))
 		grid.CalculateArithmeticPins()
 
 		assert.Equal(t, []grid2types.Pin{
@@ -42,33 +44,33 @@ func TestGrid_HasPrice_Dnum(t *testing.T) {
 		}, grid.Pins)
 
 		assert.False(t, grid.HasPrice(number(200.0)), "out of range")
-		assert.True(t, grid.HasPrice(number(0.9)), "upper price")
-		assert.True(t, grid.HasPrice(number(0.1)), "lower price")
-		assert.True(t, grid.HasPrice(number(0.5)), "found 0.49999999 price ok")
+		assert.True(t, grid.HasPrice(number("0.9")), "upper price")
+		assert.True(t, grid.HasPrice(number("0.1")), "lower price")
+		assert.True(t, grid.HasPrice(number("0.5")), "found 0.5 price ok")
 	})
 
 	t.Run("case3", func(t *testing.T) {
-		upper := number(0.9)
-		lower := number(0.1)
+		upper := number("0.9")
+		lower := number("0.1")
 		size := number(7.0)
-		grid := grid2types.NewGrid(lower, upper, size, number(0.0001))
+		grid := grid2types.NewGrid(lower, upper, size, number("0.0001"))
 		grid.CalculateArithmeticPins()
 
 		assert.Equal(t, []grid2types.Pin{
-			grid2types.Pin(number(0.1)),
-			grid2types.Pin(number(0.2333)),
-			grid2types.Pin(number(0.3666)),
-			grid2types.Pin(number(0.5000)),
-			grid2types.Pin(number(0.6333)),
-			grid2types.Pin(number(0.7666)),
-			grid2types.Pin(number(0.9)),
+			grid2types.Pin(number("0.1")),
+			grid2types.Pin(number("0.2333")),
+			grid2types.Pin(number("0.3666")),
+			grid2types.Pin(number("0.5000")),
+			grid2types.Pin(number("0.6333")),
+			grid2types.Pin(number("0.7666")),
+			grid2types.Pin(number("0.9")),
 		}, grid.Pins)
 
 		assert.False(t, grid.HasPrice(number(200.0)), "out of range")
-		assert.True(t, grid.HasPrice(number(0.9)), "upper price")
-		assert.True(t, grid.HasPrice(number(0.1)), "lower price")
-		assert.True(t, grid.HasPrice(number(0.5)), "found 0.5 price ok")
-		assert.True(t, grid.HasPrice(number(0.2333)), "found 0.2333 price ok")
+		assert.True(t, grid.HasPrice(number("0.9")), "upper price")
+		assert.True(t, grid.HasPrice(number("0.1")), "lower price")
+		assert.True(t, grid.HasPrice(number("0.5")), "found 0.5 price ok")
+		assert.True(t, grid.HasPrice(number("0.2333")), "found 0.2333 price ok")
 	})
 
 	t.Run("case4", func(t *testing.T) {
