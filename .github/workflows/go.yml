@@ -54,6 +54,11 @@ jobs:
       if: github.event_name != 'pull_request'
       run: |
         docker rm -f bbgo-ci-mysql >/dev/null 2>&1 || true
+        # Free host port if another MySQL already binds 3306
+        if ss -ltn | awk '{print $4}' | grep -qE '(:|^)3306$'; then
+          echo "port 3306 already in use; attempting to free conflicting listeners"
+          docker ps --format '{{.ID}} {{.Ports}}' | awk '/3306->/ {print $1}' | xargs -r docker rm -f || true
+        fi
         docker run -d --name bbgo-ci-mysql \
           -e MYSQL_ALLOW_EMPTY_PASSWORD=yes \
           -e MYSQL_ROOT_PASSWORD=${{ env.MYSQL_PASSWORD }} \
@@ -61,25 +66,50 @@ jobs:
           -p 3306:3306 \
           mysql:8.0 \
           --default-authentication-plugin=mysql_native_password
-        for i in $(seq 1 30); do
+        ready=0
+        for i in $(seq 1 45); do
           if docker exec bbgo-ci-mysql mysqladmin ping -uroot -p${{ env.MYSQL_PASSWORD }} --silent; then
+            ready=1
             break
           fi
           sleep 2
         done
+        if [ "$ready" != "1" ]; then
+          echo "MySQL did not become ready in time"
+          docker logs bbgo-ci-mysql || true
+          exit 1
+        fi
         docker exec bbgo-ci-mysql mysql -uroot -p${{ env.MYSQL_PASSWORD }} -e "CREATE DATABASE IF NOT EXISTS ${{ env.MYSQL_DATABASE }};"
 
     - name: Set up redis (self-hosted Docker)
       if: github.event_name != 'pull_request'
       run: |
         docker rm -f bbgo-ci-redis >/dev/null 2>&1 || true
-        docker run -d --name bbgo-ci-redis -p 6379:6379 redis:${{ matrix.redis-version }}
-        for i in $(seq 1 20); do
+        if ss -ltn | awk '{print $4}' | grep -qE '(:|^)6379$'; then
+          echo "port 6379 already in use; attempting to free conflicting listeners"
+          docker ps --format '{{.ID}} {{.Ports}}' | awk '/6379->/ {print $1}' | xargs -r docker rm -f || true
+        fi
+        docker run -d --name bbgo-ci-redis -p 127.0.0.1:6379:6379 redis:${{ matrix.redis-version }}
+        ready=0
+        for i in $(seq 1 30); do
           if docker exec bbgo-ci-redis redis-cli ping | grep -q PONG; then
+            ready=1
             break
           fi
           sleep 1
         done
+        if [ "$ready" != "1" ]; then
+          echo "Redis did not become ready in time"
+          docker logs bbgo-ci-redis || true
+          exit 1
+        fi
+        # Also verify host port is reachable from the runner (tests dial 127.0.0.1:6379)
+        if ! redis-cli -h 127.0.0.1 -p 6379 ping 2>/dev/null | grep -q PONG; then
+          # redis-cli may be absent on host; fall back to docker network check via nc
+          if command -v nc >/dev/null 2>&1; then
+            nc -z 127.0.0.1 6379 || { echo "Redis port 6379 not reachable on host"; exit 1; }
+          fi
+        fi
 
     - name: Set up Go
       uses: actions/setup-go@v7

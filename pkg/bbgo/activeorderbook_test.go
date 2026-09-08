@@ -19,9 +19,14 @@ func TestActiveOrderBook_pendingOrders(t *testing.T) {
 
 	ob := NewActiveOrderBook("BTCUSDT")
 
-	filled := false
+	// Add() applies a newer pending Filled update via go Update() to avoid
+	// writeMutex deadlocks with strategies; wait for the async filled callback.
+	filledCh := make(chan struct{}, 1)
 	ob.OnFilled(func(o types.Order) {
-		filled = true
+		select {
+		case filledCh <- struct{}{}:
+		default:
+		}
 	})
 
 	quantity := Number("0.01")
@@ -74,7 +79,11 @@ func TestActiveOrderBook_pendingOrders(t *testing.T) {
 	// when adding the older order update to the book,
 	// it should trigger the filled event once the order is registered to the active order book
 	ob.Add(orderUpdate1)
-	assert.True(t, filled, "filled event should be fired")
+	select {
+	case <-filledCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("filled event should be fired")
+	}
 }
 
 func TestActiveOrderBook_RestoreParametersOnUpdateHandler(t *testing.T) {
