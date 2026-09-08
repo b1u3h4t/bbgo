@@ -10,12 +10,17 @@ on:
   push:
     tags:
     - "v*"
+    branches:
+    - "main"
 
 jobs:
   docker:
-    # Build/push on dedicated bbgo runner; credentials live on the runner host.
+    # Prefer any free bbgo runner (nc2 / nc3) so image builds can parallel with Go/Deploy.
     runs-on: [self-hosted, bbgo]
     timeout-minutes: 60
+    concurrency:
+      group: docker-image-${{ github.ref }}
+      cancel-in-progress: true
     steps:
     - name: Checkout
       uses: actions/checkout@v7
