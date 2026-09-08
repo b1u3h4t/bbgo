@@ -24,6 +24,12 @@ import (
 var stepTime = 30 * time.Millisecond
 var hedgeInterval = types.Duration(10 * time.Millisecond)
 
+// largeHedgeInterval keeps the hedge ticker from firing during channel-driven
+// tests. A short interval races with PositionExposure.Close from trade
+// callbacks and can duplicate SubmitOrder (see CI flake on
+// TestSyntheticHedge_MarketOrderHedge).
+var largeHedgeInterval = types.Duration(time.Hour)
+
 func init() {
 	tradeid.GlobalGenerator = tradeid.NewDeterministicGenerator()
 }
@@ -112,7 +118,7 @@ func TestSyntheticHedge_MarketOrderHedge(t *testing.T) {
 
 	sourceHedgeMarket := NewHedgeMarket(&HedgeMarketConfig{
 		SymbolSelector: sourceMarket.Symbol,
-		HedgeInterval:  hedgeInterval,
+		HedgeInterval:  largeHedgeInterval,
 		QuotingDepth:   Number(100.0),
 		SyncOrder:      types.BoolPtr(false),
 	}, sourceSession, sourceMarket)
@@ -131,7 +137,7 @@ func TestSyntheticHedge_MarketOrderHedge(t *testing.T) {
 	fiatSession.SetMarkets(AllMarkets())
 	fiatHedgeMarket := NewHedgeMarket(&HedgeMarketConfig{
 		SymbolSelector: fiatMarket.Symbol,
-		HedgeInterval:  hedgeInterval,
+		HedgeInterval:  largeHedgeInterval,
 		QuotingDepth:   Number(10.0),
 		SyncOrder:      types.BoolPtr(false),
 	}, fiatSession, fiatMarket)
@@ -164,12 +170,12 @@ func TestSyntheticHedge_MarketOrderHedge(t *testing.T) {
 		Source: &HedgeMarketConfig{
 			SymbolSelector: "binance." + sourceMarket.Symbol,
 			QuotingDepth:   Number(10.0),
-			HedgeInterval:  hedgeInterval,
+			HedgeInterval:  largeHedgeInterval,
 		},
 		Fiat: &HedgeMarketConfig{
 			SymbolSelector: "max." + fiatMarket.Symbol,
 			QuotingDepth:   Number(30.0 * 1000.0),
-			HedgeInterval:  hedgeInterval,
+			HedgeInterval:  largeHedgeInterval,
 		},
 		sourceMarket:     sourceHedgeMarket,
 		fiatMarket:       fiatHedgeMarket,
