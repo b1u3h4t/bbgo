@@ -38,15 +38,16 @@ jobs:
         with:
           go-version: "1.26"
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: "18"
-          cache: yarn
-          cache-dependency-path: apps/frontend/yarn.lock
-
-      - name: Install yarn
-        run: npm install -g yarn
+      - name: Ensure Node.js and yarn
+        run: |
+          set -euo pipefail
+          if ! command -v node >/dev/null || ! command -v yarn >/dev/null; then
+            curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+            sudo apt-get install -y nodejs
+            sudo npm install -g yarn
+          fi
+          node -v
+          yarn -v
 
       - name: Build SPA + deploy binary to Tokyo
         env:
