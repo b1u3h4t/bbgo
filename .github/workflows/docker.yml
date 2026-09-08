@@ -8,25 +8,28 @@ on:
         required: false
         default: 'main'
   push:
-    # Sequence of patterns matched against refs/tags
     tags:
-    - "v*" # Push events to matching v*, i.e. v1.0, v20.15.10
+    - "v*"
     branches:
     - "main"
 
 jobs:
   docker:
-    runs-on: ubuntu-latest
+    # Build/push on dedicated bbgo runner; credentials live on the runner host.
+    runs-on: [self-hosted, bbgo]
+    timeout-minutes: 60
     steps:
+    - name: Checkout
+      uses: actions/checkout@v7
+      with:
+        ref: ${{ github.event.inputs.ref || github.ref }}
+
     - name: Docker meta
       id: meta
       uses: docker/metadata-action@v6
       with:
-        # list of Docker images to use as base name for tags
         images: |
-          yoanlin/bbgo
-          quay.io/yoanlin/bbgo
-        # generate Docker tags based on the following events/attributes
+          harbor.deepflood.xyz/bbgo/bbgo
         tags: |
           type=schedule
           type=ref,event=branch
@@ -35,26 +38,59 @@ jobs:
           type=semver,pattern={{major}}.{{minor}}
           type=semver,pattern={{major}}
           type=sha
-    - name: Set up QEMU
-      uses: docker/setup-qemu-action@v4
+          type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v4
-    - name: Login to DockerHub
-      uses: docker/login-action@v4
-      with:
-        username: ${{ secrets.DOCKERHUB_USERNAME }}
-        password: ${{ secrets.DOCKERHUB_TOKEN }}
-    - name: Login to Quay Container Registry
-      uses: docker/login-action@v4
-      with:
-        registry: quay.io
-        username: ${{ secrets.QUAY_USERNAME }}
-        password: ${{ secrets.QUAY_TOKEN }}
+
+    - name: Login to Harbor
+      run: |
+        python3 <<'PY'
+        import os, subprocess, sys
+        from pathlib import Path
+
+        candidates = [
+            Path.home() / ".harbor-bbgo.env",
+            Path("/home/github-runner/.harbor-bbgo.env"),
+            Path(os.environ.get("GITHUB_WORKSPACE", ".")) / ".harbor-bbgo.env",
+        ]
+        env_path = next((p for p in candidates if p.is_file()), None)
+        if env_path is None:
+            # Fallback to GitHub Actions secrets when running off-runner.
+            user = os.environ.get("HARBOR_USERNAME", "")
+            password = os.environ.get("HARBOR_PASSWORD", "")
+            registry = os.environ.get("HARBOR_REGISTRY", "harbor.deepflood.xyz")
+            if not user or not password:
+                sys.exit("Harbor credentials not found (runner env or secrets)")
+        else:
+            data = {}
+            for line in env_path.read_text().splitlines():
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                data[k] = v
+            user = data["HARBOR_USERNAME"]
+            password = data["HARBOR_PASSWORD"]
+            registry = data.get("HARBOR_REGISTRY", "harbor.deepflood.xyz")
+
+        r = subprocess.run(
+            ["docker", "login", registry, "-u", user, "--password-stdin"],
+            input=password + "\n",
+            text=True,
+        )
+        raise SystemExit(r.returncode)
+        PY
+      env:
+        HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+        HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+        HARBOR_REGISTRY: ${{ secrets.HARBOR_REGISTRY }}
+
     - name: Build and push
       id: docker_build
       uses: docker/build-push-action@v7
       with:
+        context: .
         push: true
-        # tags: yoanlin/bbgo:latest
+        platforms: linux/amd64
         labels: ${{ steps.meta.outputs.labels }}
         tags: ${{ steps.meta.outputs.tags }}

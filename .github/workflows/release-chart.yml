@@ -1,35 +1,82 @@
----
 name: Release Helm Charts
 
 on:
   push:
     branches:
     - main
-  ## FOR debugging
-  #
-  # pull_request:
-  #   types: [synchronize, opened, reopened]
-  #   branches:
-  #     - "main"
-  #     - "v*"
-  #     - "c9s/helm-chart-release"
+    paths:
+    - "charts/**"
+    - ".github/workflows/release-chart.yml"
+  workflow_dispatch:
 
 jobs:
   releaseChart:
-    permissions:
-      contents: write
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, bbgo]
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - name: Configure Git user
+
+      - name: Package and push chart to Harbor (OCI)
         run: |
-          git config user.name "$GITHUB_ACTOR"
-          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
-      - name: Run chart-releaser job
-        uses: "helm/chart-releaser-action@v1.7.0"
+          set -euo pipefail
+          command -v helm >/dev/null || {
+            curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          }
+          helm version --short
+          helm package ./charts/bbgo -d /tmp/bbgo-helm
+          python3 <<'PY'
+          import glob, os, subprocess, sys
+          from pathlib import Path
+
+          candidates = [
+              Path.home() / ".harbor-bbgo.env",
+              Path("/home/github-runner/.harbor-bbgo.env"),
+          ]
+          env_path = next((p for p in candidates if p.is_file()), None)
+          data = {}
+          if env_path:
+              for line in env_path.read_text().splitlines():
+                  if not line or line.startswith("#") or "=" not in line:
+                      continue
+                  k, v = line.split("=", 1)
+                  data[k] = v
+          else:
+              data = {
+                  "HARBOR_REGISTRY": os.environ.get("HARBOR_REGISTRY", "harbor.deepflood.xyz"),
+                  "HARBOR_PROJECT": os.environ.get("HARBOR_PROJECT", "bbgo"),
+                  "HARBOR_USERNAME": os.environ.get("HARBOR_USERNAME", ""),
+                  "HARBOR_PASSWORD": os.environ.get("HARBOR_PASSWORD", ""),
+              }
+          if not data.get("HARBOR_USERNAME") or not data.get("HARBOR_PASSWORD"):
+              sys.exit("Harbor credentials not found")
+
+          registry = data.get("HARBOR_REGISTRY", "harbor.deepflood.xyz")
+          project = data.get("HARBOR_PROJECT", "bbgo")
+          user = data["HARBOR_USERNAME"]
+          password = data["HARBOR_PASSWORD"]
+
+          subprocess.run(
+              ["helm", "registry", "login", registry, "-u", user, "--password-stdin"],
+              input=password + "\n",
+              text=True,
+              check=True,
+          )
+          pkgs = sorted(glob.glob("/tmp/bbgo-helm/bbgo-*.tgz"))
+          if not pkgs:
+              sys.exit("no packaged chart found")
+          pkg = pkgs[-1]
+          # Keep charts under bbgo/charts/* so they do not share tags with the image repo bbgo/bbgo.
+          dest = f"oci://{registry}/{project}/charts"
+          print(f"pushing {pkg} -> {dest}")
+          # Re-push same semver is allowed unless project immutability is enabled.
+          subprocess.check_call(["helm", "push", pkg, dest])
+          print(f"chart available at {dest}/bbgo")
+          PY
         env:
-          CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
-          CR_SKIP_EXISTING: true
+          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+          HARBOR_REGISTRY: ${{ secrets.HARBOR_REGISTRY }}
+          HARBOR_PROJECT: ${{ secrets.HARBOR_PROJECT }}
