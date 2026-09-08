@@ -17,6 +17,7 @@ import ExchangeSessionTabPanel from '../components/ExchangeSessionTabPanel';
 import DashboardLayout from '../layouts/DashboardLayout';
 
 import { queryAssets, querySessions } from '../api/bbgo';
+import { normalizeAssets } from '../utils/assets';
 
 import { ChainId, Config, DAppProvider } from '@usedapp/core';
 import { Theme } from '@mui/material/styles';
@@ -61,7 +62,7 @@ export default function Home() {
     querySessions((sessions) => {
       if (sessions && sessions.length > 0) {
         setSessions(sessions);
-        queryAssets(setAssets);
+        queryAssets((raw) => setAssets(normalizeAssets(raw)));
       } else {
         router.push('/setup');
       }

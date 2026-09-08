@@ -1,21 +1,9 @@
-import { useEffect, useState } from 'react';
 import Card from '@mui/material/Card';
 import CardContent from '@mui/material/CardContent';
 import Typography from '@mui/material/Typography';
 import { makeStyles } from '@mui/styles';
 
-function aggregateAssetsBy(assets, field) {
-  let total = 0.0;
-  for (let key in assets) {
-    if (assets[key]) {
-      let a = assets[key];
-      let value = a[field];
-      total += value;
-    }
-  }
-
-  return total;
-}
+import { aggregateAssetsBy, fmtMoney, toNum } from '../utils/assets';
 
 const useStyles = makeStyles((theme) => ({
   root: {
@@ -31,6 +19,9 @@ const useStyles = makeStyles((theme) => ({
 
 export default function TotalAssetSummary({ assets }) {
   const classes = useStyles();
+  const btc = toNum(aggregateAssetsBy(assets, 'inBTC'));
+  const usd = toNum(aggregateAssetsBy(assets, 'inUSD'));
+
   return (
     <Card className={classes.root} variant="outlined">
       <CardContent>
@@ -42,8 +33,7 @@ export default function TotalAssetSummary({ assets }) {
           Total Account Balance
         </Typography>
         <Typography variant="h5" component="h2">
-          {Math.round(aggregateAssetsBy(assets, 'inBTC') * 1e8) / 1e8}{' '}
-          <span>BTC</span>
+          {fmtMoney(btc, 8)} <span>BTC</span>
         </Typography>
 
         <Typography className={classes.pos} color="textSecondary">
@@ -51,8 +41,7 @@ export default function TotalAssetSummary({ assets }) {
         </Typography>
 
         <Typography variant="h5" component="h3">
-          {Math.round(aggregateAssetsBy(assets, 'inUSD') * 100) / 100}{' '}
-          <span>USD</span>
+          {fmtMoney(usd, 2)} <span>USD</span>
         </Typography>
       </CardContent>
     </Card>

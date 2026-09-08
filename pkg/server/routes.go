@@ -248,6 +248,7 @@ func (s *Server) newEngine(ctx context.Context) *gin.Engine {
 	})
 
 	r.GET("/api/strategies/single", s.listStrategies)
+	r.GET("/api/strategies", s.listStrategiesMetrics)
 	r.NoRoute(s.assetsHandler)
 	return r
 }

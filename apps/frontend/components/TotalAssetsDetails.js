@@ -21,6 +21,7 @@ const logoCurrencies = {
   BCH: true,
   LTC: true,
   USDT: true,
+  USDC: true,
   BNB: true,
   COMP: true,
   XRP: true,
