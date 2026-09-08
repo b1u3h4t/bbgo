@@ -177,10 +177,15 @@ jobs:
         sed -i -e '/_requestgen.go/d' coverage_dnum.txt
 
     - name: Revive Check
-      uses: morphy2k/revive-action@v2.7.8 # https://github.com/mgechev/revive/issues/956
+      uses: morphy2k/revive-action@v2.7.8
       with:
-        reporter: github-pr-review
-        fail_on_error: true
+        # Valid inputs only (reporter / fail_on_error are not supported by this action).
+        # Keep warnings as annotations; golang-lint.yml already gates style on PRs/main.
+        path: ./pkg/...
+        exclude: |
+          ./pkg/**/*_test.go
+          ./pkg/**/mocks/...
+        fail-on-any: false
 
     - name: Upload Coverage Report
       uses: codecov/codecov-action@v7
