@@ -74,11 +74,13 @@ const TestNetFuturesPublicWebSocketURL = "wss://stream.binancefuture.com/public"
 const TestNetFuturesMarketWebSocketURL = "wss://stream.binancefuture.com/market"
 const TestNetFuturesPrivateWebSocketURL = "wss://stream.binancefuture.com/private"
 
-// orderLimiter - the default order limiter apply 5 requests per second and a 2 initial bucket
-// this includes SubmitOrder, CancelOrder and QueryClosedOrders
-//
-// Limit defines the maximum frequency of some events. Limit is represented as number of events per second. A zero Limit allows no events.
-var orderLimiter = rate.NewLimiter(5, 2)
+// orderSubmitLimiter limits place/cancel/replace traffic.
+// Binance futures allows up to ~300 order requests / 10s; keep a safe default.
+var orderSubmitLimiter = rate.NewLimiter(10, 5)
+
+// orderQueryLimiter limits closed-order / history queries so recover/sync does not starve submits.
+var orderQueryLimiter = rate.NewLimiter(5, 2)
+
 var queryTradeLimiter = rate.NewLimiter(1, 2)
 
 var dualSidePosition = false
@@ -105,9 +107,17 @@ func init() {
 		debug = log.Infof
 	}
 
-	if n, ok := envvar.Int("BINANCE_ORDER_RATE_LIMITER"); ok {
-		// Rate Limit: n requests per 1 seconds, bucket size: 1
-		orderLimiter = rate.NewLimiter(rate.Every(time.Second/time.Duration(n)), 1)
+	if n, ok := envvar.Int("BINANCE_ORDER_RATE_LIMITER"); ok && n > 0 {
+		// n requests per second, burst = max(n, 5)
+		burst := n
+		if burst < 5 {
+			burst = 5
+		}
+		orderSubmitLimiter = rate.NewLimiter(rate.Every(time.Second/time.Duration(n)), burst)
+	}
+
+	if n, ok := envvar.Int("BINANCE_ORDER_QUERY_RATE_LIMITER"); ok && n > 0 {
+		orderQueryLimiter = rate.NewLimiter(rate.Every(time.Second/time.Duration(n)), 2)
 	}
 
 	if n, ok := envvar.Int("BINANCE_QUERY_TRADES_RATE_LIMITER"); ok {
@@ -1126,8 +1136,8 @@ func (e *Exchange) QueryClosedOrders(
 		}
 	*/
 
-	if err = orderLimiter.Wait(ctx); err != nil {
-		log.WithError(err).Errorf("order rate limiter wait error")
+	if err = orderQueryLimiter.Wait(ctx); err != nil {
+		log.WithError(err).Errorf("order query rate limiter wait error")
 		return nil, err
 	}
 
@@ -1189,7 +1199,7 @@ func (e *Exchange) QueryClosedOrders(
 }
 
 func (e *Exchange) CancelOrders(ctx context.Context, orders ...types.Order) (err error) {
-	if err = orderLimiter.Wait(ctx); err != nil {
+	if err = orderSubmitLimiter.Wait(ctx); err != nil {
 		log.WithError(err).Errorf("order rate limiter wait error")
 		return err
 	}
@@ -1449,7 +1459,7 @@ func (e *Exchange) submitSpotOrder(ctx context.Context, order types.SubmitOrder)
 }
 
 func (e *Exchange) SubmitOrder(ctx context.Context, order types.SubmitOrder) (createdOrder *types.Order, err error) {
-	if err = orderLimiter.Wait(ctx); err != nil {
+	if err = orderSubmitLimiter.Wait(ctx); err != nil {
 		log.WithError(err).Errorf("order rate limiter wait error")
 		return nil, err
 	}

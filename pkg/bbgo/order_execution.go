@@ -459,8 +459,10 @@ batchRetryOrder:
 			bo = backoff.WithMaxRetries(bo, backoffMaxRetries)
 			bo = backoff.WithContext(bo, timeoutCtx)
 			if err2 := backoff.Retry(op, bo); err2 != nil {
-				if err2 == context.Canceled {
-					logger.Warnf("context canceled error, stop retry")
+				// DeadlineExceeded used to loop forever-fast once the retry timeout was spent,
+				// flooding logs with "order rate limiter wait error".
+				if err2 == context.Canceled || errors.Is(err2, context.DeadlineExceeded) {
+					logger.Warnf("context done (%v), stop retry", err2)
 					break batchRetryOrder
 				}
 

@@ -10,7 +10,7 @@ import (
 )
 
 func (e *Exchange) CancelReplace(ctx context.Context, cancelReplaceMode types.CancelReplaceModeType, o types.Order) (*types.Order, error) {
-	if err := orderLimiter.Wait(ctx); err != nil {
+	if err := orderSubmitLimiter.Wait(ctx); err != nil {
 		log.WithError(err).Errorf("order rate limiter wait error")
 		return nil, err
 	}
