@@ -94,7 +94,8 @@ func (s *Server) grid2Metric(g *grid2.Strategy) (strategyMetric, bool) {
 	m.Stats.Investment = roundFloat(estimateGridInvestment(g, currentPrice), 2)
 
 	if g.Position != nil && !currentPrice.IsZero() {
-		m.Stats.FloatingPNL = roundFloat(g.Position.UnrealizedProfit(currentPrice).Float64(), 4)
+		// Quote/USD floating PnL (Coin-M uses inverse formula × mark).
+		m.Stats.FloatingPNL = roundFloat(g.Position.UnrealizedProfitInQuote(currentPrice).Float64(), 4)
 		m.Stats.TotalProfits = roundFloat(m.Stats.GridProfits+m.Stats.FloatingPNL, 4)
 	} else {
 		m.Stats.TotalProfits = m.Stats.GridProfits
@@ -130,17 +131,36 @@ func estimateGridInvestment(g *grid2.Strategy, lastPrice fixedpoint.Value) float
 	if !g.QuoteInvestment.IsZero() {
 		return g.QuoteInvestment.Float64()
 	}
+	if !g.BaseInvestment.IsZero() && !lastPrice.IsZero() {
+		// Coin-M / base-margin grids: convert base collateral to USD approx.
+		return g.BaseInvestment.Mul(lastPrice).Float64()
+	}
 
 	price := lastPrice
 	if price.IsZero() {
 		price = g.UpperPrice.Add(g.LowerPrice).Div(fixedpoint.NewFromInt(2))
 	}
-	if price.IsZero() || g.Quantity.IsZero() || g.GridNum <= 1 {
+	if g.Quantity.IsZero() || g.GridNum <= 1 {
 		return 0
 	}
 
-	// approximate notional across (gridNum-1) intervals; for leveraged futures divide by leverage
-	notional := g.Quantity.Mul(price).Mul(fixedpoint.NewFromInt(g.GridNum - 1))
+	levels := fixedpoint.NewFromInt(g.GridNum - 1)
+
+	// Coin-M inverse: USD notional = contracts * contractValue; margin = notional / leverage.
+	if g.Market.ContractValue.Sign() > 0 {
+		notional := g.Quantity.Mul(g.Market.ContractValue).Mul(levels)
+		if !g.Leverage.IsZero() && g.Leverage.Compare(fixedpoint.One) > 0 {
+			notional = notional.Div(g.Leverage)
+		}
+		return notional.Float64()
+	}
+
+	if price.IsZero() {
+		return 0
+	}
+
+	// Linear USDT-M / spot: approximate quote notional across (gridNum-1) intervals.
+	notional := g.Quantity.Mul(price).Mul(levels)
 	if !g.Leverage.IsZero() && g.Leverage.Compare(fixedpoint.One) > 0 {
 		notional = notional.Div(g.Leverage)
 	}

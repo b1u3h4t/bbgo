@@ -229,10 +229,13 @@ type Strategy struct {
 	// and TotalQuoteProfit).
 	recovering bool
 
+	// orderExchangeRealized accumulates Binance userTrades.realizedPnl (or WS "rp")
+	// per order ID. Preferred for USDT-M Slack "已实现" because strategy Position
+	// AverageCost drifts after restarts / incomplete tape.
+	orderExchangeRealized map[uint64]fixedpoint.Value
+
 	// orderPositionProfit accumulates Position/avg-cost realized PnL per order ID
-	// (from TradeCollector OnProfit). For USDT-M grids this matches Binance
-	// userTrades.realizedPnl — twin-pin (sellPin-buyPin)*qty does not when several
-	// grid levels share one net position.
+	// (from TradeCollector OnProfit). Fallback when exchange realized PnL is missing.
 	orderPositionProfit map[uint64]fixedpoint.Value
 
 	// mu is used for locking the grid object field, avoid double grid opening
@@ -494,6 +497,68 @@ func (s *Strategy) coinMPositionBeforeFill(o types.Order, executedQuantity fixed
 	return s.positionBeforeFill(o, executedQuantity)
 }
 
+// syncPositionFromExchange seeds strategy Position from exchange positionRisk.
+// Critical when resetPositionWhenStart clears local state while the account still
+// holds a short/long — otherwise closing fills look like openings and Slack skips
+// the real Binance realizedPnl.
+func (s *Strategy) syncPositionFromExchange(ctx context.Context) error {
+	if s.session == nil || s.Position == nil || !s.session.Futures {
+		return nil
+	}
+	riskSvc, ok := s.session.Exchange.(types.ExchangeRiskService)
+	if !ok {
+		return nil
+	}
+	risks, err := riskSvc.QueryPositionRisk(ctx, s.Symbol)
+	if err != nil {
+		return err
+	}
+	for _, risk := range risks {
+		if risk.Symbol != s.Symbol {
+			continue
+		}
+		amt := risk.PositionAmount
+		if amt.IsZero() {
+			s.logger.Infof("exchange position %s is flat — local Position left at base=%s", s.Symbol, s.Position.GetBase().String())
+			return nil
+		}
+		_ = s.Position.ModifyBase(amt)
+		if !risk.EntryPrice.IsZero() {
+			_ = s.Position.ModifyAverageCost(risk.EntryPrice)
+		}
+		s.logger.Infof("synced Position from exchange: %s base=%s avgCost=%s (entry=%s mark=%s upnl=%s)",
+			s.Symbol, amt.String(), s.Position.GetAverageCost().String(),
+			risk.EntryPrice.String(), risk.MarkPrice.String(), risk.UnrealizedPnL.String())
+		return nil
+	}
+	return nil
+}
+
+// usdtmShouldRealizeRound reports whether this fill should emit Slack grid profit.
+// Prefer Position-based closing; also emit when exchange realizedPnl for this order
+// is non-zero (covers resetPosition / drifted Position misses).
+func (s *Strategy) usdtmShouldRealizeRound(o types.Order, executedQuantity fixedpoint.Value) (closing bool, closeQty fixedpoint.Value) {
+	before, ok := s.positionBeforeFill(o, executedQuantity)
+	if ok {
+		switch o.Side {
+		case types.SideTypeSell:
+			if before.Sign() > 0 {
+				return true, fixedpoint.Min(executedQuantity, before)
+			}
+		case types.SideTypeBuy:
+			if before.Sign() < 0 {
+				return true, fixedpoint.Min(executedQuantity, before.Abs())
+			}
+		}
+	}
+	if ex, has := s.peekOrderExchangeRealized(o.OrderID); has && !ex.IsZero() {
+		s.logger.Warnf("USDT-M grid: Position did not mark order #%d as closing, but exchange realizedPnl=%s — emitting Slack profit",
+			o.OrderID, ex.String())
+		return true, executedQuantity
+	}
+	return false, fixedpoint.Zero
+}
+
 func (s *Strategy) verifyOrderTrades(o types.Order, trades []types.Trade) bool {
 	tq := tradingutil.AggregateTradesQuantity(trades)
 
@@ -595,6 +660,38 @@ func (s *Strategy) aggregateOrderQuoteAmountAndFee(o types.Order) (fixedpoint.Va
 	return quoteAmount, fixedpoint.Zero, feeCurrency
 }
 
+func (s *Strategy) addOrderExchangeRealized(orderID uint64, pnl fixedpoint.Value) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.orderExchangeRealized == nil {
+		s.orderExchangeRealized = make(map[uint64]fixedpoint.Value)
+	}
+	s.orderExchangeRealized[orderID] = s.orderExchangeRealized[orderID].Add(pnl)
+}
+
+func (s *Strategy) peekOrderExchangeRealized(orderID uint64) (fixedpoint.Value, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.orderExchangeRealized == nil {
+		return fixedpoint.Zero, false
+	}
+	v, ok := s.orderExchangeRealized[orderID]
+	return v, ok
+}
+
+func (s *Strategy) takeOrderExchangeRealized(orderID uint64) (fixedpoint.Value, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.orderExchangeRealized == nil {
+		return fixedpoint.Zero, false
+	}
+	v, ok := s.orderExchangeRealized[orderID]
+	if ok {
+		delete(s.orderExchangeRealized, orderID)
+	}
+	return v, ok
+}
+
 func (s *Strategy) addOrderPositionProfit(orderID uint64, profit fixedpoint.Value) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -602,6 +699,16 @@ func (s *Strategy) addOrderPositionProfit(orderID uint64, profit fixedpoint.Valu
 		s.orderPositionProfit = make(map[uint64]fixedpoint.Value)
 	}
 	s.orderPositionProfit[orderID] = s.orderPositionProfit[orderID].Add(profit)
+}
+
+func (s *Strategy) peekOrderPositionProfit(orderID uint64) (fixedpoint.Value, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.orderPositionProfit == nil {
+		return fixedpoint.Zero, false
+	}
+	v, ok := s.orderPositionProfit[orderID]
+	return v, ok
 }
 
 func (s *Strategy) takeOrderPositionProfit(orderID uint64) (fixedpoint.Value, bool) {
@@ -617,9 +724,16 @@ func (s *Strategy) takeOrderPositionProfit(orderID uint64) (fixedpoint.Value, bo
 	return v, ok
 }
 
-// gridProfitFromPositionAvgCost builds GridProfit from accumulated Position PnL
-// for this order (aligned with Binance realizedPnl), and always attaches twin-pin
-// theoretical profit for tuning when twinPinFallback is provided.
+func (s *Strategy) discardOrderProfitAccumulators(orderID uint64) {
+	_, _ = s.takeOrderExchangeRealized(orderID)
+	_, _ = s.takeOrderPositionProfit(orderID)
+}
+
+// gridProfitFromPositionAvgCost builds GridProfit preferring exchange realizedPnl
+// (trade.PnL), then Position avg-cost PnL, and always attaches twin-pin theoretical
+// profit for tuning when twinPinFallback is provided.
+// Accumulators are peeked only — call consumeOrderProfitAccumulators after the
+// reverse order is placed successfully so a submit failure can retry the same PnL.
 func (s *Strategy) gridProfitFromPositionAvgCost(o types.Order, twinPinFallback func() *GridProfit) *GridProfit {
 	var twinPin fixedpoint.Value
 	if twinPinFallback != nil {
@@ -628,28 +742,42 @@ func (s *Strategy) gridProfitFromPositionAvgCost(o types.Order, twinPinFallback 
 		}
 	}
 
-	if v, ok := s.takeOrderPositionProfit(o.OrderID); ok {
+	var realized fixedpoint.Value
+	var ok bool
+	if realized, ok = s.peekOrderExchangeRealized(o.OrderID); ok {
+		// prefer exchange; Position PnL ignored for the value (still discarded on consume)
+	} else if realized, ok = s.peekOrderPositionProfit(o.OrderID); ok {
+		s.logger.Warnf("USDT-M grid: using Position avg-cost PnL for order #%d (exchange realizedPnl missing)", o.OrderID)
+	}
+
+	if ok {
 		return &GridProfit{
 			Symbol:         s.Symbol,
 			Currency:       s.Market.QuoteCurrency,
-			Profit:         v,
-			RealizedProfit: v,
+			Profit:         realized,
+			RealizedProfit: realized,
 			TwinPinProfit:  twinPin,
+			TwinPinSet:     true,
 			Time:           o.UpdateTime.Time(),
 			Order:          o,
 		}
 	}
 	if twinPinFallback != nil {
-		s.logger.Warnf("USDT-M grid: missing position PnL for order #%d, falling back to twin-pin profit", o.OrderID)
+		s.logger.Warnf("USDT-M grid: missing realized PnL for order #%d, falling back to twin-pin profit", o.OrderID)
 		p := twinPinFallback()
 		if p != nil {
 			p.Symbol = s.Symbol
 			p.TwinPinProfit = p.Profit
+			p.TwinPinSet = true
 			p.RealizedProfit = p.Profit
 		}
 		return p
 	}
 	return nil
+}
+
+func (s *Strategy) consumeOrderProfitAccumulators(orderID uint64) {
+	s.discardOrderProfitAccumulators(orderID)
 }
 
 func (s *Strategy) processFilledOrder(o types.Order) {
@@ -740,12 +868,10 @@ func (s *Strategy) processFilledOrder(o types.Order) {
 
 		if !coinM {
 			// Spot: a filled sell implies prior inventory — keep legacy twin-pin profit.
-			// USDT-M: only realize when this sell closes/reduces a long; use Position
-			// avg-cost PnL (Binance realizedPnl), not twin-pin spread.
+			// USDT-M: realize when this sell closes/reduces a long, or exchange rp≠0.
 			if !s.isUSDTMFutures() {
 				profit = s.calculateProfit(o, newPrice, newQuantity)
-			} else if before, ok := s.positionBeforeFill(o, executedQuantity); ok && before.Sign() > 0 {
-				closeQty := fixedpoint.Min(executedQuantity, before)
+			} else if closing, closeQty := s.usdtmShouldRealizeRound(o, executedQuantity); closing {
 				profit = s.gridProfitFromPositionAvgCost(o, func() *GridProfit {
 					return s.calculateProfit(o, newPrice, closeQty)
 				})
@@ -788,11 +914,9 @@ func (s *Strategy) processFilledOrder(o types.Order) {
 			newQuantity = newQuantity.Round(s.Market.VolumePrecision, fixedpoint.Down)
 			s.logger.Infof("round down sell order quantity %s to %s by base quantity precision %d", origQuantity.String(), newQuantity.String(), s.Market.VolumePrecision)
 
-			// USDT-M short grid: realize quote profit when buy closes/reduces a short.
-			// Use Position avg-cost PnL (matches Binance history), not twin-pin spread.
+			// USDT-M: realize when buy closes/reduces a short, or exchange rp≠0.
 			if s.isUSDTMFutures() {
-				if before, ok := s.positionBeforeFill(o, executedQuantity); ok && before.Sign() < 0 {
-					closeQty := fixedpoint.Min(executedQuantity, before.Abs())
+				if closing, closeQty := s.usdtmShouldRealizeRound(o, executedQuantity); closing {
 					profit = s.gridProfitFromPositionAvgCost(o, func() *GridProfit {
 						return s.calculateProfit(types.Order{
 							SubmitOrder: types.SubmitOrder{
@@ -824,6 +948,10 @@ func (s *Strategy) processFilledOrder(o types.Order) {
 		s.logger.WithError(err).Errorf("GRID REVERSE ORDER SUBMISSION ERROR: order: %s", orderForm.String())
 		return
 	}
+	if len(createdOrders) == 0 {
+		s.logger.Errorf("GRID REVERSE ORDER SUBMISSION returned empty orders: %s", orderForm.String())
+		return
+	}
 
 	s.logger.Infof("GRID REVERSE ORDER IS CREATED: %+v", createdOrders)
 
@@ -831,8 +959,10 @@ func (s *Strategy) processFilledOrder(o types.Order) {
 	if profit != nil {
 		if s.recovering {
 			s.logger.Infof("skip grid profit during recover (already counted live): %+v", profit)
+			s.consumeOrderProfitAccumulators(o.OrderID)
 			return
 		}
+		s.consumeOrderProfitAccumulators(o.OrderID)
 		s.GridProfitStats.AddProfit(profit)
 		total := s.GridProfitStats.TotalQuoteProfit
 		if profit.Currency == s.Market.BaseCurrency {
@@ -844,6 +974,9 @@ func (s *Strategy) processFilledOrder(o types.Order) {
 			profit.ArbitrageCount, profit.Order.OrderID,
 			total.Float64(), profit.Currency)
 		s.EmitGridProfit(s.GridProfitStats, profit)
+	} else {
+		// Opening / non-closing fills: drop any rp=0 accumulators for this order.
+		s.discardOrderProfitAccumulators(o.OrderID)
 	}
 }
 
@@ -2017,6 +2150,11 @@ func (s *Strategy) Run(ctx context.Context, _ bbgo.OrderExecutor, session *bbgo.
 	if s.ResetPositionWhenStart {
 		s.Position.Reset()
 	}
+	// Futures: after optional reset, seed Base/AverageCost from exchange positionRisk
+	// so closing fills are detected and Slack realizedPnl is attributed to the right side.
+	if err := s.syncPositionFromExchange(ctx); err != nil {
+		s.logger.WithError(err).Warnf("sync position from exchange failed; USDT-M profit may miss closing fills until tape rebuilds")
+	}
 
 	// we need to check the minimal quote investment here, because we need the market info
 	// Coin-M uses base margin + fixed contracts — skip quote investment checks.
@@ -2043,9 +2181,12 @@ func (s *Strategy) Run(ctx context.Context, _ bbgo.OrderExecutor, session *bbgo.
 	orderExecutor.Bind()
 	orderExecutor.TradeCollector().OnTrade(func(trade types.Trade, _, _ fixedpoint.Value) {
 		s.GridProfitStats.AddTrade(trade)
+		// Prefer exchange realizedPnl (REST) / rp (WS) over Position avg-cost for Slack.
+		if trade.OrderID != 0 && trade.PnL.Valid {
+			s.addOrderExchangeRealized(trade.OrderID, fixedpoint.NewFromFloat(trade.PnL.Float64))
+		}
 	})
-	// Accumulate avg-cost realized PnL per order so USDT-M Slack GRID PROFIT matches
-	// Binance userTrades.realizedPnl (not twin-pin arithmetic).
+	// Fallback: accumulate Position avg-cost PnL when exchange realizedPnl is absent.
 	orderExecutor.TradeCollector().OnProfit(func(trade types.Trade, profit *types.Profit) {
 		if profit == nil || trade.OrderID == 0 {
 			return

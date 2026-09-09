@@ -86,10 +86,12 @@ func TestENAUSDT_LiveReplay_RealizedVsTwinPin(t *testing.T) {
 			FeeCurrency:   "BNB",
 			Time:          types.Time(time.Date(2026, 9, 9, 8, 0, 0, 0, time.UTC)),
 		}
+		// Intentionally wrong Position PnL path — exchange realized must win.
 		profit, _, made := s.Position.AddTrade(td)
 		if made {
 			s.addOrderPositionProfit(f.orderID, profit)
 		}
+		s.addOrderExchangeRealized(f.orderID, number(f.rpnl))
 	}
 
 	buyOrders := []struct {
@@ -121,6 +123,7 @@ func TestENAUSDT_LiveReplay_RealizedVsTwinPin(t *testing.T) {
 			}, number(bo.buyPx), number(bo.qty))
 		})
 		require.NotNil(t, g)
+		s.consumeOrderProfitAccumulators(bo.id)
 		s.GridProfitStats.AddProfit(g)
 		sumRealized += g.Profit.Float64()
 		sumTwin += g.TwinPinProfit.Float64()
@@ -141,6 +144,56 @@ func TestENAUSDT_LiveReplay_RealizedVsTwinPin(t *testing.T) {
 	assert.Greater(t, sumTwin, 5.0)
 	assert.InDelta(t, sumTwin, s.GridProfitStats.TotalTwinPinProfit.Float64(), 1e-6)
 	assert.InDelta(t, sumRealized, s.GridProfitStats.TotalQuoteProfit.Float64(), 1e-6)
+}
+
+// WLDUSDT 2026-09-09 order #23085539741: Position AverageCost drifted to 0.4607
+// (Slack +1.798) while Binance realizedPnl was ~-0.036. Twin-pin one step is +3.596.
+func TestWLDUSDT_ExchangeRealizedBeatsDriftedPosition(t *testing.T) {
+	market := types.Market{
+		Symbol: "WLDUSDT", BaseCurrency: "WLD", QuoteCurrency: "USDT",
+		PricePrecision: 7, VolumePrecision: 0,
+		TickSize: number(0.0001), StepSize: number(1), MinQuantity: number(1), MinNotional: number(5),
+	}
+	s := &Strategy{
+		logger:          logrus.NewEntry(logrus.New()),
+		Market:          market,
+		Symbol:          "WLDUSDT",
+		GridProfitStats: NewGridProfitStats(market),
+		session: &bbgo.ExchangeSession{
+			ExchangeSessionConfig: bbgo.ExchangeSessionConfig{Futures: true},
+		},
+		Position: types.NewPositionFromMarket(market),
+	}
+
+	const orderID uint64 = 23085539741
+	// Drifted strategy Position PnL (what Slack wrongly showed before the fix).
+	s.addOrderPositionProfit(orderID, number(0.328))
+	s.addOrderPositionProfit(orderID, number(1.47))
+	// Actual Binance userTrades.realizedPnl for the two BUY fills.
+	s.addOrderExchangeRealized(orderID, number(-0.00655999))
+	s.addOrderExchangeRealized(orderID, number(-0.02939999))
+
+	o := types.Order{
+		OrderID:    orderID,
+		UpdateTime: types.Time(time.Date(2026, 9, 9, 8, 30, 0, 0, time.UTC)),
+		SubmitOrder: types.SubmitOrder{
+			Symbol: "WLDUSDT", Side: types.SideTypeBuy,
+			Price: number(0.4597), Quantity: number(1798),
+		},
+	}
+	g := s.gridProfitFromPositionAvgCost(o, func() *GridProfit {
+		// sellPin 0.4617 - buy 0.4597 = 0.002 * 1798 = 3.596
+		return s.calculateProfit(types.Order{
+			SubmitOrder: types.SubmitOrder{
+				Price: number(0.4617), Quantity: number(1798), Side: types.SideTypeSell,
+			},
+			UpdateTime: o.UpdateTime,
+		}, number(0.4597), number(1798))
+	})
+	require.NotNil(t, g)
+	assert.InDelta(t, -0.03595998, g.Profit.Float64(), 1e-8)
+	assert.InDelta(t, 3.596, g.TwinPinProfit.Float64(), 1e-6)
+	assert.NotEqual(t, 1.798, g.Profit.Float64())
 }
 
 // Pin-walk using the live ENA grid geometry (same lower/upper/n as production yaml).
@@ -212,6 +265,7 @@ func TestENAUSDT_KlineStylePinWalk_RoundNotifyFields(t *testing.T) {
 				}, px, qty)
 			})
 			require.NotNil(t, g)
+			s.consumeOrderProfitAccumulators(orderID)
 			s.GridProfitStats.AddProfit(g)
 			closed++
 
@@ -363,6 +417,7 @@ func TestENAUSDT_FixtureKlines_RoundProfitNotify(t *testing.T) {
 					}, px, qty)
 				})
 				require.NotNil(t, g)
+				s.consumeOrderProfitAccumulators(orderID)
 				s.GridProfitStats.AddProfit(g)
 				closed++
 				assert.Equal(t, closed, g.ArbitrageCount)

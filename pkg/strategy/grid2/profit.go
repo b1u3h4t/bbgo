@@ -15,7 +15,7 @@ import (
 // GridProfit is emitted when a grid round-trip completes (closing fill + reverse order placed).
 //
 // For USDT-M futures:
-//   - Profit / RealizedProfit: position avg-cost PnL (aligned with Binance realizedPnl)
+//   - Profit / RealizedProfit: Binance userTrades.realizedPnl (preferred); Position avg-cost fallback
 //   - TwinPinProfit: (sellPin-buyPin)*qty theoretical grid-level arb — for tuning spread/qty
 //   - Cumulative*: running totals after this round
 type GridProfit struct {
@@ -27,6 +27,10 @@ type GridProfit struct {
 
 	// TwinPinProfit is the theoretical one-level grid spread profit (for parameter tuning).
 	TwinPinProfit fixedpoint.Value `json:"twinPinProfit,omitempty"`
+
+	// TwinPinSet is true when TwinPinProfit was explicitly computed (USDT-M dual metrics).
+	// Distinguishes "twin=0" from "legacy path where twin equals Profit".
+	TwinPinSet bool `json:"-"`
 
 	// RealizedProfit mirrors Profit for USDT-M (explicit name in Slack/logs).
 	RealizedProfit fixedpoint.Value `json:"realizedProfit,omitempty"`
@@ -72,22 +76,22 @@ func (p *GridProfit) SlackAttachment() slack.Attachment {
 	color := style.PnLColor(p.Profit)
 	fields := []slack.AttachmentField{
 		{
-			Title: "本笔已实现 (对齐币安 realizedPnl)",
+			Title: "本笔交易所 realizedPnl",
 			Value: fmt.Sprintf("%s %s", style.PnLSignString(p.Profit), p.Currency),
 			Short: true,
 		},
 		{
-			Title: "本笔档距利润 (调优用)",
+			Title: "本笔网格利润 (档距)",
 			Value: fmt.Sprintf("%s %s", style.PnLSignString(p.TwinPinProfit), p.Currency),
 			Short: true,
 		},
 		{
-			Title: "累计已实现",
+			Title: "累计已实现 (Σ realizedPnl)",
 			Value: fmt.Sprintf("%s %s", style.PnLSignString(p.CumulativeRealized), p.Currency),
 			Short: true,
 		},
 		{
-			Title: "累计档距利润",
+			Title: "累计网格利润 (Σ 档距)",
 			Value: fmt.Sprintf("%s %s", style.PnLSignString(p.CumulativeTwinPin), p.Currency),
 			Short: true,
 		},
@@ -110,7 +114,7 @@ func (p *GridProfit) SlackAttachment() slack.Attachment {
 	return slack.Attachment{
 		Title:  title,
 		Color:  color,
-		Text:   "每笔闭环同时给出：已实现盈亏（跟踪实盘）+ 档距理论利润（调参）+ 累计。",
+		Text:   "三项口径：①交易所 realizedPnl（实盘）②本笔网格档距利润（调参）③累计（①与②分别累加）。",
 		Fields: fields,
 	}
 }

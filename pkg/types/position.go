@@ -282,8 +282,28 @@ func (p *Position) UnrealizedProfit(price fixedpoint.Value) fixedpoint.Value {
 	return p.unrealizedProfit(price)
 }
 
+// UnrealizedProfitInQuote returns unrealized PnL denominated in quote/USD for UI.
+// Linear markets: same as UnrealizedProfit.
+// Coin-M (inverse) markets: compute base-coin PnL via 1/price, then × mark for USD.
+func (p *Position) UnrealizedProfitInQuote(price fixedpoint.Value) fixedpoint.Value {
+	p.Lock()
+	defer p.Unlock()
+
+	if p.Market.ContractValue.Sign() > 0 {
+		basePnL := p.unrealizedProfitInverseBase(price)
+		return basePnL.Mul(price)
+	}
+	return p.unrealizedProfit(price)
+}
+
 func (p *Position) unrealizedProfit(price fixedpoint.Value) fixedpoint.Value {
 	quantity := p.Base.Abs()
+
+	if p.Market.ContractValue.Sign() > 0 {
+		// Prefer inverse math even for UnrealizedProfit so Coin-M Slack/risk paths
+		// are not off by orders of magnitude. Return base-coin PnL (Binance dapi style).
+		return p.unrealizedProfitInverseBase(price)
+	}
 
 	if p.IsLong() {
 		return price.Sub(p.AverageCost).Mul(quantity)
@@ -291,6 +311,26 @@ func (p *Position) unrealizedProfit(price fixedpoint.Value) fixedpoint.Value {
 		return p.AverageCost.Sub(price).Mul(quantity)
 	}
 
+	return fixedpoint.Zero
+}
+
+// unrealizedProfitInverseBase is Coin-M unrealized PnL in the base coin:
+//
+//	long:  CV * qty * (1/avgCost - 1/mark)
+//	short: CV * qty * (1/mark - 1/avgCost)
+func (p *Position) unrealizedProfitInverseBase(price fixedpoint.Value) fixedpoint.Value {
+	if price.IsZero() || p.AverageCost.IsZero() || p.Base.IsZero() || p.Market.ContractValue.IsZero() {
+		return fixedpoint.Zero
+	}
+	qty := p.Base.Abs()
+	invMark := fixedpoint.One.Div(price)
+	invAvg := fixedpoint.One.Div(p.AverageCost)
+	if p.IsLong() {
+		return p.Market.ContractValue.Mul(qty).Mul(invAvg.Sub(invMark))
+	}
+	if p.IsShort() {
+		return p.Market.ContractValue.Mul(qty).Mul(invMark.Sub(invAvg))
+	}
 	return fixedpoint.Zero
 }
 

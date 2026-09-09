@@ -340,6 +340,7 @@ func toGlobalFuturesTrade(t futures.AccountTrade, isIsolated bool) (*types.Trade
 		Time:          types.Time(millisecondTime(t.Time)),
 		IsFutures:     true,
 		IsIsolated:    isIsolated,
+		PnL:           parseExchangeRealizedPnL(t.RealizedPnl),
 	}, nil
 }
 

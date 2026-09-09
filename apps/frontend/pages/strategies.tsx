@@ -26,9 +26,14 @@ export default function Strategies() {
   const [details, setDetails] = useState<GridStrategy[]>([]);
 
   useEffect(() => {
-    queryStrategiesMetrics().then((value) => {
-      setDetails(value);
-    });
+    queryStrategiesMetrics()
+      .then((value) => {
+        setDetails(Array.isArray(value) ? value : []);
+      })
+      .catch((err) => {
+        console.error('failed to load strategies metrics', err);
+        setDetails([]);
+      });
   }, []);
 
   return (

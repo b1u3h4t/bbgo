@@ -311,9 +311,11 @@ func TestStrategy_gridProfitFromPositionAvgCost(t *testing.T) {
 	assert.True(t, s.isUSDTMFutures())
 
 	o := types.Order{OrderID: 42, UpdateTime: types.Time{}}
-	// twin-pin would claim +2.56; position pnl for this order is -1.30 (matches Binance avg-cost)
-	s.addOrderPositionProfit(42, number(-1.00965))
-	s.addOrderPositionProfit(42, number(-0.29521))
+	// twin-pin would claim +2.56; exchange realized for this order is -1.30
+	s.addOrderExchangeRealized(42, number(-1.00965))
+	s.addOrderExchangeRealized(42, number(-0.29521))
+	// drifted Position PnL must be ignored when exchange PnL is present
+	s.addOrderPositionProfit(42, number(9.99))
 	profit := s.gridProfitFromPositionAvgCost(o, func() *GridProfit {
 		return &GridProfit{Currency: "USDT", Profit: number(2.56)}
 	})
@@ -327,6 +329,8 @@ func TestStrategy_gridProfitFromPositionAvgCost(t *testing.T) {
 	assert.Equal(t, 1, profit.ArbitrageCount)
 	assert.InDelta(t, -1.30486, profit.CumulativeRealized.Float64(), 1e-6)
 	assert.InDelta(t, 2.56, profit.CumulativeTwinPin.Float64(), 1e-9)
+
+	s.consumeOrderProfitAccumulators(42)
 
 	// consumed — second take falls back to twin-pin for both fields
 	profit2 := s.gridProfitFromPositionAvgCost(o, func() *GridProfit {

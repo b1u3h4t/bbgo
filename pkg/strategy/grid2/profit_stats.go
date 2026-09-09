@@ -102,12 +102,16 @@ func (s *GridProfitStats) AddProfit(profit *GridProfit) {
 
 	switch profit.Currency {
 	case s.Market.QuoteCurrency:
+		// Profit = exchange realizedPnl (USDT-M) or twin-pin (spot legacy)
 		s.TotalQuoteProfit = s.TotalQuoteProfit.Add(profit.Profit)
 	case s.Market.BaseCurrency:
 		s.TotalBaseProfit = s.TotalBaseProfit.Add(profit.Profit)
 	}
 
-	if !profit.TwinPinProfit.IsZero() {
+	if profit.TwinPinSet {
+		// USDT-M: accumulate explicit grid (twin-pin) profit even when it is 0
+		s.TotalTwinPinProfit = s.TotalTwinPinProfit.Add(profit.TwinPinProfit)
+	} else if !profit.TwinPinProfit.IsZero() {
 		s.TotalTwinPinProfit = s.TotalTwinPinProfit.Add(profit.TwinPinProfit)
 	} else if profit.Currency == s.Market.QuoteCurrency {
 		// spot / legacy: twin-pin equals Profit
@@ -117,7 +121,7 @@ func (s *GridProfitStats) AddProfit(profit *GridProfit) {
 	// stamp round snapshot for Slack / logs (after totals updated)
 	profit.Symbol = s.Symbol
 	profit.RealizedProfit = profit.Profit
-	if profit.TwinPinProfit.IsZero() && profit.Currency == s.Market.QuoteCurrency {
+	if !profit.TwinPinSet && profit.TwinPinProfit.IsZero() && profit.Currency == s.Market.QuoteCurrency {
 		profit.TwinPinProfit = profit.Profit
 	}
 	if profit.Currency == s.Market.BaseCurrency {
@@ -176,7 +180,7 @@ func (s *GridProfitStats) SlackAttachment() slack.Attachment {
 
 	if !s.TotalQuoteProfit.IsZero() {
 		fields = append(fields, slack.AttachmentField{
-			Title: "累计已实现 (Binance)",
+			Title: "累计已实现 (Σ realizedPnl)",
 			Value: style.PnLSignString(s.TotalQuoteProfit) + " " + s.Market.QuoteCurrency,
 			Short: true,
 		})
@@ -184,7 +188,7 @@ func (s *GridProfitStats) SlackAttachment() slack.Attachment {
 
 	if !s.TotalTwinPinProfit.IsZero() {
 		fields = append(fields, slack.AttachmentField{
-			Title: "累计档距利润 (调优)",
+			Title: "累计网格利润 (Σ 档距)",
 			Value: style.PnLSignString(s.TotalTwinPinProfit) + " " + s.Market.QuoteCurrency,
 			Short: true,
 		})

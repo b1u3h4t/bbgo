@@ -135,6 +135,7 @@ func toGlobalDeliveryAccountTrade(t deliveryAccountTrade, isIsolated bool) (*typ
 		Time:          types.Time(millisecondTime(t.Time)),
 		IsFutures:     true,
 		IsIsolated:    isIsolated,
+		PnL:           parseExchangeRealizedPnL(t.RealizedPnl),
 	}, nil
 }
 

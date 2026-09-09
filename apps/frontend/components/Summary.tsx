@@ -19,12 +19,24 @@ export const StatsTitle = styled('div')(() => ({
 
 export const StatsValue = styled('div')(() => ({
   marginBottom: '10px',
-  color: 'rgb(123, 169, 90)',
 }));
 
-export const Percentage = styled('div')(() => ({
-  color: 'rgb(123, 169, 90)',
-}));
+export const Percentage = styled('div')(() => ({}));
+
+export const profitGreen = 'rgb(123, 169, 90)';
+export const lossRed = 'rgb(200, 70, 70)';
+
+export function pnlColor(value: number): string {
+  return value < 0 ? lossRed : profitGreen;
+}
+
+export function formatPnL(value: number, digits = 2): string {
+  if (!Number.isFinite(value)) {
+    return '0';
+  }
+  const rounded = Number(value.toFixed(digits));
+  return rounded > 0 ? `+${rounded}` : `${rounded}`;
+}
 
 export default function Summary({
   stats,
@@ -33,17 +45,22 @@ export default function Summary({
   stats: GridStats;
   totalProfitsPercentage: number;
 }) {
+  const color = pnlColor(stats.totalProfits);
   return (
     <SummarySection>
       <SummaryBlock>
         <StatsTitle>Investment USDT</StatsTitle>
-        <div>{stats.investment}</div>
+        <div>{Number(stats.investment).toFixed(2)}</div>
       </SummaryBlock>
 
       <SummaryBlock>
         <StatsTitle>Total Profit USDT</StatsTitle>
-        <StatsValue>{stats.totalProfits}</StatsValue>
-        <Percentage>{totalProfitsPercentage}%</Percentage>
+        <StatsValue style={{ color }}>{formatPnL(stats.totalProfits)}</StatsValue>
+        <Percentage style={{ color }}>
+          {Number.isFinite(totalProfitsPercentage)
+            ? `${totalProfitsPercentage.toFixed(2)}%`
+            : '0%'}
+        </Percentage>
       </SummaryBlock>
     </SummarySection>
   );

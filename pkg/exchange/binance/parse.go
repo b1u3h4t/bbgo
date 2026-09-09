@@ -1156,6 +1156,7 @@ func (e *OrderTradeUpdateEvent) TradeFutures(isIsolated bool) (*types.Trade, err
 		FeeCurrency:   e.OrderTrade.CommissionAsset,
 		IsFutures:     true,
 		IsIsolated:    isIsolated,
+		PnL:           parseExchangeRealizedPnL(e.OrderTrade.RealizedProfit),
 	}, nil
 }
 
