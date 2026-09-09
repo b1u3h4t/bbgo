@@ -229,6 +229,12 @@ type Strategy struct {
 	// and TotalQuoteProfit).
 	recovering bool
 
+	// orderPositionProfit accumulates Position/avg-cost realized PnL per order ID
+	// (from TradeCollector OnProfit). For USDT-M grids this matches Binance
+	// userTrades.realizedPnl — twin-pin (sellPin-buyPin)*qty does not when several
+	// grid levels share one net position.
+	orderPositionProfit map[uint64]fixedpoint.Value
+
 	// mu is used for locking the grid object field, avoid double grid opening
 	mu sync.Mutex
 
@@ -545,6 +551,11 @@ func (s *Strategy) aggregateOrderQuoteAmountAndFee(o types.Order) (fixedpoint.Va
 			if fee, ok := fees[feeCurrency]; ok {
 				return quoteAmount, fee, feeCurrency
 			}
+			for ccy, fee := range fees {
+				if fee.Sign() > 0 {
+					return quoteAmount, fee, ccy
+				}
+			}
 			return quoteAmount, fixedpoint.Zero, feeCurrency
 		}
 
@@ -574,8 +585,71 @@ func (s *Strategy) aggregateOrderQuoteAmountAndFee(o types.Order) (fixedpoint.Va
 	if fee, ok := fees[feeCurrency]; ok {
 		return quoteAmount, fee, feeCurrency
 	}
+	// Futures maker fee is often paid in BNB (or another platform token), not quote/base.
+	for ccy, fee := range fees {
+		if fee.Sign() > 0 {
+			return quoteAmount, fee, ccy
+		}
+	}
 
 	return quoteAmount, fixedpoint.Zero, feeCurrency
+}
+
+func (s *Strategy) addOrderPositionProfit(orderID uint64, profit fixedpoint.Value) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.orderPositionProfit == nil {
+		s.orderPositionProfit = make(map[uint64]fixedpoint.Value)
+	}
+	s.orderPositionProfit[orderID] = s.orderPositionProfit[orderID].Add(profit)
+}
+
+func (s *Strategy) takeOrderPositionProfit(orderID uint64) (fixedpoint.Value, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.orderPositionProfit == nil {
+		return fixedpoint.Zero, false
+	}
+	v, ok := s.orderPositionProfit[orderID]
+	if ok {
+		delete(s.orderPositionProfit, orderID)
+	}
+	return v, ok
+}
+
+// gridProfitFromPositionAvgCost builds GridProfit from accumulated Position PnL
+// for this order (aligned with Binance realizedPnl), and always attaches twin-pin
+// theoretical profit for tuning when twinPinFallback is provided.
+func (s *Strategy) gridProfitFromPositionAvgCost(o types.Order, twinPinFallback func() *GridProfit) *GridProfit {
+	var twinPin fixedpoint.Value
+	if twinPinFallback != nil {
+		if twin := twinPinFallback(); twin != nil {
+			twinPin = twin.Profit
+		}
+	}
+
+	if v, ok := s.takeOrderPositionProfit(o.OrderID); ok {
+		return &GridProfit{
+			Symbol:         s.Symbol,
+			Currency:       s.Market.QuoteCurrency,
+			Profit:         v,
+			RealizedProfit: v,
+			TwinPinProfit:  twinPin,
+			Time:           o.UpdateTime.Time(),
+			Order:          o,
+		}
+	}
+	if twinPinFallback != nil {
+		s.logger.Warnf("USDT-M grid: missing position PnL for order #%d, falling back to twin-pin profit", o.OrderID)
+		p := twinPinFallback()
+		if p != nil {
+			p.Symbol = s.Symbol
+			p.TwinPinProfit = p.Profit
+			p.RealizedProfit = p.Profit
+		}
+		return p
+	}
+	return nil
 }
 
 func (s *Strategy) processFilledOrder(o types.Order) {
@@ -666,12 +740,15 @@ func (s *Strategy) processFilledOrder(o types.Order) {
 
 		if !coinM {
 			// Spot: a filled sell implies prior inventory — keep legacy twin-pin profit.
-			// USDT-M: only realize when this sell closes/reduces a long; opening a short is not profit.
+			// USDT-M: only realize when this sell closes/reduces a long; use Position
+			// avg-cost PnL (Binance realizedPnl), not twin-pin spread.
 			if !s.isUSDTMFutures() {
 				profit = s.calculateProfit(o, newPrice, newQuantity)
 			} else if before, ok := s.positionBeforeFill(o, executedQuantity); ok && before.Sign() > 0 {
 				closeQty := fixedpoint.Min(executedQuantity, before)
-				profit = s.calculateProfit(o, newPrice, closeQty)
+				profit = s.gridProfitFromPositionAvgCost(o, func() *GridProfit {
+					return s.calculateProfit(o, newPrice, closeQty)
+				})
 			}
 		}
 
@@ -712,18 +789,20 @@ func (s *Strategy) processFilledOrder(o types.Order) {
 			s.logger.Infof("round down sell order quantity %s to %s by base quantity precision %d", origQuantity.String(), newQuantity.String(), s.Market.VolumePrecision)
 
 			// USDT-M short grid: realize quote profit when buy closes/reduces a short.
-			// Twin higher pin (newPrice) is the prior sell level.
+			// Use Position avg-cost PnL (matches Binance history), not twin-pin spread.
 			if s.isUSDTMFutures() {
 				if before, ok := s.positionBeforeFill(o, executedQuantity); ok && before.Sign() < 0 {
 					closeQty := fixedpoint.Min(executedQuantity, before.Abs())
-					profit = s.calculateProfit(types.Order{
-						SubmitOrder: types.SubmitOrder{
-							Price:    newPrice,
-							Quantity: closeQty,
-							Side:     types.SideTypeSell,
-						},
-						UpdateTime: o.UpdateTime,
-					}, o.Price, closeQty)
+					profit = s.gridProfitFromPositionAvgCost(o, func() *GridProfit {
+						return s.calculateProfit(types.Order{
+							SubmitOrder: types.SubmitOrder{
+								Price:    newPrice,
+								Quantity: closeQty,
+								Side:     types.SideTypeSell,
+							},
+							UpdateTime: o.UpdateTime,
+						}, o.Price, closeQty)
+					})
 				}
 			}
 		}
@@ -759,7 +838,11 @@ func (s *Strategy) processFilledOrder(o types.Order) {
 		if profit.Currency == s.Market.BaseCurrency {
 			total = s.GridProfitStats.TotalBaseProfit
 		}
-		s.logger.Infof("GENERATED GRID PROFIT: %+v; TOTAL GRID PROFIT BECOMES: %f %s", profit, total.Float64(), profit.Currency)
+		s.logger.Infof("GENERATED GRID PROFIT: realized=%s twinPin=%s cumulative=%s twinPinCum=%s rounds=%d order=#%d; TOTAL=%f %s",
+			profit.Profit.String(), profit.TwinPinProfit.String(),
+			profit.CumulativeRealized.String(), profit.CumulativeTwinPin.String(),
+			profit.ArbitrageCount, profit.Order.OrderID,
+			total.Float64(), profit.Currency)
 		s.EmitGridProfit(s.GridProfitStats, profit)
 	}
 }
@@ -1960,6 +2043,14 @@ func (s *Strategy) Run(ctx context.Context, _ bbgo.OrderExecutor, session *bbgo.
 	orderExecutor.Bind()
 	orderExecutor.TradeCollector().OnTrade(func(trade types.Trade, _, _ fixedpoint.Value) {
 		s.GridProfitStats.AddTrade(trade)
+	})
+	// Accumulate avg-cost realized PnL per order so USDT-M Slack GRID PROFIT matches
+	// Binance userTrades.realizedPnl (not twin-pin arithmetic).
+	orderExecutor.TradeCollector().OnProfit(func(trade types.Trade, profit *types.Profit) {
+		if profit == nil || trade.OrderID == 0 {
+			return
+		}
+		s.addOrderPositionProfit(trade.OrderID, profit.Profit)
 	})
 	orderExecutor.TradeCollector().OnPositionUpdate(func(position *types.Position) {
 		bbgo.Sync(ctx, s)

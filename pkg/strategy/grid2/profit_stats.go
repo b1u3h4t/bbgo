@@ -18,17 +18,19 @@ import (
 var _ common.TabularStats = (*GridProfitStats)(nil)
 
 type GridProfitStats struct {
-	Symbol           string                      `json:"symbol"`
-	TotalBaseProfit  fixedpoint.Value            `json:"totalBaseProfit,omitempty"`
-	TotalQuoteProfit fixedpoint.Value            `json:"totalQuoteProfit,omitempty"`
-	FloatProfit      fixedpoint.Value            `json:"floatProfit,omitempty"`
-	GridProfit       fixedpoint.Value            `json:"gridProfit,omitempty"`
-	ArbitrageCount   int                         `json:"arbitrageCount,omitempty"`
-	TotalFee         map[string]fixedpoint.Value `json:"totalFee,omitempty"`
-	Volume           fixedpoint.Value            `json:"volume,omitempty"`
-	Market           types.Market                `json:"market,omitempty"`
-	Since            *time.Time                  `json:"since,omitempty"`
-	InitialOrderID   uint64                      `json:"initialOrderID"`
+	Symbol           string           `json:"symbol"`
+	TotalBaseProfit  fixedpoint.Value `json:"totalBaseProfit,omitempty"`
+	TotalQuoteProfit fixedpoint.Value `json:"totalQuoteProfit,omitempty"`
+	// TotalTwinPinProfit accumulates theoretical (sellPin-buyPin)*qty round profits for tuning.
+	TotalTwinPinProfit fixedpoint.Value            `json:"totalTwinPinProfit,omitempty"`
+	FloatProfit        fixedpoint.Value            `json:"floatProfit,omitempty"`
+	GridProfit         fixedpoint.Value            `json:"gridProfit,omitempty"`
+	ArbitrageCount     int                         `json:"arbitrageCount,omitempty"`
+	TotalFee           map[string]fixedpoint.Value `json:"totalFee,omitempty"`
+	Volume             fixedpoint.Value            `json:"volume,omitempty"`
+	Market             types.Market                `json:"market,omitempty"`
+	Since              *time.Time                  `json:"since,omitempty"`
+	InitialOrderID     uint64                      `json:"initialOrderID"`
 
 	DailyFee            map[time.Time]map[string]fixedpoint.Value `json:"dailyFee,omitempty"`
 	DailyNumOfArbitrage map[time.Time]int                         `json:"dailyArbitrageCount,omitempty"`
@@ -105,6 +107,27 @@ func (s *GridProfitStats) AddProfit(profit *GridProfit) {
 		s.TotalBaseProfit = s.TotalBaseProfit.Add(profit.Profit)
 	}
 
+	if !profit.TwinPinProfit.IsZero() {
+		s.TotalTwinPinProfit = s.TotalTwinPinProfit.Add(profit.TwinPinProfit)
+	} else if profit.Currency == s.Market.QuoteCurrency {
+		// spot / legacy: twin-pin equals Profit
+		s.TotalTwinPinProfit = s.TotalTwinPinProfit.Add(profit.Profit)
+	}
+
+	// stamp round snapshot for Slack / logs (after totals updated)
+	profit.Symbol = s.Symbol
+	profit.RealizedProfit = profit.Profit
+	if profit.TwinPinProfit.IsZero() && profit.Currency == s.Market.QuoteCurrency {
+		profit.TwinPinProfit = profit.Profit
+	}
+	if profit.Currency == s.Market.BaseCurrency {
+		profit.CumulativeRealized = s.TotalBaseProfit
+	} else {
+		profit.CumulativeRealized = s.TotalQuoteProfit
+	}
+	profit.CumulativeTwinPin = s.TotalTwinPinProfit
+	profit.ArbitrageCount = s.ArbitrageCount
+
 	// Normalize to midnight UTC for daily aggregation
 	dateKey := getDateKey(profit.Time)
 	if s.DailyNumOfArbitrage == nil {
@@ -153,8 +176,16 @@ func (s *GridProfitStats) SlackAttachment() slack.Attachment {
 
 	if !s.TotalQuoteProfit.IsZero() {
 		fields = append(fields, slack.AttachmentField{
-			Title: "Total Quote Profit",
+			Title: "累计已实现 (Binance)",
 			Value: style.PnLSignString(s.TotalQuoteProfit) + " " + s.Market.QuoteCurrency,
+			Short: true,
+		})
+	}
+
+	if !s.TotalTwinPinProfit.IsZero() {
+		fields = append(fields, slack.AttachmentField{
+			Title: "累计档距利润 (调优)",
+			Value: style.PnLSignString(s.TotalTwinPinProfit) + " " + s.Market.QuoteCurrency,
 			Short: true,
 		})
 	}
@@ -226,7 +257,11 @@ func (s *GridProfitStats) PlainText() string {
 	}
 
 	if !s.TotalQuoteProfit.IsZero() {
-		fmt.Fprintf(&b, "- Total quote profit: %s %s\n", style.PnLSignString(s.TotalQuoteProfit), s.Market.QuoteCurrency)
+		fmt.Fprintf(&b, "- Total realized (quote): %s %s\n", style.PnLSignString(s.TotalQuoteProfit), s.Market.QuoteCurrency)
+	}
+
+	if !s.TotalTwinPinProfit.IsZero() {
+		fmt.Fprintf(&b, "- Total twin-pin (quote): %s %s\n", style.PnLSignString(s.TotalTwinPinProfit), s.Market.QuoteCurrency)
 	}
 
 	if !s.TotalBaseProfit.IsZero() {

@@ -29,13 +29,13 @@ func newCoinMTestStrategy() *Strategy {
 			MinNotional:     number(100),
 			ContractValue:   number(100),
 		},
-		Symbol:      "BTCUSD_PERP",
-		GridNum:     5,
-		LowerPrice:  number(90000),
-		UpperPrice:  number(110000),
-		EarnBase:    true,
-		Compound:    false,
-		Leverage:    number(5),
+		Symbol:          "BTCUSD_PERP",
+		GridNum:         5,
+		LowerPrice:      number(90000),
+		UpperPrice:      number(110000),
+		EarnBase:        true,
+		Compound:        false,
+		Leverage:        number(5),
 		SkipSpreadCheck: true,
 	}
 	s.QuantityOrAmount.Quantity = number(10)
@@ -293,4 +293,45 @@ func TestStrategy_generateGridOrders_makerOnly_spot(t *testing.T) {
 		assert.Equal(t, types.OrderTypeLimitMaker, o.Type)
 		assert.Equal(t, types.TimeInForceGTC, o.TimeInForce)
 	}
+}
+
+func TestStrategy_gridProfitFromPositionAvgCost(t *testing.T) {
+	s := &Strategy{
+		logger: logrus.NewEntry(logrus.New()),
+		Market: types.Market{
+			Symbol:        "ENAUSDT",
+			BaseCurrency:  "ENA",
+			QuoteCurrency: "USDT",
+		},
+		Symbol: "ENAUSDT",
+	}
+	s.session = &bbgo.ExchangeSession{
+		ExchangeSessionConfig: bbgo.ExchangeSessionConfig{Futures: true},
+	}
+	assert.True(t, s.isUSDTMFutures())
+
+	o := types.Order{OrderID: 42, UpdateTime: types.Time{}}
+	// twin-pin would claim +2.56; position pnl for this order is -1.30 (matches Binance avg-cost)
+	s.addOrderPositionProfit(42, number(-1.00965))
+	s.addOrderPositionProfit(42, number(-0.29521))
+	profit := s.gridProfitFromPositionAvgCost(o, func() *GridProfit {
+		return &GridProfit{Currency: "USDT", Profit: number(2.56)}
+	})
+	assert.NotNil(t, profit)
+	assert.Equal(t, "USDT", profit.Currency)
+	assert.InDelta(t, -1.30486, profit.Profit.Float64(), 1e-6)
+	assert.InDelta(t, 2.56, profit.TwinPinProfit.Float64(), 1e-9)
+
+	stats := NewGridProfitStats(s.Market)
+	stats.AddProfit(profit)
+	assert.Equal(t, 1, profit.ArbitrageCount)
+	assert.InDelta(t, -1.30486, profit.CumulativeRealized.Float64(), 1e-6)
+	assert.InDelta(t, 2.56, profit.CumulativeTwinPin.Float64(), 1e-9)
+
+	// consumed — second take falls back to twin-pin for both fields
+	profit2 := s.gridProfitFromPositionAvgCost(o, func() *GridProfit {
+		return &GridProfit{Currency: "USDT", Profit: number(2.56)}
+	})
+	assert.InDelta(t, 2.56, profit2.Profit.Float64(), 1e-9)
+	assert.InDelta(t, 2.56, profit2.TwinPinProfit.Float64(), 1e-9)
 }
