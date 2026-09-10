@@ -1026,6 +1026,13 @@ func (e *Exchange) QueryOrderTrades(ctx context.Context, q types.OrderQuery) ([]
 		return e.queryDeliveryOrderTrades(ctx, q)
 	}
 
+	// USDT-M futures: must use /fapi/v1/userTrades. Falling through to spot
+	// /api/v3/myTrades returns -1121 Invalid symbol for futures-only pairs
+	// (e.g. HYPEUSDT) and breaks grid2 fee/trade recovery.
+	if e.IsFutures {
+		return e.queryFuturesOrderTrades(ctx, q)
+	}
+
 	var remoteTrades []binance.TradeV3
 	var trades []types.Trade
 

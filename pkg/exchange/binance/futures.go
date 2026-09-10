@@ -458,6 +458,37 @@ func (e *Exchange) QueryFuturesKLines(
 	return kLines, nil
 }
 
+// queryFuturesOrderTrades queries USDT-M account trades for a single order via
+// GET /fapi/v1/userTrades?orderId=...
+func (e *Exchange) queryFuturesOrderTrades(ctx context.Context, q types.OrderQuery) ([]types.Trade, error) {
+	orderID, err := strconv.ParseInt(q.OrderID, 10, 64)
+	if err != nil {
+		return nil, err
+	}
+
+	req := e.futuresClient.NewListAccountTradeService().
+		Symbol(q.Symbol).
+		OrderID(orderID).
+		Limit(1000)
+
+	remoteTrades, err := req.Do(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var trades []types.Trade
+	for _, t := range remoteTrades {
+		localTrade, err := toGlobalFuturesTrade(*t, e.IsIsolatedFutures)
+		if err != nil {
+			log.WithError(err).Errorf("can not convert binance futures trade: %+v", t)
+			continue
+		}
+		trades = append(trades, *localTrade)
+	}
+
+	return types.SortTradesAscending(trades), nil
+}
+
 func (e *Exchange) queryFuturesTrades(
 	ctx context.Context, symbol string, options *types.TradeQueryOptions,
 ) (trades []types.Trade, err error) {
