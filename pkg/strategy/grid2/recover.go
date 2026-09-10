@@ -258,6 +258,20 @@ func (s *Strategy) recover(ctx context.Context) error {
 		s.logger.Infof("[Recover] twin orderbook after recovering no twin order on grid\n%s", activeOrdersInTwinOrderBook.String())
 
 		if activeOrdersInTwinOrderBook.EmptyTwinOrderSize() > 0 {
+			// Price outside [lower, upper] leaves one side empty by design; history cannot
+			// rebuild those twins. Soft-skip so periodic recover does not spam Slack —
+			// operational fix is to reband around the market.
+			if s.session != nil && !s.LowerPrice.IsZero() && !s.UpperPrice.IsZero() {
+				if lastPrice, err := s.getLastTradePrice(ctx, s.session); err == nil && !lastPrice.IsZero() {
+					if lastPrice.Compare(s.LowerPrice) < 0 || lastPrice.Compare(s.UpperPrice) > 0 {
+						s.logger.Warnf(
+							"[Recover] price %s outside band [%s, %s] with empty twin pins %+v; skip hard fail (reband needed)",
+							lastPrice, s.LowerPrice, s.UpperPrice, noTwinOrderPins,
+						)
+						return nil
+					}
+				}
+			}
 			return fmt.Errorf("[Recover] there is still empty grid in twin orderbook")
 		}
 
