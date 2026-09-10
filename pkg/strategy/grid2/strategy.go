@@ -71,6 +71,14 @@ type Strategy struct {
 	// These fields will be filled from the config file (it translates YAML to JSON)
 	Symbol string `json:"symbol"`
 
+	// Enable controls whether this grid instance runs.
+	// nil / omitted defaults to true. Set enable: false to keep the config in
+	// bbgo.yaml but skip opening/recovering orders after restart so the
+	// position can be handled manually (e.g. after a band break).
+	// When disabled on start, existing open orders for the symbol are cancelled
+	// so fills are not left without reverse-order management.
+	Enable *bool `json:"enable,omitempty" yaml:"enable,omitempty"`
+
 	// ProfitSpread is the fixed profit spread you want to submit the sell order
 	// When ProfitSpread is enabled, the grid will shift up, e.g.,
 	// If you opened a grid with the price range 10_000 to 20_000
@@ -310,6 +318,12 @@ func (s *Strategy) Defaults() error {
 	return nil
 }
 
+// isEnabled reports whether this grid instance should trade.
+// Missing enable field means enabled (backward compatible).
+func (s *Strategy) isEnabled() bool {
+	return s.Enable == nil || *s.Enable
+}
+
 func (s *Strategy) Initialize() error {
 	s.filledOrderIDMap = types.NewSyncOrderMap()
 	s.logger = log.WithFields(s.LogFields)
@@ -358,6 +372,10 @@ func (s *Strategy) getPrometheusLabels() prometheus.Labels {
 }
 
 func (s *Strategy) Subscribe(session *bbgo.ExchangeSession) {
+	if !s.isEnabled() {
+		return
+	}
+
 	if !s.TriggerPrice.IsZero() || !s.StopLossPrice.IsZero() || !s.TakeProfitPrice.IsZero() || !s.TakeProfitRatio.IsZero() {
 		session.Subscribe(types.KLineChannel, s.Symbol, types.SubscribeOptions{Interval: types.Interval1m})
 	}
@@ -2072,13 +2090,28 @@ func (s *Strategy) getWriteContext(fallbackCtxList ...context.Context) context.C
 }
 
 func (s *Strategy) Run(ctx context.Context, _ bbgo.OrderExecutor, session *bbgo.ExchangeSession) error {
+	s.session = session
+	if s.logger == nil {
+		s.logger = log.WithFields(s.LogFields)
+	}
+
+	if !s.isEnabled() {
+		s.logger.Warnf(
+			"%s: enable=false — grid will not open or recover; cancelling open orders for manual handling",
+			s.Symbol,
+		)
+		if err := s.clearOpenOrders(ctx, session); err != nil {
+			s.logger.WithError(err).Errorf("%s: failed to cancel open orders while disabled", s.Symbol)
+		}
+		return nil
+	}
+
 	instanceID := s.InstanceID()
 
 	// allocate a context for write operation (submitting orders)
 	s.tradingCtx = ctx
 	s.writeCtx, s.cancelWrite = context.WithCancel(ctx)
 
-	s.session = session
 	s.applyCoinMDefaults()
 
 	// newPrometheusLabels requires session.Name to setup the exchange label
