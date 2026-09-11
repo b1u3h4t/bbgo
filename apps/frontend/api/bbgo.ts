@@ -192,3 +192,20 @@ export async function queryAnalysisTodayPnL(session = 'binance') {
   });
   return response.data;
 }
+
+export async function queryAnalysisKlines(params: {
+  symbol: string;
+  interval?: string;
+  limit?: number;
+  session?: string;
+}) {
+  const response = await axios.get(baseURL + '/api/analysis/klines', {
+    params: {
+      session: params.session || 'binance',
+      symbol: params.symbol,
+      interval: params.interval || '1h',
+      limit: params.limit || 72,
+    },
+  });
+  return response.data;
+}

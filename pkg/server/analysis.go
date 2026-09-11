@@ -2,8 +2,10 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +24,7 @@ func (s *Server) registerAnalysisRoutes(r *gin.Engine) {
 	r.GET("/api/analysis/market", s.analysisMarket)
 	r.GET("/api/analysis/grid-calc", s.analysisGridCalc)
 	r.GET("/api/analysis/pnl/today", s.analysisTodayPnL)
+	r.GET("/api/analysis/klines", s.analysisKlines)
 }
 
 func (s *Server) sessionOrAbort(c *gin.Context) (*bbgo.ExchangeSession, bool) {
@@ -409,7 +412,42 @@ func (s *Server) analysisMarket(c *gin.Context) {
 		"interval": "15m",
 		"asOf":     time.Now().UTC().Format(time.RFC3339),
 		"stage":    stage,
+		"stageNote": "顶部 BTC阶段 取列表首个 symbol（默认 BTCUSDT）的 score 映射",
 		"symbols":  out,
+		"rules": gin.H{
+			"purpose": "启发式止跌打分（运维盘感落地），非回测策略；每次刷新实时拉 K 重算",
+			"data": []string{
+				"K线: 15m × 最多96根（约滚动24h），非自然日",
+				"日高低: 上述窗口内 high/low",
+				"Bounce% = (last/dayLow - 1)×100",
+				"2h%/4h%: 相对最近8/16根开盘涨跌（约2h/4h）；4h%仅展示不进分",
+				"RSI: 近14根收盘简易平均涨跌版（非Wilder平滑，与TV略有偏差）",
+				"绿柱: 近8根 close≥open 根数",
+				"Higher lows: 近24根按每8根切3段取低点，要求 L3>L2>L1（+2主信号）",
+				"Above mid: last > (dayHigh+dayLow)/2",
+			},
+			"scoring": []gin.H{
+				{"when": "last > dayLow×1.005", "delta": "+1", "note": "off day low"},
+				{"when": "否则贴地", "delta": "0", "note": "near day low"},
+				{"when": "2h% > +0.3%", "delta": "+1", "note": "2h up"},
+				{"when": "2h% < -0.3%", "delta": "-1", "note": "2h down"},
+				{"when": "|2h%|≤0.3%", "delta": "0", "note": "2h flat"},
+				{"when": "连续3段抬高低点", "delta": "+2", "note": "higher lows"},
+				{"when": "最近两段低点下降", "delta": "-1", "note": "lower lows"},
+				{"when": "RSI < 30", "delta": "+1", "note": "RSI oversold"},
+				{"when": "RSI > 45 且 Bounce% > 1%", "delta": "+1", "note": "RSI leaving oversold"},
+				{"when": "2h绿柱 ≥ 5", "delta": "+1", "note": "mostly green 2h"},
+				{"when": "2h绿柱 ≤ 3", "delta": "-1", "note": "few green bars"},
+				{"when": "站上日中轴", "delta": "+1", "note": "above day mid"},
+				{"when": "否则在中轴下", "delta": "0", "note": "below day mid"},
+			},
+			"verdict": []gin.H{
+				{"minScore": 4, "label": "止跌迹象偏强"},
+				{"minScore": 2, "label": "弱止跌/观望"},
+				{"minScore": nil, "label": "尚未止跌（score≤1）"},
+			},
+			"validation": "未做历史回测；对照 Notes/Score/特征列人工核验即可",
+		},
 	})
 }
 
@@ -515,6 +553,12 @@ func (s *Server) analysisGridCalc(c *gin.Context) {
 		fromLow = (last - lo) / (hi - lo) * 100
 	}
 
+	chartInterval, chartLimit := parseChartInterval(c.DefaultQuery("interval", "1h"), c.DefaultQuery("limit", ""))
+	klinesPayload := serializeKlines(nil)
+	if klChart, err := session.Exchange.QueryKLines(ctx, symbol, chartInterval, types.KLineQueryOptions{Limit: chartLimit}); err == nil {
+		klinesPayload = serializeKlines(klChart)
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"symbol":      symbol,
 		"last":        roundFloat(last, 8),
@@ -533,6 +577,7 @@ func (s *Server) analysisGridCalc(c *gin.Context) {
 		},
 		"gridNumber":          gridNumber,
 		"pins":                pins,
+		"pinLevels":           buildPinLevels(pins, last, suggestedQty),
 		"leverage":            leverage,
 		"quantity":            roundFloat(suggestedQty, 0),
 		"designBuyPins":       designBuyPins,
@@ -540,6 +585,168 @@ func (s *Server) analysisGridCalc(c *gin.Context) {
 		"buyInitialMarginEst": roundFloat(buyIM, 2),
 		"targetUtil":          targetUtil,
 		"note":                note,
+		"interval":            string(chartInterval),
+		"klines":              klinesPayload,
+		"klines1h":            klinesPayload, // backward-compatible alias
+	})
+}
+
+func serializeKlines(klines []types.KLine) []gin.H {
+	out := make([]gin.H, 0, len(klines))
+	for _, k := range klines {
+		out = append(out, gin.H{
+			"t": k.StartTime.Time().UTC().Format(time.RFC3339),
+			"o": roundFloat(k.Open.Float64(), 8),
+			"h": roundFloat(k.High.Float64(), 8),
+			"l": roundFloat(k.Low.Float64(), 8),
+			"c": roundFloat(k.Close.Float64(), 8),
+			"v": roundFloat(k.Volume.Float64(), 8),
+		})
+	}
+	return out
+}
+
+// allowed chart intervals for Analysis overlays (incl. Binance 8h).
+var analysisChartIntervals = map[string]int{
+	"5m": 96, "15m": 96, "30m": 96,
+	"1h": 72, "2h": 72, "4h": 60,
+	"6h": 48, "8h": 45, "12h": 42,
+	"1d": 90,
+}
+
+func parseChartInterval(raw, limitRaw string) (types.Interval, int) {
+	iv := strings.ToLower(strings.TrimSpace(raw))
+	if iv == "d" || iv == "day" || iv == "daily" || iv == "日线" {
+		iv = "1d"
+	}
+	defLimit, ok := analysisChartIntervals[iv]
+	if !ok {
+		iv = "1h"
+		defLimit = analysisChartIntervals["1h"]
+	}
+	limit := defLimit
+	if limitRaw != "" {
+		if n, err := strconv.Atoi(limitRaw); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	return types.Interval(iv), limit
+}
+
+// buildPinLevels labels pins like an order book with quantity@price:
+//   buys (price <= last): B1 > B2 > … (B1 = highest buy / closest to last)
+//   sells (price > last): S1 < S2 < … (S1 = lowest sell / closest to last)
+func buildPinLevels(pins []float64, last, qty float64) []gin.H {
+	type lv struct {
+		price float64
+		side  string
+	}
+	var buys, sells []lv
+	for _, p := range pins {
+		if !(p > 0) {
+			continue
+		}
+		if p > last {
+			sells = append(sells, lv{price: p, side: "sell"})
+		} else {
+			buys = append(buys, lv{price: p, side: "buy"})
+		}
+	}
+	sort.Slice(buys, func(i, j int) bool { return buys[i].price > buys[j].price })
+	sort.Slice(sells, func(i, j int) bool { return sells[i].price < sells[j].price })
+
+	qtyLabel := formatQtyLabel(qty)
+	out := make([]gin.H, 0, len(buys)+len(sells))
+	for i, b := range buys {
+		label := fmt.Sprintf("%s@%s", qtyLabel, trimFloat(b.price))
+		out = append(out, gin.H{
+			"i": i + 1, "price": b.price, "side": "buy",
+			"quantity": qty, "label": label, "depth": fmt.Sprintf("B%d", i+1),
+		})
+	}
+	for i, s := range sells {
+		label := fmt.Sprintf("%s@%s", qtyLabel, trimFloat(s.price))
+		out = append(out, gin.H{
+			"i": i + 1, "price": s.price, "side": "sell",
+			"quantity": qty, "label": label, "depth": fmt.Sprintf("S%d", i+1),
+		})
+	}
+	return out
+}
+
+func formatQtyLabel(qty float64) string {
+	if qty <= 0 {
+		return "?"
+	}
+	if qty == math.Trunc(qty) {
+		return strconv.FormatInt(int64(qty), 10)
+	}
+	return strconv.FormatFloat(qty, 'f', -1, 64)
+}
+
+func trimFloat(v float64) string {
+	return strconv.FormatFloat(v, 'f', -1, 64)
+}
+
+func (s *Server) analysisKlines(c *gin.Context) {
+	session, ok := s.sessionOrAbort(c)
+	if !ok {
+		return
+	}
+	ctx := c.Request.Context()
+	symbol := strings.TrimSpace(c.DefaultQuery("symbol", "BTCUSDT"))
+	interval, limit := parseChartInterval(c.DefaultQuery("interval", "1h"), c.DefaultQuery("limit", ""))
+
+	klines, err := session.Exchange.QueryKLines(ctx, symbol, interval, types.KLineQueryOptions{Limit: limit})
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	last := 0.0
+	if len(klines) > 0 {
+		last = klines[len(klines)-1].Close.Float64()
+	}
+	if t, err := session.Exchange.QueryTicker(ctx, symbol); err == nil && t != nil && t.Last.Float64() > 0 {
+		last = t.Last.Float64()
+	}
+
+	// optional pins from active grid2 strategy
+	pins := []float64{}
+	lower, upper, qty := 0.0, 0.0, 0.0
+	if s.Trader != nil {
+		_ = s.Trader.IterateStrategies(func(st types.StrategyID) error {
+			if g, ok := st.(*grid2.Strategy); ok && g.Symbol == symbol {
+				lower = g.LowerPrice.Float64()
+				upper = g.UpperPrice.Float64()
+				qty = g.QuantityOrAmount.Quantity.Float64()
+				if g.GridNum > 1 && upper > lower {
+					n := int(g.GridNum)
+					for i := 0; i < n; i++ {
+						pins = append(pins, roundFloat(lower+float64(i)*(upper-lower)/float64(n-1), 8))
+					}
+				}
+			}
+			return nil
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"symbol":    symbol,
+		"interval":  string(interval),
+		"last":      roundFloat(last, 8),
+		"quantity":  roundFloat(qty, 8),
+		"klines":    serializeKlines(klines),
+		"pins":      pins,
+		"pinLevels": buildPinLevels(pins, last, qty),
+		"band": gin.H{
+			"lower": lower,
+			"upper": upper,
+		},
+		"intervals": []string{"5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"},
 	})
 }
 
@@ -560,11 +767,34 @@ func (s *Server) analysisTodayPnL(c *gin.Context) {
 	now := time.Now().In(loc)
 	day0 := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
 
+	// BNB fee discount: COMMISSION income.asset is often BNB — convert to USDT.
+	bnbPrice := 0.0
+	if t, err := session.Exchange.QueryTicker(ctx, "BNBUSDT"); err == nil && t != nil {
+		bnbPrice = t.Last.Float64()
+	}
+
 	type agg struct {
-		Realized, Commission, Funding float64
+		Realized, CommissionUSDT, CommissionBNB, Funding float64
 	}
 	bySym := map[string]*agg{}
-	byType := map[string]float64{}
+	var totRealized, totCommUSDT, totCommBNB, totFunding float64
+
+	toUSDT := func(income float64, asset string) (usdt float64, bnb float64) {
+		asset = strings.ToUpper(strings.TrimSpace(asset))
+		switch asset {
+		case "BNB":
+			return income * bnbPrice, income
+		case "USDT", "USD", "BUSD", "":
+			return income, 0
+		default:
+			if asset != "" {
+				if t, err := session.Exchange.QueryTicker(ctx, asset+"USDT"); err == nil && t != nil {
+					return income * t.Last.Float64(), 0
+				}
+			}
+			return income, 0
+		}
+	}
 
 	fetch := func(incomeType binanceapi.FuturesIncomeType) {
 		rows, err := ex.QueryFuturesIncomeHistory(ctx, "", incomeType, &day0, &now)
@@ -573,7 +803,6 @@ func (s *Server) analysisTodayPnL(c *gin.Context) {
 		}
 		for _, r := range rows {
 			inc := r.Income.Float64()
-			byType[string(r.IncomeType)] += inc
 			sym := r.Symbol
 			if sym == "" {
 				sym = "(account)"
@@ -584,10 +813,16 @@ func (s *Server) analysisTodayPnL(c *gin.Context) {
 			switch r.IncomeType {
 			case binanceapi.FuturesIncomeRealizedPnL:
 				bySym[sym].Realized += inc
+				totRealized += inc
 			case binanceapi.FuturesIncomeCommission:
-				bySym[sym].Commission += inc
+				usdt, bnb := toUSDT(inc, r.Asset)
+				bySym[sym].CommissionUSDT += usdt
+				bySym[sym].CommissionBNB += bnb
+				totCommUSDT += usdt
+				totCommBNB += bnb
 			case binanceapi.FuturesIncomeFundingFee:
 				bySym[sym].Funding += inc
+				totFunding += inc
 			}
 		}
 	}
@@ -598,17 +833,15 @@ func (s *Server) analysisTodayPnL(c *gin.Context) {
 	symbols := make([]gin.H, 0, len(bySym))
 	for sym, a := range bySym {
 		symbols = append(symbols, gin.H{
-			"symbol":     sym,
-			"realized":   roundFloat(a.Realized, 4),
-			"commission": roundFloat(a.Commission, 4),
-			"funding":    roundFloat(a.Funding, 4),
-			"net":        roundFloat(a.Realized+a.Commission+a.Funding, 4),
+			"symbol":          sym,
+			"realized":        roundFloat(a.Realized, 4),
+			"commission":      roundFloat(a.CommissionUSDT, 4), // USDT-equivalent (BNB converted)
+			"commissionBNB":   roundFloat(a.CommissionBNB, 8),
+			"commissionAsset": "BNB->USDT",
+			"funding":         roundFloat(a.Funding, 4),
+			"net":             roundFloat(a.Realized+a.CommissionUSDT+a.Funding, 4),
 		})
 	}
-
-	realized := byType[string(binanceapi.FuturesIncomeRealizedPnL)]
-	commission := byType[string(binanceapi.FuturesIncomeCommission)]
-	funding := byType[string(binanceapi.FuturesIncomeFundingFee)]
 
 	c.JSON(http.StatusOK, gin.H{
 		"session": session.Name,
@@ -617,11 +850,16 @@ func (s *Server) analysisTodayPnL(c *gin.Context) {
 			"start": day0.Format(time.RFC3339),
 			"end":   now.Format(time.RFC3339),
 		},
+		"feeNote": gin.H{
+			"bnbPriceUSDT": roundFloat(bnbPrice, 4),
+			"detail":       "COMMISSION paid in BNB is converted to USDT via BNBUSDT last price",
+		},
 		"totals": gin.H{
-			"realized":   roundFloat(realized, 4),
-			"commission": roundFloat(commission, 4),
-			"funding":    roundFloat(funding, 4),
-			"net":        roundFloat(realized+commission+funding, 4),
+			"realized":      roundFloat(totRealized, 4),
+			"commission":    roundFloat(totCommUSDT, 4),
+			"commissionBNB": roundFloat(totCommBNB, 8),
+			"funding":       roundFloat(totFunding, 4),
+			"net":           roundFloat(totRealized+totCommUSDT+totFunding, 4),
 		},
 		"symbols": symbols,
 	})
