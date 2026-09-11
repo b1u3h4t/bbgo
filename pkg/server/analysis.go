@@ -858,11 +858,13 @@ func (s *Server) analysisTodayPnL(c *gin.Context) {
 		}
 	}
 
-	fetch := func(incomeType binanceapi.FuturesIncomeType) {
+	incomeCounts := map[string]int{}
+	fetch := func(incomeType binanceapi.FuturesIncomeType) error {
 		rows, err := ex.QueryFuturesIncomeHistory(ctx, "", incomeType, &day0, &now)
 		if err != nil {
-			return
+			return fmt.Errorf("income %s: %w", incomeType, err)
 		}
+		incomeCounts[string(incomeType)] = len(rows)
 		for _, r := range rows {
 			inc := r.Income.Float64()
 			sym := r.Symbol
@@ -887,10 +889,18 @@ func (s *Server) analysisTodayPnL(c *gin.Context) {
 				totFunding += inc
 			}
 		}
+		return nil
 	}
-	fetch(binanceapi.FuturesIncomeRealizedPnL)
-	fetch(binanceapi.FuturesIncomeCommission)
-	fetch(binanceapi.FuturesIncomeFundingFee)
+	for _, t := range []binanceapi.FuturesIncomeType{
+		binanceapi.FuturesIncomeRealizedPnL,
+		binanceapi.FuturesIncomeCommission,
+		binanceapi.FuturesIncomeFundingFee,
+	} {
+		if err := fetch(t); err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+	}
 
 	symbols := make([]gin.H, 0, len(bySym))
 	for sym, a := range bySym {
@@ -904,6 +914,11 @@ func (s *Server) analysisTodayPnL(c *gin.Context) {
 			"net":             roundFloat(a.Realized+a.CommissionUSDT+a.Funding, 4),
 		})
 	}
+	sort.Slice(symbols, func(i, j int) bool {
+		ni, _ := symbols[i]["net"].(float64)
+		nj, _ := symbols[j]["net"].(float64)
+		return ni > nj
+	})
 
 	positions := collectPositions(ctx, session)
 	uPnLSum := 0.0
@@ -920,8 +935,9 @@ func (s *Server) analysisTodayPnL(c *gin.Context) {
 		},
 		"feeNote": gin.H{
 			"bnbPriceUSDT": roundFloat(bnbPrice, 4),
-			"detail":       "COMMISSION paid in BNB is converted to USDT via BNBUSDT last price",
+			"detail":       "COMMISSION paid in BNB is converted to USDT via BNBUSDT last price. Net aligns with Binance /fapi/v1/income (REALIZED_PNL+COMMISSION+FUNDING_FEE) for CST today. Unrealized is current open-position float (not today's delta).",
 		},
+		"incomeCounts": incomeCounts,
 		"totals": gin.H{
 			"realized":      roundFloat(totRealized, 4),
 			"commission":    roundFloat(totCommUSDT, 4),

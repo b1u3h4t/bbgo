@@ -619,25 +619,74 @@ func (e *Exchange) GetFuturesClient() *binanceapi.FuturesRestClient {
 	return e.futuresClient2
 }
 
-// QueryFuturesIncomeHistory queries the income history on the binance futures account
-// This is more binance futures specific API, the convert function is not designed yet.
+// QueryFuturesIncomeHistory queries the income history on the binance futures account.
+// Binance /fapi/v1/income defaults to limit=100 (max 1000); dense grid days easily exceed
+// 100 rows per incomeType, so this paginates with limit=1000 until the window is exhausted.
 // TODO: consider other futures platforms and design the common data structure for this
 func (e *Exchange) QueryFuturesIncomeHistory(
 	ctx context.Context, symbol string, incomeType binanceapi.FuturesIncomeType, startTime, endTime *time.Time,
 ) ([]binanceapi.FuturesIncome, error) {
-	req := e.futuresClient2.NewFuturesGetIncomeHistoryRequest()
-	req.Symbol(symbol)
-	req.IncomeType(incomeType)
-	if startTime != nil {
-		req.StartTime(*startTime)
+	const pageLimit uint64 = 1000
+	const maxPages = 50
+
+	var (
+		all   []binanceapi.FuturesIncome
+		seen  = make(map[int64]struct{})
+		start = startTime
+	)
+
+	for page := 0; page < maxPages; page++ {
+		req := e.futuresClient2.NewFuturesGetIncomeHistoryRequest()
+		if symbol != "" {
+			req.Symbol(symbol)
+		}
+		req.IncomeType(incomeType)
+		req.Limit(pageLimit)
+		if start != nil {
+			req.StartTime(*start)
+		}
+		if endTime != nil {
+			req.EndTime(*endTime)
+		}
+
+		resp, err := req.Do(ctx)
+		if err != nil {
+			return all, err
+		}
+		if len(resp) == 0 {
+			break
+		}
+
+		added := 0
+		for _, row := range resp {
+			if row.TranId != 0 {
+				if _, ok := seen[row.TranId]; ok {
+					continue
+				}
+				seen[row.TranId] = struct{}{}
+			}
+			all = append(all, row)
+			added++
+		}
+
+		if uint64(len(resp)) < pageLimit {
+			break
+		}
+
+		last := resp[len(resp)-1].Time.Time()
+		// Inclusive overlap + TranId dedupe avoids dropping same-millisecond rows.
+		next := last
+		if endTime != nil && !next.Before(*endTime) {
+			break
+		}
+		if start != nil && !next.After(*start) && added == 0 {
+			// No progress (all duplicates) — stop to avoid a tight loop.
+			break
+		}
+		start = &next
 	}
 
-	if endTime != nil {
-		req.EndTime(*endTime)
-	}
-
-	resp, err := req.Do(ctx)
-	return resp, err
+	return all, nil
 }
 
 func (e *Exchange) QueryFundingFeeHistory(

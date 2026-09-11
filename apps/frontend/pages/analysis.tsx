@@ -1108,11 +1108,11 @@ export default function AnalysisPage() {
           {pnl?.totals && (
             <Grid container spacing={2} sx={{ mb: 2 }}>
               {[
-                ['Realized', pnl.totals.realized],
-                ['Commission', pnl.totals.commission],
-                ['Funding', pnl.totals.funding],
-                ['Net (已实现)', pnl.totals.net],
-                ['Unrealized', pnl.totals.unrealized],
+                ['今日已实现', pnl.totals.realized],
+                ['今日手续费', pnl.totals.commission],
+                ['今日资金费', pnl.totals.funding],
+                ['今日净流水', pnl.totals.net],
+                ['当前浮动盈亏', pnl.totals.unrealized],
               ].map(([k, v]) => (
                 <Grid item xs={6} sm={4} md={2} key={String(k)}>
                   <Card variant="outlined">
@@ -1132,9 +1132,11 @@ export default function AnalysisPage() {
               {pnl.feeNote && (
                 <Grid item xs={12}>
                   <Typography variant="caption" color="text.secondary">
-                    Commission 已折合 USDT（BNB≈{pnl.feeNote.bnbPriceUSDT}）；原生
-                    BNB 手续费合计 {pnl.totals.commissionBNB} BNB。点击下方 symbol
-                    可看 K 线+运行网格 pins（可切换周期）。
+                    今日净流水对齐币安合约收入流水（REALIZED_PNL + COMMISSION +
+                    FUNDING，CST 0:00 起）；手续费按 BNB≈
+                    {pnl.feeNote.bnbPriceUSDT} 折合 USDT（原生{' '}
+                    {pnl.totals.commissionBNB} BNB）。当前浮动盈亏是持仓累计浮盈亏，
+                    不是「今日」增量。点击下方 symbol 可看 K 线+网格 pins。
                   </Typography>
                 </Grid>
               )}
