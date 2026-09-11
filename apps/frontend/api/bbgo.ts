@@ -161,3 +161,34 @@ export async function queryStrategiesMetrics(): Promise<GridStrategy[]> {
   );
   return response.data?.data || [];
 }
+
+export async function queryAnalysisMargin(session = 'binance') {
+  const response = await axios.get(baseURL + '/api/analysis/margin', {
+    params: { session },
+  });
+  return response.data;
+}
+
+export async function queryAnalysisMarket(
+  session = 'binance',
+  symbols?: string,
+) {
+  const response = await axios.get(baseURL + '/api/analysis/market', {
+    params: { session, symbols },
+  });
+  return response.data;
+}
+
+export async function queryAnalysisGridCalc(params: Record<string, string | number>) {
+  const response = await axios.get(baseURL + '/api/analysis/grid-calc', {
+    params,
+  });
+  return response.data;
+}
+
+export async function queryAnalysisTodayPnL(session = 'binance') {
+  const response = await axios.get(baseURL + '/api/analysis/pnl/today', {
+    params: { session },
+  });
+  return response.data;
+}

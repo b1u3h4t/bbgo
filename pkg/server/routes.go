@@ -251,6 +251,9 @@ func (s *Server) newEngine(ctx context.Context) *gin.Engine {
 	r.GET("/api/strategies", s.listStrategiesMetrics)
 	// Alias kept for older SPA builds that still call /api/strategies/metrics.
 	r.GET("/api/strategies/metrics", s.listStrategiesMetrics)
+
+	s.registerAnalysisRoutes(r)
+
 	r.NoRoute(s.assetsHandler)
 	return r
 }

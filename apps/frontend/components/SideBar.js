@@ -8,6 +8,7 @@ import DashboardIcon from '@mui/icons-material/Dashboard';
 import ListItemText from '@mui/material/ListItemText';
 import ListIcon from '@mui/icons-material/List';
 import TrendingUpIcon from '@mui/icons-material/TrendingUp';
+import AssessmentIcon from '@mui/icons-material/Assessment';
 import React from 'react';
 import { makeStyles } from '@mui/styles';
 
@@ -95,6 +96,14 @@ export default function SideBar() {
               <TrendingUpIcon />
             </ListItemIcon>
             <ListItemText primary="Strategies" />
+          </ListItem>
+        </Link>
+        <Link href={'/analysis'}>
+          <ListItem button>
+            <ListItemIcon>
+              <AssessmentIcon />
+            </ListItemIcon>
+            <ListItemText primary="Analysis" />
           </ListItem>
         </Link>
       </List>
