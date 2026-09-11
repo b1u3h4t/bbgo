@@ -25,6 +25,8 @@ func (s *Server) registerAnalysisRoutes(r *gin.Engine) {
 	r.GET("/api/analysis/grid-calc", s.analysisGridCalc)
 	r.GET("/api/analysis/pnl/today", s.analysisTodayPnL)
 	r.GET("/api/analysis/klines", s.analysisKlines)
+	r.GET("/api/analysis/avg-down", s.analysisAvgDown)
+	s.startAnalysisKlineSync()
 }
 
 func (s *Server) sessionOrAbort(c *gin.Context) (*bbgo.ExchangeSession, bool) {
@@ -42,15 +44,20 @@ func (s *Server) sessionOrAbort(c *gin.Context) (*bbgo.ExchangeSession, bool) {
 }
 
 type marginPositionRow struct {
-	Symbol           string  `json:"symbol"`
-	PositionAmt      float64 `json:"positionAmt"`
-	EntryPrice       float64 `json:"entryPrice"`
-	MarkPrice        float64 `json:"markPrice"`
-	Notional         float64 `json:"notional"`
-	UnrealizedPnL    float64 `json:"unrealizedPnL"`
-	Leverage         float64 `json:"leverage"`
-	InitialMarginEst float64 `json:"initialMarginEst"`
-	Side             string  `json:"side"`
+	Symbol            string  `json:"symbol"`
+	PositionAmt       float64 `json:"positionAmt"`
+	EntryPrice        float64 `json:"entryPrice"`
+	MarkPrice         float64 `json:"markPrice"`
+	LiquidationPrice  float64 `json:"liquidationPrice"`
+	BreakEvenPrice    float64 `json:"breakEvenPrice"`
+	Notional          float64 `json:"notional"`
+	UnrealizedPnL     float64 `json:"unrealizedPnL"`
+	ROEPct            float64 `json:"roePct"`
+	Leverage          float64 `json:"leverage"`
+	InitialMarginEst  float64 `json:"initialMarginEst"`
+	MaintMargin       float64 `json:"maintMargin"`
+	Side              string  `json:"side"`
+	MarginType        string  `json:"marginType"`
 }
 
 type marginOrderRow struct {
@@ -64,6 +71,66 @@ type marginOrderRow struct {
 
 type positionRiskService interface {
 	QueryPositionRisk(ctx context.Context, symbol ...string) ([]types.PositionRisk, error)
+}
+
+func collectPositions(ctx context.Context, session *bbgo.ExchangeSession) []marginPositionRow {
+	positions := make([]marginPositionRow, 0)
+	risker, ok := session.Exchange.(positionRiskService)
+	if !ok {
+		return positions
+	}
+	risks, err := risker.QueryPositionRisk(ctx)
+	if err != nil {
+		return positions
+	}
+	for _, r := range risks {
+		amt := r.PositionAmount.Float64()
+		if math.Abs(amt) < 1e-12 {
+			continue
+		}
+		mark := r.MarkPrice.Float64()
+		notion := math.Abs(amt) * mark
+		lev := r.Leverage.Float64()
+		if lev <= 0 {
+			lev = 1
+		}
+		side := "LONG"
+		if amt < 0 {
+			side = "SHORT"
+		}
+		im := r.InitialMargin.Float64()
+		if im <= 0 {
+			im = r.PositionInitialMargin.Float64()
+		}
+		if im <= 0 {
+			im = notion / lev
+		}
+		upnlPos := r.UnrealizedPnL.Float64()
+		roe := 0.0
+		if im > 0 {
+			roe = upnlPos / im * 100
+		}
+		positions = append(positions, marginPositionRow{
+			Symbol:           r.Symbol,
+			PositionAmt:      amt,
+			EntryPrice:       r.EntryPrice.Float64(),
+			MarkPrice:        mark,
+			LiquidationPrice: r.LiquidationPrice.Float64(),
+			BreakEvenPrice:   r.BreakEvenPrice.Float64(),
+			Notional:         roundFloat(notion, 2),
+			UnrealizedPnL:    roundFloat(upnlPos, 4),
+			ROEPct:           roundFloat(roe, 2),
+			Leverage:         lev,
+			InitialMarginEst: roundFloat(im, 2),
+			MaintMargin:      roundFloat(r.MaintMargin.Float64(), 2),
+			Side:             side,
+			MarginType:       "cross",
+		})
+	}
+	sort.Slice(positions, func(i, j int) bool {
+		return positions[i].UnrealizedPnL < positions[j].UnrealizedPnL
+	})
+	return positions
 }
 
 func (s *Server) analysisMargin(c *gin.Context) {
@@ -102,38 +169,7 @@ func (s *Server) analysisMargin(c *gin.Context) {
 		}
 	}
 
-	positions := make([]marginPositionRow, 0)
-	if risker, ok := session.Exchange.(positionRiskService); ok {
-		if risks, err := risker.QueryPositionRisk(ctx); err == nil {
-			for _, r := range risks {
-				amt := r.PositionAmount.Float64()
-				if math.Abs(amt) < 1e-12 {
-					continue
-				}
-				mark := r.MarkPrice.Float64()
-				notion := math.Abs(amt) * mark
-				lev := r.Leverage.Float64()
-				if lev <= 0 {
-					lev = 1
-				}
-				side := "LONG"
-				if amt < 0 {
-					side = "SHORT"
-				}
-				positions = append(positions, marginPositionRow{
-					Symbol:           r.Symbol,
-					PositionAmt:      amt,
-					EntryPrice:       r.EntryPrice.Float64(),
-					MarkPrice:        mark,
-					Notional:         roundFloat(notion, 2),
-					UnrealizedPnL:    roundFloat(r.UnrealizedPnL.Float64(), 4),
-					Leverage:         lev,
-					InitialMarginEst: roundFloat(notion/lev, 2),
-					Side:             side,
-				})
-			}
-		}
-	}
+	positions := collectPositions(ctx, session)
 
 	orderSyms := map[string]struct{}{}
 	for _, p := range positions {
@@ -387,7 +423,7 @@ func (s *Server) analysisMarket(c *gin.Context) {
 		if sym == "" {
 			continue
 		}
-		klines, err := session.Exchange.QueryKLines(ctx, sym, types.Interval15m, types.KLineQueryOptions{Limit: 96})
+		klines, _, err := s.queryAnalysisKLines(ctx, session, sym, types.Interval15m, 96)
 		if err != nil {
 			out = append(out, marketSymbolAnalysis{Symbol: sym, Verdict: "error: " + err.Error(), Notes: []string{}})
 			continue
@@ -555,8 +591,20 @@ func (s *Server) analysisGridCalc(c *gin.Context) {
 
 	chartInterval, chartLimit := parseChartInterval(c.DefaultQuery("interval", "1h"), c.DefaultQuery("limit", ""))
 	klinesPayload := serializeKlines(nil)
-	if klChart, err := session.Exchange.QueryKLines(ctx, symbol, chartInterval, types.KLineQueryOptions{Limit: chartLimit}); err == nil {
+	klineSource := "exchange"
+	if klChart, src, err := s.queryAnalysisKLines(ctx, session, symbol, chartInterval, chartLimit); err == nil {
 		klinesPayload = serializeKlines(klChart)
+		klineSource = src
+	}
+
+	allPos := collectPositions(ctx, session)
+	var symbolPos *marginPositionRow
+	for i := range allPos {
+		if allPos[i].Symbol == symbol {
+			p := allPos[i]
+			symbolPos = &p
+			break
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -586,8 +634,11 @@ func (s *Server) analysisGridCalc(c *gin.Context) {
 		"targetUtil":          targetUtil,
 		"note":                note,
 		"interval":            string(chartInterval),
+		"klineSource":         klineSource,
 		"klines":              klinesPayload,
 		"klines1h":            klinesPayload, // backward-compatible alias
+		"positions":           allPos,
+		"position":            symbolPos,
 	})
 }
 
@@ -700,7 +751,7 @@ func (s *Server) analysisKlines(c *gin.Context) {
 	symbol := strings.TrimSpace(c.DefaultQuery("symbol", "BTCUSDT"))
 	interval, limit := parseChartInterval(c.DefaultQuery("interval", "1h"), c.DefaultQuery("limit", ""))
 
-	klines, err := session.Exchange.QueryKLines(ctx, symbol, interval, types.KLineQueryOptions{Limit: limit})
+	klines, klineSource, err := s.queryAnalysisKLines(ctx, session, symbol, interval, limit)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -734,18 +785,29 @@ func (s *Server) analysisKlines(c *gin.Context) {
 		})
 	}
 
+	var symbolPos *marginPositionRow
+	for _, p := range collectPositions(ctx, session) {
+		if p.Symbol == symbol {
+			pp := p
+			symbolPos = &pp
+			break
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"symbol":    symbol,
-		"interval":  string(interval),
-		"last":      roundFloat(last, 8),
-		"quantity":  roundFloat(qty, 8),
-		"klines":    serializeKlines(klines),
-		"pins":      pins,
-		"pinLevels": buildPinLevels(pins, last, qty),
+		"symbol":      symbol,
+		"interval":    string(interval),
+		"last":        roundFloat(last, 8),
+		"quantity":    roundFloat(qty, 8),
+		"klineSource": klineSource,
+		"klines":      serializeKlines(klines),
+		"pins":        pins,
+		"pinLevels":   buildPinLevels(pins, last, qty),
 		"band": gin.H{
 			"lower": lower,
 			"upper": upper,
 		},
+		"position":  symbolPos,
 		"intervals": []string{"5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"},
 	})
 }
@@ -843,6 +905,12 @@ func (s *Server) analysisTodayPnL(c *gin.Context) {
 		})
 	}
 
+	positions := collectPositions(ctx, session)
+	uPnLSum := 0.0
+	for _, p := range positions {
+		uPnLSum += p.UnrealizedPnL
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"session": session.Name,
 		"range": gin.H{
@@ -860,7 +928,200 @@ func (s *Server) analysisTodayPnL(c *gin.Context) {
 			"commissionBNB": roundFloat(totCommBNB, 8),
 			"funding":       roundFloat(totFunding, 4),
 			"net":           roundFloat(totRealized+totCommUSDT+totFunding, 4),
+			"unrealized":    roundFloat(uPnLSum, 4),
 		},
-		"symbols": symbols,
+		"positions": positions,
+		"symbols":   symbols,
 	})
+}
+
+// analysisAvgDown: careful average-down calculator for underwater longs (stranded grids).
+// Query: session, symbol?, addIm?, addNotional?, addQty?, price? (limit), leverage?,
+//        targetUtil? (default 0.65), reserveAvail? (default 3000), maxUtil? (default 0.70)
+func (s *Server) analysisAvgDown(c *gin.Context) {
+	session, ok := s.sessionOrAbort(c)
+	if !ok {
+		return
+	}
+	ctx := c.Request.Context()
+
+	account, err := session.UpdateAccount(ctx)
+	if err != nil {
+		account = session.GetAccount()
+	}
+	wallet, avail, totalIM, upnl := 0.0, 0.0, 0.0, 0.0
+	if account != nil {
+		if fi := account.FuturesInfo; fi != nil {
+			wallet = fi.TotalWalletBalance.Float64()
+			avail = fi.AvailableBalance.Float64()
+			totalIM = fi.TotalInitialMargin.Float64()
+			upnl = fi.TotalUnrealizedProfit.Float64()
+		}
+	}
+
+	targetUtil, _ := strconv.ParseFloat(c.DefaultQuery("targetUtil", "0.65"), 64)
+	if targetUtil > 1 {
+		targetUtil /= 100
+	}
+	maxUtil, _ := strconv.ParseFloat(c.DefaultQuery("maxUtil", "0.70"), 64)
+	if maxUtil > 1 {
+		maxUtil /= 100
+	}
+	reserveAvail, _ := strconv.ParseFloat(c.DefaultQuery("reserveAvail", "3000"), 64)
+	leverage, _ := strconv.ParseFloat(c.DefaultQuery("leverage", "3"), 64)
+	if leverage <= 0 {
+		leverage = 3
+	}
+
+	headTarget := wallet*targetUtil - totalIM
+	headMax := wallet*maxUtil - totalIM
+	safeByAvail := avail - reserveAvail
+	safeBudget := math.Min(math.Max(0, headTarget), math.Max(0, safeByAvail))
+	safeBudget = math.Min(safeBudget, math.Max(0, headMax))
+
+	// disabled grid symbols from running strategies (Enable: false)
+	disabled := map[string]bool{}
+	if s.Trader != nil {
+		_ = s.Trader.IterateStrategies(func(st types.StrategyID) error {
+			if g, ok := st.(*grid2.Strategy); ok {
+				if g.Enable != nil && !*g.Enable {
+					disabled[g.Symbol] = true
+				}
+			}
+			return nil
+		})
+	}
+
+	var risks []types.PositionRisk
+	if svc, ok := session.Exchange.(positionRiskService); ok {
+		risks, _ = svc.QueryPositionRisk(ctx)
+	}
+
+	candidates := []gin.H{}
+	for _, r := range risks {
+		amt := r.PositionAmount.Float64()
+		if amt <= 0 {
+			continue // only longs for avg-down buy
+		}
+		entry := r.EntryPrice.Float64()
+		mark := r.MarkPrice.Float64()
+		if mark <= 0 {
+			continue
+		}
+		up := r.UnrealizedPnL.Float64()
+		notional := amt * mark
+		im := notional / leverage
+		distPct := (mark/entry - 1) * 100
+		candidates = append(candidates, gin.H{
+			"symbol":           r.Symbol,
+			"positionAmt":      roundFloat(amt, 8),
+			"entryPrice":       roundFloat(entry, 8),
+			"markPrice":        roundFloat(mark, 8),
+			"unrealizedPnL":    roundFloat(up, 4),
+			"notional":         roundFloat(notional, 2),
+			"initialMarginEst": roundFloat(im, 2),
+			"distFromEntryPct": roundFloat(distPct, 2),
+			"gridDisabledHint": disabled[r.Symbol],
+			"underwater":       up < 0,
+		})
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i]["unrealizedPnL"].(float64) < candidates[j]["unrealizedPnL"].(float64)
+	})
+
+	resp := gin.H{
+		"session": session.Name,
+		"warning": "补仓不会立刻减少浮亏；继续下跌会放大亏损。仅建议小额限价，保留网格运行保证金。",
+		"account": gin.H{
+			"walletBalance":   roundFloat(wallet, 2),
+			"availableBalance": roundFloat(avail, 2),
+			"totalInitialMargin": roundFloat(totalIM, 2),
+			"unrealizedPnL":   roundFloat(upnl, 2),
+			"utilInitialMarginPct": roundFloat(totalIM/math.Max(wallet, 1e-9)*100, 2),
+			"targetUtilPct":   roundFloat(targetUtil*100, 1),
+			"maxUtilPct":      roundFloat(maxUtil*100, 1),
+			"reserveAvail":    roundFloat(reserveAvail, 2),
+			"headroomTargetIM": roundFloat(headTarget, 2),
+			"headroomMaxIM":   roundFloat(headMax, 2),
+			"safeBudgetIM":    roundFloat(safeBudget, 2),
+			"safeBudgetNotional": roundFloat(safeBudget*leverage, 2),
+		},
+		"leverage":    leverage,
+		"candidates":  candidates,
+		"presets": []gin.H{
+			{"id": "conservative", "label": "保守合计IM600", "totalAddIm": 600},
+			{"id": "target65", "label": "用满至65%头寸", "totalAddIm": math.Max(0, roundFloat(headTarget, 0))},
+		},
+	}
+
+	symbol := strings.TrimSpace(c.Query("symbol"))
+	if symbol != "" {
+		var cur gin.H
+		for _, cand := range candidates {
+			if cand["symbol"] == symbol {
+				cur = cand
+				break
+			}
+		}
+		if cur == nil {
+			// still allow calc from live ticker if flat? skip
+			c.JSON(http.StatusOK, resp)
+			return
+		}
+		amt := cur["positionAmt"].(float64)
+		entry := cur["entryPrice"].(float64)
+		mark := cur["markPrice"].(float64)
+
+		price := mark
+		if v, err := strconv.ParseFloat(c.Query("price"), 64); err == nil && v > 0 {
+			price = v
+		}
+		addIm, _ := strconv.ParseFloat(c.DefaultQuery("addIm", "0"), 64)
+		addNotional, _ := strconv.ParseFloat(c.DefaultQuery("addNotional", "0"), 64)
+		addQty, _ := strconv.ParseFloat(c.DefaultQuery("addQty", "0"), 64)
+		if addQty <= 0 && addNotional > 0 {
+			addQty = addNotional / price
+			addIm = addNotional / leverage
+		} else if addQty <= 0 && addIm > 0 {
+			addNotional = addIm * leverage
+			addQty = addNotional / price
+		} else if addQty > 0 {
+			addNotional = addQty * price
+			addIm = addNotional / leverage
+		}
+
+		newAmt := amt + addQty
+		newEntry := entry
+		if newAmt > 0 {
+			newEntry = (amt*entry + addQty*price) / newAmt
+		}
+		newUpnl := (mark - newEntry) * newAmt
+		scenario := func(px float64) gin.H {
+			return gin.H{
+				"price": roundFloat(px, 8),
+				"uPnL":  roundFloat((px-newEntry)*newAmt, 2),
+			}
+		}
+		overBudget := addIm > safeBudget+1e-6
+		resp["scenario"] = gin.H{
+			"symbol":       symbol,
+			"limitPrice":   roundFloat(price, 8),
+			"addQty":       roundFloat(addQty, 6),
+			"addNotional":  roundFloat(addNotional, 2),
+			"addIm":        roundFloat(addIm, 2),
+			"oldEntry":     roundFloat(entry, 8),
+			"newEntry":     roundFloat(newEntry, 8),
+			"entryImprovePct": roundFloat((newEntry/entry-1)*100, 2),
+			"oldAmt":       roundFloat(amt, 6),
+			"newAmt":       roundFloat(newAmt, 6),
+			"uPnLNowAtMark": roundFloat(newUpnl, 2),
+			"ifDrop5Pct":   scenario(mark * 0.95),
+			"ifDrop10Pct":  scenario(mark * 0.90),
+			"ifBackToOldEntry": scenario(entry),
+			"overSafeBudget": overBudget,
+			"note":         "限价单成交后均价才会变化；未成交仅占用委托保证金。",
+		}
+	}
+
+	c.JSON(http.StatusOK, resp)
 }

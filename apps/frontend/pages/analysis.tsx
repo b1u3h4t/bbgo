@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import dynamic from 'next/dynamic';
 import DashboardLayout from '../layouts/DashboardLayout';
 import {
   Box,
@@ -32,15 +33,24 @@ import {
 } from '@mui/material';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import {
+  queryAnalysisAvgDown,
   queryAnalysisGridCalc,
   queryAnalysisKlines,
   queryAnalysisMargin,
   queryAnalysisMarket,
   queryAnalysisTodayPnL,
 } from '../api/bbgo';
-import PinKlineChart, {
-  buildOrderBookPinLevels,
-} from '../components/PinKlineChart';
+import { buildOrderBookPinLevels } from '../components/pinLevels';
+
+// TradingView Lightweight Charts needs browser APIs
+const PinKlineChart = dynamic(() => import('../components/PinKlineChart'), {
+  ssr: false,
+  loading: () => (
+    <Typography variant="body2" color="text.secondary">
+      加载图表…
+    </Typography>
+  ),
+});
 
 const CHART_INTERVALS: { value: string; label: string }[] = [
   { value: '5m', label: '5m' },
@@ -87,6 +97,190 @@ function pnlColor(v: number) {
   return undefined;
 }
 
+function findPosition(
+  positions: any[] | null | undefined,
+  symbol: string,
+): any | null {
+  if (!positions?.length || !symbol) return null;
+  const s = String(symbol).toUpperCase();
+  return (
+    positions.find((p) => String(p.symbol || '').toUpperCase() === s) || null
+  );
+}
+
+function fmtNum(v: any, digits = 4): string {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '—';
+  return n.toLocaleString(undefined, {
+    maximumFractionDigits: digits,
+    minimumFractionDigits: 0,
+  });
+}
+
+function fmtSigned(v: any, digits = 4): string {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '—';
+  const s = n.toLocaleString(undefined, {
+    maximumFractionDigits: digits,
+    minimumFractionDigits: 0,
+  });
+  return n > 0 ? `+${s}` : s;
+}
+
+/** Binance-style futures positions table */
+function PositionsPanel({
+  positions,
+  highlightSymbol,
+  title = '当前持仓',
+  dense,
+  onSelectSymbol,
+}: {
+  positions?: any[] | null;
+  highlightSymbol?: string;
+  title?: string;
+  dense?: boolean;
+  onSelectSymbol?: (symbol: string) => void;
+}) {
+  const rows = (positions || []).slice().sort(
+    (a: any, b: any) => Number(a.unrealizedPnL) - Number(b.unrealizedPnL)
+  );
+  const uPnLSum = rows.reduce(
+    (s: number, p: any) => s + Number(p.unrealizedPnL || 0),
+    0
+  );
+
+  return (
+    <Card variant="outlined" sx={{ mb: 2 }}>
+      <CardContent sx={{ pb: dense ? 1 : undefined }}>
+        <Box
+          sx={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 1,
+            mb: 1,
+          }}
+        >
+          <Typography variant="subtitle1">
+            {title}
+            <Typography
+              component="span"
+              variant="caption"
+              color="text.secondary"
+              sx={{ ml: 1 }}
+            >
+              {rows.length} 仓
+            </Typography>
+          </Typography>
+          <Typography
+            variant="body2"
+            sx={{ color: pnlColor(uPnLSum), fontWeight: 600 }}
+          >
+            未实现盈亏合计 {fmtSigned(uPnLSum, 2)} USDT
+          </Typography>
+        </Box>
+        {rows.length === 0 ? (
+          <Typography variant="body2" color="text.secondary">
+            无持仓
+          </Typography>
+        ) : (
+          <Table size="small">
+            <TableHead>
+              <TableRow>
+                <TableCell>合约</TableCell>
+                <TableCell>方向</TableCell>
+                <TableCell align="right">数量</TableCell>
+                <TableCell align="right">开仓均价</TableCell>
+                <TableCell align="right">标记价格</TableCell>
+                <TableCell align="right">强平价格</TableCell>
+                <TableCell align="right">保证金</TableCell>
+                <TableCell align="right">未实现盈亏 (ROE)</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {rows.map((p: any) => {
+                const long = String(p.side).toUpperCase() === 'LONG';
+                const hi =
+                  highlightSymbol &&
+                  String(p.symbol).toUpperCase() ===
+                    String(highlightSymbol).toUpperCase();
+                const size = Math.abs(Number(p.positionAmt || 0));
+                return (
+                  <TableRow
+                    key={p.symbol}
+                    hover={!!onSelectSymbol}
+                    selected={!!hi}
+                    sx={{
+                      cursor: onSelectSymbol ? 'pointer' : undefined,
+                      bgcolor: hi ? 'action.selected' : undefined,
+                    }}
+                    onClick={() => onSelectSymbol?.(p.symbol)}
+                  >
+                    <TableCell>
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
+                        <Typography variant="body2" fontWeight={600}>
+                          {p.symbol}
+                        </Typography>
+                        <Chip
+                          size="small"
+                          label={`${Number(p.leverage) || 1}x`}
+                          sx={{ height: 20, fontSize: 11 }}
+                        />
+                        <Chip
+                          size="small"
+                          label={p.marginType === 'isolated' ? '逐仓' : '全仓'}
+                          variant="outlined"
+                          sx={{ height: 20, fontSize: 11 }}
+                        />
+                      </Box>
+                    </TableCell>
+                    <TableCell>
+                      <Typography
+                        variant="body2"
+                        fontWeight={700}
+                        sx={{ color: long ? '#2e7d32' : '#c62828' }}
+                      >
+                        {long ? '多' : '空'}
+                      </Typography>
+                    </TableCell>
+                    <TableCell align="right">{fmtNum(size, 4)}</TableCell>
+                    <TableCell align="right">{fmtNum(p.entryPrice, 6)}</TableCell>
+                    <TableCell align="right">{fmtNum(p.markPrice, 6)}</TableCell>
+                    <TableCell align="right">
+                      {Number(p.liquidationPrice) > 0
+                        ? fmtNum(p.liquidationPrice, 6)
+                        : '—'}
+                    </TableCell>
+                    <TableCell align="right">
+                      {fmtNum(p.initialMarginEst, 2)}
+                    </TableCell>
+                    <TableCell align="right">
+                      <Typography
+                        variant="body2"
+                        fontWeight={600}
+                        sx={{ color: pnlColor(Number(p.unrealizedPnL)) }}
+                      >
+                        {fmtSigned(p.unrealizedPnL, 2)}
+                      </Typography>
+                      <Typography
+                        variant="caption"
+                        sx={{ color: pnlColor(Number(p.roePct)) }}
+                      >
+                        ({fmtSigned(p.roePct, 2)}%)
+                      </Typography>
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function TabPanel({
   value,
   index,
@@ -110,8 +304,15 @@ export default function AnalysisPage() {
   const [pnl, setPnl] = useState<any>(null);
   const [grid, setGrid] = useState<any>(null);
   const [pnlChart, setPnlChart] = useState<any>(null);
+  const [marketChart, setMarketChart] = useState<any>(null);
+  const [avgDown, setAvgDown] = useState<any>(null);
+  const [avgSymbol, setAvgSymbol] = useState('DOGEUSDT');
+  const [avgAddIm, setAvgAddIm] = useState('200');
+  const [avgPrice, setAvgPrice] = useState('');
+  const [avgLeverage, setAvgLeverage] = useState('3');
   const [gridInterval, setGridInterval] = useState('1h');
   const [pnlInterval, setPnlInterval] = useState('1h');
+  const [marketInterval, setMarketInterval] = useState('15m');
 
   const [symbol, setSymbol] = useState('AVAXUSDT');
   const [atrMult, setAtrMult] = useState('1');
@@ -205,6 +406,7 @@ export default function AnalysisPage() {
                   data.quantity ?? prev.quantity,
                 ),
                 quantity: data.quantity ?? prev.quantity,
+                klineSource: data.klineSource,
               }
             : prev,
         );
@@ -236,6 +438,62 @@ export default function AnalysisPage() {
     [pnlInterval],
   );
 
+  const loadMarketChart = useCallback(
+    async (sym: string, iv = marketInterval) => {
+      if (!sym) return;
+      setLoading(true);
+      setError('');
+      try {
+        setMarketInterval(iv);
+        setMarketChart(
+          await queryAnalysisKlines({ symbol: sym, interval: iv }),
+        );
+      } catch (e: any) {
+        setError(e?.message || 'failed to load klines');
+      } finally {
+        setLoading(false);
+      }
+    },
+    [marketInterval],
+  );
+
+  const loadAvgDown = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const params: Record<string, string | number> = {
+        leverage: avgLeverage,
+        targetUtil: 0.65,
+        reserveAvail: 3000,
+        maxUtil: 0.7,
+      };
+      if (avgSymbol) {
+        params.symbol = avgSymbol;
+        if (avgAddIm) params.addIm = avgAddIm;
+        if (avgPrice) params.price = avgPrice;
+      }
+      const data = await queryAnalysisAvgDown(params);
+      setAvgDown(data);
+      if (!avgPrice && data?.scenario?.limitPrice) {
+        // keep manual override empty; mark shown in scenario
+      }
+      if (
+        avgSymbol &&
+        data?.candidates?.length &&
+        !data.candidates.find((c: any) => c.symbol === avgSymbol)
+      ) {
+        const first =
+          data.candidates.find((c: any) => c.underwater) ||
+          data.candidates[0];
+        if (first?.symbol) setAvgSymbol(first.symbol);
+      }
+    } catch (e: any) {
+      setError(e?.message || 'failed to load avg-down calc');
+    } finally {
+      setLoading(false);
+    }
+  }, [avgSymbol, avgAddIm, avgPrice, avgLeverage]);
+
   useEffect(() => {
     loadMargin();
     loadMarket();
@@ -261,11 +519,24 @@ export default function AnalysisPage() {
           </Typography>
         )}
 
-        <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ mb: 1 }}>
+        <Tabs
+          value={tab}
+          onChange={(_, v) => {
+            setTab(v);
+            if (v === 1 || v === 2) loadMargin();
+            if (v === 3) {
+              loadPnl();
+              loadMargin();
+            }
+            if (v === 4) loadAvgDown();
+          }}
+          sx={{ mb: 1 }}
+        >
           <Tab label="行情分析" />
           <Tab label="保证金" />
           <Tab label="网格计算" />
           <Tab label="今日盈亏" />
+          <Tab label="慎重补仓" />
         </Tabs>
 
         <TabPanel value={tab} index={0}>
@@ -403,6 +674,59 @@ export default function AnalysisPage() {
             </AccordionDetails>
           </Accordion>
 
+          {marketChart && (
+            <Card variant="outlined" sx={{ mb: 2 }}>
+              <CardContent>
+                <Box
+                  sx={{
+                    display: 'flex',
+                    flexWrap: 'wrap',
+                    gap: 1,
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    mb: 1,
+                  }}
+                >
+                  <Typography variant="subtitle2">
+                    {marketChart.symbol} TradingView 图
+                    {marketChart.klineSource
+                      ? `（${marketChart.klineSource}）`
+                      : ''}
+                  </Typography>
+                  <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                    <IntervalPicker
+                      value={marketChart.interval || marketInterval}
+                      onChange={(iv) => loadMarketChart(marketChart.symbol, iv)}
+                    />
+                    <Button size="small" onClick={() => setMarketChart(null)}>
+                      关闭
+                    </Button>
+                  </Box>
+                </Box>
+                <PinKlineChart
+                  symbol={marketChart.symbol}
+                  klines={marketChart.klines || []}
+                  pins={marketChart.pins || []}
+                  pinLevels={marketChart.pinLevels}
+                  last={marketChart.last}
+                  quantity={marketChart.quantity}
+                  lower={marketChart.band?.lower}
+                  upper={marketChart.band?.upper}
+                  interval={marketChart.interval || marketInterval}
+                  klineSource={marketChart.klineSource}
+                  position={
+                    marketChart.position ||
+                    findPosition(margin?.positions, marketChart.symbol)
+                  }
+                  height={360}
+                />
+              </CardContent>
+            </Card>
+          )}
+
+          <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>
+            点击 symbol 打开 TradingView Lightweight Charts（多周期；数据优先 MySQL）
+          </Typography>
           <Table size="small">
             <TableHead>
               <TableRow>
@@ -422,8 +746,20 @@ export default function AnalysisPage() {
             </TableHead>
             <TableBody>
               {(market?.symbols || []).map((row: any) => (
-                <TableRow key={row.symbol}>
-                  <TableCell>{row.symbol}</TableCell>
+                <TableRow
+                  key={row.symbol}
+                  hover
+                  sx={{ cursor: 'pointer' }}
+                  onClick={() => loadMarketChart(row.symbol)}
+                >
+                  <TableCell>
+                    <Typography
+                      component="span"
+                      sx={{ color: 'primary.main', textDecoration: 'underline' }}
+                    >
+                      {row.symbol}
+                    </Typography>
+                  </TableCell>
                   <TableCell align="right">{row.last}</TableCell>
                   <TableCell
                     align="right"
@@ -532,42 +868,7 @@ export default function AnalysisPage() {
             </Grid>
           )}
 
-          <Typography variant="subtitle1" gutterBottom>
-            Positions
-          </Typography>
-          <Table size="small" sx={{ mb: 3 }}>
-            <TableHead>
-              <TableRow>
-                <TableCell>Symbol</TableCell>
-                <TableCell>Side</TableCell>
-                <TableCell align="right">Amt</TableCell>
-                <TableCell align="right">Entry</TableCell>
-                <TableCell align="right">Mark</TableCell>
-                <TableCell align="right">Notional</TableCell>
-                <TableCell align="right">IM≈</TableCell>
-                <TableCell align="right">uPnL</TableCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {(margin?.positions || []).map((p: any) => (
-                <TableRow key={p.symbol}>
-                  <TableCell>{p.symbol}</TableCell>
-                  <TableCell>{p.side}</TableCell>
-                  <TableCell align="right">{p.positionAmt}</TableCell>
-                  <TableCell align="right">{p.entryPrice}</TableCell>
-                  <TableCell align="right">{p.markPrice}</TableCell>
-                  <TableCell align="right">{p.notional}</TableCell>
-                  <TableCell align="right">{p.initialMarginEst}</TableCell>
-                  <TableCell
-                    align="right"
-                    sx={{ color: pnlColor(p.unrealizedPnL) }}
-                  >
-                    {p.unrealizedPnL}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+          <PositionsPanel positions={margin?.positions} title="当前持仓" />
 
           <Typography variant="subtitle1" gutterBottom>
             Open Orders
@@ -599,6 +900,12 @@ export default function AnalysisPage() {
         </TabPanel>
 
         <TabPanel value={tab} index={2}>
+          <PositionsPanel
+            positions={grid?.positions || margin?.positions}
+            highlightSymbol={symbol}
+            title="当前持仓"
+            onSelectSymbol={(sym) => setSymbol(sym)}
+          />
           <Grid container spacing={2} sx={{ mb: 2 }}>
             <Grid item xs={12} md={2}>
               <TextField
@@ -695,6 +1002,14 @@ export default function AnalysisPage() {
                       lower={grid.band?.lower}
                       upper={grid.band?.upper}
                       interval={grid.interval || gridInterval}
+                      klineSource={grid.klineSource}
+                      position={
+                        grid.position ||
+                        findPosition(
+                          grid.positions || margin?.positions,
+                          grid.symbol,
+                        )
+                      }
                       height={380}
                     />
                   </CardContent>
@@ -767,7 +1082,13 @@ export default function AnalysisPage() {
 
         <TabPanel value={tab} index={3}>
           <Box sx={{ display: 'flex', gap: 1, mb: 2 }}>
-            <Button variant="contained" onClick={loadPnl}>
+            <Button
+              variant="contained"
+              onClick={() => {
+                loadPnl();
+                loadMargin();
+              }}
+            >
               刷新
             </Button>
             {pnl?.range && (
@@ -776,15 +1097,24 @@ export default function AnalysisPage() {
               </Typography>
             )}
           </Box>
+          <PositionsPanel
+            positions={pnl?.positions || margin?.positions}
+            title="当前持仓"
+            onSelectSymbol={(sym) => {
+              setSymbol(sym);
+              loadPnlChart(sym, pnlInterval);
+            }}
+          />
           {pnl?.totals && (
             <Grid container spacing={2} sx={{ mb: 2 }}>
               {[
                 ['Realized', pnl.totals.realized],
                 ['Commission', pnl.totals.commission],
                 ['Funding', pnl.totals.funding],
-                ['Net', pnl.totals.net],
+                ['Net (已实现)', pnl.totals.net],
+                ['Unrealized', pnl.totals.unrealized],
               ].map(([k, v]) => (
-                <Grid item xs={6} md={3} key={String(k)}>
+                <Grid item xs={6} sm={4} md={2} key={String(k)}>
                   <Card variant="outlined">
                     <CardContent>
                       <Typography variant="caption">{k}</Typography>
@@ -848,6 +1178,14 @@ export default function AnalysisPage() {
                   lower={pnlChart.band?.lower}
                   upper={pnlChart.band?.upper}
                   interval={pnlChart.interval || pnlInterval}
+                  klineSource={pnlChart.klineSource}
+                  position={
+                    pnlChart.position ||
+                    findPosition(
+                      pnl?.positions || margin?.positions,
+                      pnlChart.symbol,
+                    )
+                  }
                   height={320}
                 />
               </CardContent>
@@ -897,6 +1235,241 @@ export default function AnalysisPage() {
                 ))}
             </TableBody>
           </Table>
+        </TabPanel>
+
+        <TabPanel value={tab} index={4}>
+          <Typography variant="body2" color="warning.main" sx={{ mb: 2 }}>
+            被套网格 / 裸多慎重补仓计算器：补仓不立刻减少浮亏，续跌会放大亏损。
+            建议合计 IM 不超过 safeBudget，并保留 avail≥3000 给运行中网格。仅计算，不自动下单。
+          </Typography>
+          <Box sx={{ display: 'flex', gap: 1, mb: 2, flexWrap: 'wrap' }}>
+            <Button variant="contained" onClick={loadAvgDown}>
+              刷新 / 计算
+            </Button>
+          </Box>
+          {avgDown?.account && (
+            <Grid container spacing={2} sx={{ mb: 2 }}>
+              {[
+                ['Wallet', avgDown.account.walletBalance],
+                ['Avail', avgDown.account.availableBalance],
+                ['Total IM', avgDown.account.totalInitialMargin],
+                ['IM%', avgDown.account.utilInitialMarginPct],
+                ['Headroom→65%', avgDown.account.headroomTargetIM],
+                ['SafeBudget IM', avgDown.account.safeBudgetIM],
+                ['Safe Notional', avgDown.account.safeBudgetNotional],
+                ['uPnL', avgDown.account.unrealizedPnL],
+              ].map(([k, v]) => (
+                <Grid item xs={6} md={3} key={String(k)}>
+                  <Card variant="outlined">
+                    <CardContent>
+                      <Typography variant="caption" color="text.secondary">
+                        {k}
+                      </Typography>
+                      <Typography
+                        variant="h6"
+                        sx={{
+                          color:
+                            k === 'uPnL' || String(k).includes('IM%')
+                              ? pnlColor(Number(v))
+                              : k === 'SafeBudget IM'
+                              ? '#ed6c02'
+                              : undefined,
+                        }}
+                      >
+                        {v}
+                        {String(k).includes('%') ? '%' : ''}
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                </Grid>
+              ))}
+            </Grid>
+          )}
+
+          <Typography variant="subtitle2" gutterBottom>
+            候选多单（浮亏优先）
+          </Typography>
+          <Table size="small" sx={{ mb: 3 }}>
+            <TableHead>
+              <TableRow>
+                <TableCell>Symbol</TableCell>
+                <TableCell align="right">Amt</TableCell>
+                <TableCell align="right">Entry</TableCell>
+                <TableCell align="right">Mark</TableCell>
+                <TableCell align="right">距成本%</TableCell>
+                <TableCell align="right">uPnL</TableCell>
+                <TableCell align="right">IM≈</TableCell>
+                <TableCell>Hint</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {(avgDown?.candidates || [])
+                .filter((c: any) => c.underwater)
+                .map((c: any) => (
+                  <TableRow
+                    key={c.symbol}
+                    hover
+                    selected={c.symbol === avgSymbol}
+                    sx={{ cursor: 'pointer' }}
+                    onClick={() => {
+                      setAvgSymbol(c.symbol);
+                      setAvgPrice('');
+                    }}
+                  >
+                    <TableCell>{c.symbol}</TableCell>
+                    <TableCell align="right">{c.positionAmt}</TableCell>
+                    <TableCell align="right">{c.entryPrice}</TableCell>
+                    <TableCell align="right">{c.markPrice}</TableCell>
+                    <TableCell
+                      align="right"
+                      sx={{ color: pnlColor(c.distFromEntryPct) }}
+                    >
+                      {c.distFromEntryPct}%
+                    </TableCell>
+                    <TableCell
+                      align="right"
+                      sx={{ color: pnlColor(c.unrealizedPnL) }}
+                    >
+                      {c.unrealizedPnL}
+                    </TableCell>
+                    <TableCell align="right">{c.initialMarginEst}</TableCell>
+                    <TableCell>
+                      {c.gridDisabledHint ? (
+                        <Chip size="small" color="warning" label="网格已停" />
+                      ) : (
+                        <Chip size="small" label="运行中/其它" />
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))}
+            </TableBody>
+          </Table>
+
+          <Grid container spacing={2} sx={{ mb: 2 }}>
+            <Grid item xs={12} md={3}>
+              <FormControl fullWidth>
+                <InputLabel>Symbol</InputLabel>
+                <Select
+                  label="Symbol"
+                  value={avgSymbol}
+                  onChange={(e) => setAvgSymbol(String(e.target.value))}
+                >
+                  {(avgDown?.candidates || [])
+                    .filter((c: any) => c.underwater)
+                    .map((c: any) => (
+                      <MenuItem key={c.symbol} value={c.symbol}>
+                        {c.symbol}
+                      </MenuItem>
+                    ))}
+                  {['ENAUSDT', 'WLDUSDT', 'DOGEUSDT', 'BNBUSDT', 'SUIUSDT', 'SOLUSDT'].map(
+                    (s) => (
+                      <MenuItem key={s} value={s}>
+                        {s}
+                      </MenuItem>
+                    ),
+                  )}
+                </Select>
+              </FormControl>
+            </Grid>
+            <Grid item xs={6} md={2}>
+              <TextField
+                fullWidth
+                label="加仓 IM (USDT)"
+                value={avgAddIm}
+                onChange={(e) => setAvgAddIm(e.target.value)}
+                helperText="名义≈IM×杠杆"
+              />
+            </Grid>
+            <Grid item xs={6} md={2}>
+              <TextField
+                fullWidth
+                label="限价 (空=mark)"
+                value={avgPrice}
+                onChange={(e) => setAvgPrice(e.target.value)}
+              />
+            </Grid>
+            <Grid item xs={6} md={2}>
+              <TextField
+                fullWidth
+                label="Leverage"
+                value={avgLeverage}
+                onChange={(e) => setAvgLeverage(e.target.value)}
+              />
+            </Grid>
+            <Grid item xs={12} md={3} sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+              <Button variant="contained" onClick={loadAvgDown}>
+                计算摊派
+              </Button>
+              {(avgDown?.presets || []).map((p: any) => (
+                <Button
+                  key={p.id}
+                  size="small"
+                  variant="outlined"
+                  onClick={() => {
+                    setAvgAddIm(String(p.totalAddIm));
+                  }}
+                >
+                  {p.label}
+                </Button>
+              ))}
+            </Grid>
+          </Grid>
+
+          {avgDown?.scenario && (
+            <Card
+              variant="outlined"
+              sx={{
+                borderColor: avgDown.scenario.overSafeBudget
+                  ? 'error.main'
+                  : 'divider',
+              }}
+            >
+              <CardContent>
+                <Typography variant="h6" gutterBottom>
+                  {avgDown.scenario.symbol} 模拟结果
+                  {avgDown.scenario.overSafeBudget && (
+                    <Chip
+                      size="small"
+                      color="error"
+                      label="超过 SafeBudget"
+                      sx={{ ml: 1 }}
+                    />
+                  )}
+                </Typography>
+                <Typography>
+                  限价 {avgDown.scenario.limitPrice} · 买入 qty{' '}
+                  {avgDown.scenario.addQty} · 名义{' '}
+                  {avgDown.scenario.addNotional} · IM {avgDown.scenario.addIm}
+                </Typography>
+                <Typography>
+                  均价 {avgDown.scenario.oldEntry} →{' '}
+                  {avgDown.scenario.newEntry} (
+                  {avgDown.scenario.entryImprovePct}%)
+                </Typography>
+                <Typography>
+                  仓位 {avgDown.scenario.oldAmt} → {avgDown.scenario.newAmt}
+                </Typography>
+                <Typography sx={{ color: pnlColor(avgDown.scenario.uPnLNowAtMark) }}>
+                  现价浮盈（成交后）≈ {avgDown.scenario.uPnLNowAtMark}
+                </Typography>
+                <Typography>
+                  若再跌 5%: uPnL ≈ {avgDown.scenario.ifDrop5Pct?.uPnL} @{' '}
+                  {avgDown.scenario.ifDrop5Pct?.price}
+                </Typography>
+                <Typography>
+                  若再跌 10%: uPnL ≈ {avgDown.scenario.ifDrop10Pct?.uPnL} @{' '}
+                  {avgDown.scenario.ifDrop10Pct?.price}
+                </Typography>
+                <Typography>
+                  若回到旧成本: uPnL ≈{' '}
+                  {avgDown.scenario.ifBackToOldEntry?.uPnL}
+                </Typography>
+                <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>
+                  {avgDown.scenario.note} {avgDown.warning}
+                </Typography>
+              </CardContent>
+            </Card>
+          )}
         </TabPanel>
       </Box>
     </DashboardLayout>

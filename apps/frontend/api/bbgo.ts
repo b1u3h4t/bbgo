@@ -209,3 +209,24 @@ export async function queryAnalysisKlines(params: {
   });
   return response.data;
 }
+
+export async function queryAnalysisAvgDown(params: {
+  session?: string;
+  symbol?: string;
+  addIm?: number | string;
+  addNotional?: number | string;
+  addQty?: number | string;
+  price?: number | string;
+  leverage?: number | string;
+  targetUtil?: number | string;
+  reserveAvail?: number | string;
+  maxUtil?: number | string;
+} = {}) {
+  const response = await axios.get(baseURL + '/api/analysis/avg-down', {
+    params: {
+      session: params.session || 'binance',
+      ...params,
+    },
+  });
+  return response.data;
+}

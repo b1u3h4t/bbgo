@@ -1,6 +1,45 @@
-import { useEffect, useRef } from 'react';
-import { Box, Typography } from '@mui/material';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Box,
+  Chip,
+  ClickAwayListener,
+  IconButton,
+  Paper,
+  TextField,
+  Tooltip,
+  Typography,
+} from '@mui/material';
+import ShowChartIcon from '@mui/icons-material/ShowChart';
+import FullscreenIcon from '@mui/icons-material/Fullscreen';
+import FullscreenExitIcon from '@mui/icons-material/FullscreenExit';
+import {
+  CandlestickData,
+  ColorType,
+  createChart,
+  CrosshairMode,
+  HistogramData,
+  IChartApi,
+  ISeriesApi,
+  IPriceLine,
+  MouseEventParams,
+  Time,
+} from 'lightweight-charts';
+import {
+  buildOrderBookPinLevels,
+  PinLevel,
+  qtyAtPrice,
+} from './pinLevels';
+import {
+  ActiveIndicator,
+  CandlePoint,
+  computeIndicator,
+  createActiveFromPreset,
+  filterPresets,
+  IndicatorPreset,
+  IndicatorSeriesPayload,
+} from './chartIndicators';
 
+export type { PinLevel };
 export type KlineBar = {
   t: string;
   o: number;
@@ -9,14 +48,17 @@ export type KlineBar = {
   c: number;
   v?: number;
 };
+export { buildOrderBookPinLevels };
 
-export type PinLevel = {
-  i?: number;
-  price: number;
-  side: 'buy' | 'sell' | string;
-  quantity?: number;
-  label?: string;
-  depth?: string;
+export type ChartPosition = {
+  symbol?: string;
+  side?: string;
+  positionAmt?: number;
+  entryPrice?: number;
+  markPrice?: number;
+  unrealizedPnL?: number;
+  roePct?: number;
+  leverage?: number;
 };
 
 type Props = {
@@ -29,52 +71,29 @@ type Props = {
   lower?: number;
   upper?: number;
   interval?: string;
+  klineSource?: string;
   height?: number;
+  /** Current futures position — drawn at entry like Binance */
+  position?: ChartPosition | null;
 };
+
+type Ohlcv = {
+  time?: Time;
+  o: number;
+  h: number;
+  l: number;
+  c: number;
+  v: number;
+};
+
+type SeriesHandle =
+  | ISeriesApi<'Line'>
+  | ISeriesApi<'Histogram'>
+  | ISeriesApi<'Candlestick'>;
 
 const BUY = '#2e7d32';
 const SELL = '#c62828';
-
-function formatQty(qty?: number) {
-  if (qty == null || !(qty > 0)) return '?';
-  if (Number.isInteger(qty)) return String(qty);
-  return String(qty);
-}
-
-function qtyAtPrice(qty: number | undefined, price: number) {
-  return `${formatQty(qty)}@${formatPrice(price)}`;
-}
-
-/** Order-book style: B1>B2>… (B1 closest buy), S1<S2<… (S1 closest sell). */
-export function buildOrderBookPinLevels(
-  pins: number[],
-  last: number,
-  quantity?: number,
-): PinLevel[] {
-  const buys = pins
-    .filter((p) => p > 0 && p <= last)
-    .sort((a, b) => b - a)
-    .map((price, idx) => ({
-      i: idx + 1,
-      price,
-      side: 'buy' as const,
-      quantity,
-      depth: `B${idx + 1}`,
-      label: qtyAtPrice(quantity, price),
-    }));
-  const sells = pins
-    .filter((p) => p > last)
-    .sort((a, b) => a - b)
-    .map((price, idx) => ({
-      i: idx + 1,
-      price,
-      side: 'sell' as const,
-      quantity,
-      depth: `S${idx + 1}`,
-      label: qtyAtPrice(quantity, price),
-    }));
-  return [...buys, ...sells];
-}
+const ENTRY = '#f9a825';
 
 function resolvePinLevels(
   pinLevels: PinLevel[] | undefined,
@@ -100,20 +119,63 @@ function resolvePinLevels(
   return buildOrderBookPinLevels(pins, last, quantity);
 }
 
-function formatAxisTime(iso: string, interval?: string) {
-  const d = new Date(iso);
-  const md = `${d.getMonth() + 1}/${d.getDate()}`;
-  if (interval === '1d') return md;
-  const hm = `${String(d.getHours()).padStart(2, '0')}:${String(
-    d.getMinutes(),
-  ).padStart(2, '0')}`;
-  if (interval === '5m' || interval === '15m' || interval === '30m') {
-    return `${md} ${hm}`;
-  }
-  return `${md} ${String(d.getHours()).padStart(2, '0')}:00`;
+function toChartTime(iso: string): Time {
+  return Math.floor(new Date(iso).getTime() / 1000) as Time;
 }
 
-/** Canvas candlestick chart with buy/sell pin overlays. */
+function fmtCompact(v: number, digits = 4): string {
+  if (!Number.isFinite(v)) return '—';
+  return Number(v.toPrecision(8)).toLocaleString(undefined, {
+    maximumFractionDigits: digits,
+  });
+}
+
+function fmtVol(v: number): string {
+  if (!Number.isFinite(v) || v <= 0) return '—';
+  if (v >= 1e6) return `${(v / 1e6).toFixed(2)}M`;
+  if (v >= 1e3) return `${(v / 1e3).toFixed(2)}K`;
+  return fmtCompact(v, 2);
+}
+
+function positionTitle(pos: ChartPosition): string {
+  const amt = Math.abs(Number(pos.positionAmt || 0));
+  const long = String(pos.side || '').toUpperCase() !== 'SHORT';
+  const side = long ? '多' : '空';
+  const upnl = Number(pos.unrealizedPnL);
+  const upnlPart = Number.isFinite(upnl)
+    ? ` ${upnl > 0 ? '+' : ''}${fmtCompact(upnl, 2)}`
+    : '';
+  return `${side} ${fmtCompact(amt, 4)}${upnlPart}`;
+}
+
+function barToOhlcv(k: KlineBar): Ohlcv {
+  return {
+    time: toChartTime(k.t),
+    o: k.o,
+    h: k.h,
+    l: k.l,
+    c: k.c,
+    v: Number(k.v) || 0,
+  };
+}
+
+function toCandles(klines: KlineBar[]): CandlePoint[] {
+  return klines
+    .map((k) => ({
+      time: toChartTime(k.t),
+      open: k.o,
+      high: k.h,
+      low: k.l,
+      close: k.c,
+      volume: Number(k.v) || 0,
+    }))
+    .sort((a, b) => (a.time as number) - (b.time as number));
+}
+
+/**
+ * TradingView Lightweight Charts candlesticks with qty@price pin overlays,
+ * volume, position, and searchable indicators (/).
+ */
 export default function PinKlineChart({
   symbol,
   klines,
@@ -124,150 +186,491 @@ export default function PinKlineChart({
   lower,
   upper,
   interval = '1h',
+  klineSource,
   height = 360,
+  position,
 }: Props) {
-  const ref = useRef<HTMLCanvasElement | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const chartRef = useRef<IChartApi | null>(null);
+  const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
+  const volumeRef = useRef<ISeriesApi<'Histogram'> | null>(null);
+  const linesRef = useRef<IPriceLine[]>([]);
+  const indicatorLinesRef = useRef<IPriceLine[]>([]);
+  const indicatorSeriesRef = useRef<Map<string, SeriesHandle>>(new Map());
+  const latestRef = useRef<Ohlcv | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  const [indicators, setIndicators] = useState<ActiveIndicator[]>([]);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerQuery, setPickerQuery] = useState('');
+  const [fullscreen, setFullscreen] = useState(false);
+  const [viewportH, setViewportH] = useState(0);
+
+  const lastBar = useMemo(() => {
+    if (!klines?.length) return null;
+    const sorted = [...klines].sort(
+      (a, b) => new Date(a.t).getTime() - new Date(b.t).getTime(),
+    );
+    return barToOhlcv(sorted[sorted.length - 1]);
+  }, [klines]);
+
+  const [ohlcv, setOhlcv] = useState<Ohlcv | null>(null);
 
   useEffect(() => {
-    const canvas = ref.current;
-    if (!canvas || !klines?.length) return;
+    latestRef.current = lastBar;
+    setOhlcv(lastBar);
+  }, [lastBar]);
 
-    const dpr = window.devicePixelRatio || 1;
-    const width = canvas.parentElement?.clientWidth || 800;
-    canvas.width = Math.floor(width * dpr);
-    canvas.height = Math.floor(height * dpr);
-    canvas.style.width = `${width}px`;
-    canvas.style.height = `${height}px`;
+  useEffect(() => {
+    if (!fullscreen) return;
+    const onResize = () => setViewportH(window.innerHeight);
+    onResize();
+    window.addEventListener('resize', onResize);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      window.removeEventListener('resize', onResize);
+      document.body.style.overflow = prev;
+    };
+  }, [fullscreen]);
 
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const chartHeight = fullscreen
+    ? Math.max((viewportH || (typeof window !== 'undefined' ? window.innerHeight : 800)) - 110, 420)
+    : height;
 
-    const pad = { l: 72, r: 16, t: 24, b: 36 };
-    const w = width - pad.l - pad.r;
-    const h = height - pad.t - pad.b;
+  const presets = useMemo(() => filterPresets(pickerQuery), [pickerQuery]);
 
-    const last =
-      lastProp && lastProp > 0
-        ? lastProp
-        : klines[klines.length - 1].c;
-    const levels = resolvePinLevels(pinLevels, pins, last, quantity);
+  const addIndicator = useCallback((preset: IndicatorPreset) => {
+    setIndicators((prev) => {
+      // only one oscillator pane at a time
+      let next = prev;
+      if (preset.pane === 'oscillator') {
+        next = prev.filter((p) => p.pane !== 'oscillator');
+      }
+      return [...next, createActiveFromPreset(preset, next.length)];
+    });
+    setPickerOpen(false);
+    setPickerQuery('');
+  }, []);
 
-    let minP = Math.min(...klines.map((k) => k.l));
-    let maxP = Math.max(...klines.map((k) => k.h));
-    for (const p of levels) {
-      if (p.price > 0) {
-        minP = Math.min(minP, p.price);
-        maxP = Math.max(maxP, p.price);
+  const removeIndicator = useCallback((id: string) => {
+    setIndicators((prev) => prev.filter((p) => p.id !== id));
+  }, []);
+
+  const openPicker = useCallback(() => {
+    setPickerOpen(true);
+    // focus search after paint so "/" is not typed into the field
+    requestAnimationFrame(() => {
+      inputRef.current?.focus();
+      inputRef.current?.select?.();
+    });
+  }, []);
+
+  const toggleFullscreen = useCallback(() => {
+    setFullscreen((v) => !v);
+    setPickerOpen(false);
+  }, []);
+
+  // keep chart wrapper focusable in fullscreen so shortcuts work
+  useEffect(() => {
+    if (fullscreen) {
+      wrapRef.current?.focus({ preventScroll: true });
+    }
+  }, [fullscreen]);
+
+  // "/" opens indicator picker; Esc exits picker then fullscreen
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      const editing =
+        tag === 'INPUT' ||
+        tag === 'TEXTAREA' ||
+        (e.target as HTMLElement)?.isContentEditable;
+
+      if (e.key === 'Escape') {
+        if (pickerOpen) {
+          e.preventDefault();
+          setPickerOpen(false);
+          wrapRef.current?.focus({ preventScroll: true });
+          return;
+        }
+        if (fullscreen) {
+          e.preventDefault();
+          setFullscreen(false);
+          return;
+        }
+      }
+
+      if (editing) return;
+
+      if (e.key === '/' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const wrap = wrapRef.current;
+        if (!wrap) return;
+        // In fullscreen always allow; otherwise require hover/focus on chart
+        if (!fullscreen) {
+          const active = document.activeElement;
+          if (
+            !wrap.contains(active) &&
+            active !== document.body &&
+            !wrap.matches(':hover')
+          ) {
+            return;
+          }
+        }
+        e.preventDefault();
+        openPicker();
+        return;
+      }
+
+      if (
+        (e.key === 'f' || e.key === 'F') &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.altKey
+      ) {
+        const wrap = wrapRef.current;
+        if (!wrap) return;
+        if (
+          !fullscreen &&
+          !wrap.matches(':hover') &&
+          !wrap.contains(document.activeElement)
+        ) {
+          return;
+        }
+        e.preventDefault();
+        toggleFullscreen();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [openPicker, pickerOpen, fullscreen, toggleFullscreen]);
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+
+    const chart = createChart(containerRef.current, {
+      height: chartHeight,
+      layout: {
+        background: { type: ColorType.Solid, color: '#fafafa' },
+        textColor: '#424242',
+      },
+      grid: {
+        vertLines: { color: '#eeeeee' },
+        horzLines: { color: '#eeeeee' },
+      },
+      crosshair: { mode: CrosshairMode.Normal },
+      rightPriceScale: { borderColor: '#e0e0e0' },
+      timeScale: {
+        borderColor: '#e0e0e0',
+        timeVisible: true,
+        secondsVisible: false,
+      },
+    });
+    const series = chart.addCandlestickSeries({
+      upColor: BUY,
+      downColor: SELL,
+      borderUpColor: BUY,
+      borderDownColor: SELL,
+      wickUpColor: BUY,
+      wickDownColor: SELL,
+    });
+    series.priceScale().applyOptions({
+      scaleMargins: { top: 0.08, bottom: 0.24 },
+    });
+
+    const volume = chart.addHistogramSeries({
+      priceFormat: { type: 'volume' },
+      priceScaleId: 'volume',
+      lastValueVisible: false,
+      priceLineVisible: false,
+    });
+    chart.priceScale('volume').applyOptions({
+      scaleMargins: { top: 0.78, bottom: 0 },
+      borderVisible: false,
+    });
+
+    chartRef.current = chart;
+    seriesRef.current = series;
+    volumeRef.current = volume;
+
+    const onCrosshair = (param: MouseEventParams) => {
+      if (!param.time || !param.seriesData) {
+        setOhlcv(latestRef.current);
+        return;
+      }
+      const candle = param.seriesData.get(series) as
+        | CandlestickData
+        | undefined;
+      if (!candle || candle.open == null) {
+        setOhlcv(latestRef.current);
+        return;
+      }
+      const hist = param.seriesData.get(volume) as HistogramData | undefined;
+      setOhlcv({
+        time: param.time,
+        o: candle.open,
+        h: candle.high,
+        l: candle.low,
+        c: candle.close,
+        v: hist?.value ?? 0,
+      });
+    };
+    chart.subscribeCrosshairMove(onCrosshair);
+
+    const onResize = () => {
+      if (!containerRef.current || !chartRef.current) return;
+      chartRef.current.applyOptions({
+        width: containerRef.current.clientWidth,
+      });
+    };
+    onResize();
+    window.addEventListener('resize', onResize);
+
+    return () => {
+      window.removeEventListener('resize', onResize);
+      chart.unsubscribeCrosshairMove(onCrosshair);
+      chart.remove();
+      chartRef.current = null;
+      seriesRef.current = null;
+      volumeRef.current = null;
+      linesRef.current = [];
+      indicatorSeriesRef.current.clear();
+    };
+    // intentionally mount once; height applied separately
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // resize chart when entering/exiting fullscreen or height prop changes
+  useEffect(() => {
+    const chart = chartRef.current;
+    const el = containerRef.current;
+    if (!chart || !el) return;
+    chart.applyOptions({
+      height: chartHeight,
+      width: el.clientWidth,
+    });
+  }, [chartHeight, fullscreen]);
+
+  // candles + pins + position
+  useEffect(() => {
+    const series = seriesRef.current;
+    const volume = volumeRef.current;
+    const chart = chartRef.current;
+    if (!series || !chart || !klines?.length) return;
+
+    const sorted = toCandles(klines);
+    series.setData(
+      sorted.map(({ time, open, high, low, close }) => ({
+        time,
+        open,
+        high,
+        low,
+        close,
+      })),
+    );
+
+    if (volume) {
+      volume.setData(
+        sorted.map(({ time, open, close, volume: vol }) => ({
+          time,
+          value: vol,
+          color:
+            close >= open
+              ? 'rgba(46, 125, 50, 0.45)'
+              : 'rgba(198, 40, 40, 0.45)',
+        })),
+      );
+    }
+
+    for (const line of linesRef.current) {
+      try {
+        series.removePriceLine(line);
+      } catch {
+        /* ignore */
       }
     }
-    if (lower && lower > 0) minP = Math.min(minP, lower);
-    if (upper && upper > 0) maxP = Math.max(maxP, upper);
-    const span = maxP - minP || 1;
-    minP -= span * 0.05;
-    maxP += span * 0.05;
+    linesRef.current = [];
 
-    const yOf = (p: number) => pad.t + ((maxP - p) / (maxP - minP)) * h;
-    const xOf = (i: number) => pad.l + ((i + 0.5) / klines.length) * w;
-    const candleW = Math.max(2, (w / klines.length) * 0.6);
-
-    ctx.fillStyle = '#fafafa';
-    ctx.fillRect(0, 0, width, height);
-    ctx.strokeStyle = '#e0e0e0';
-    ctx.strokeRect(pad.l, pad.t, w, h);
-
-    ctx.font = '11px sans-serif';
-    for (let i = 0; i <= 4; i++) {
-      const p = minP + ((maxP - minP) * i) / 4;
-      const y = yOf(p);
-      ctx.strokeStyle = '#eeeeee';
-      ctx.beginPath();
-      ctx.moveTo(pad.l, y);
-      ctx.lineTo(pad.l + w, y);
-      ctx.stroke();
-      ctx.fillStyle = '#757575';
-      ctx.textAlign = 'right';
-      ctx.fillText(formatPrice(p), pad.l - 6, y + 3);
-    }
+    const last =
+      lastProp && lastProp > 0 ? lastProp : klines[klines.length - 1].c;
+    const levels = resolvePinLevels(pinLevels, pins, last, quantity);
 
     if (lower && upper && upper > lower) {
-      const y1 = yOf(upper);
-      const y2 = yOf(lower);
-      ctx.fillStyle = 'rgba(33, 150, 243, 0.06)';
-      ctx.fillRect(pad.l, y1, w, y2 - y1);
+      linesRef.current.push(
+        series.createPriceLine({
+          price: lower,
+          color: '#90caf9',
+          lineWidth: 1,
+          lineStyle: 2,
+          axisLabelVisible: true,
+          title: 'L',
+        }),
+      );
+      linesRef.current.push(
+        series.createPriceLine({
+          price: upper,
+          color: '#90caf9',
+          lineWidth: 1,
+          lineStyle: 2,
+          axisLabelVisible: true,
+          title: 'U',
+        }),
+      );
     }
 
-    klines.forEach((k, i) => {
-      const x = xOf(i);
-      const yO = yOf(k.o);
-      const yC = yOf(k.c);
-      const yH = yOf(k.h);
-      const yL = yOf(k.l);
-      const up = k.c >= k.o;
-      ctx.strokeStyle = up ? BUY : SELL;
-      ctx.fillStyle = up ? BUY : SELL;
-      ctx.beginPath();
-      ctx.moveTo(x, yH);
-      ctx.lineTo(x, yL);
-      ctx.stroke();
-      const top = Math.min(yO, yC);
-      const body = Math.max(1, Math.abs(yC - yO));
-      ctx.fillRect(x - candleW / 2, top, candleW, body);
-    });
-
-    levels.forEach((lv) => {
-      if (!(lv.price > 0)) return;
-      const y = yOf(lv.price);
+    for (const lv of levels) {
+      if (!(lv.price > 0)) continue;
       const isBuy = lv.side !== 'sell';
-      const color = isBuy ? BUY : SELL;
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([5, 3]);
-      ctx.beginPath();
-      ctx.moveTo(pad.l, y);
-      ctx.lineTo(pad.l + w, y);
-      ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.lineWidth = 1;
-      ctx.fillStyle = color;
-      ctx.textAlign = 'left';
-      ctx.font = '10px sans-serif';
-      const tag =
-        lv.label ||
-        qtyAtPrice(lv.quantity ?? quantity, lv.price);
-      ctx.fillText(tag, pad.l + 4, y - 3);
-    });
-
-    const yLast = yOf(last);
-    ctx.strokeStyle = '#1565c0';
-    ctx.setLineDash([2, 2]);
-    ctx.beginPath();
-    ctx.moveTo(pad.l, yLast);
-    ctx.lineTo(pad.l + w, yLast);
-    ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.fillStyle = '#1565c0';
-    ctx.textAlign = 'left';
-    ctx.fillText(`last ${formatPrice(last)}`, pad.l + w - 110, yLast - 4);
-
-    ctx.fillStyle = '#757575';
-    ctx.textAlign = 'center';
-    ctx.font = '10px sans-serif';
-    const step = Math.max(1, Math.floor(klines.length / 6));
-    for (let i = 0; i < klines.length; i += step) {
-      ctx.fillText(formatAxisTime(klines[i].t, interval), xOf(i), height - 12);
+      const title = lv.label || qtyAtPrice(lv.quantity ?? quantity, lv.price);
+      linesRef.current.push(
+        series.createPriceLine({
+          price: lv.price,
+          color: isBuy ? BUY : SELL,
+          lineWidth: 1,
+          lineStyle: 2,
+          axisLabelVisible: true,
+          title,
+        }),
+      );
     }
 
-    ctx.fillStyle = '#424242';
-    ctx.font = '12px sans-serif';
-    ctx.textAlign = 'left';
-    const ivLabel = interval === '1d' ? '日线' : interval;
-    ctx.fillText(
-      `${symbol} ${ivLabel} · qty@price 买绿/卖红`,
-      pad.l,
-      16,
+    const entry = Number(position?.entryPrice);
+    const amt = Math.abs(Number(position?.positionAmt || 0));
+    if (position && entry > 0 && amt > 0) {
+      const long = String(position.side || '').toUpperCase() !== 'SHORT';
+      linesRef.current.push(
+        series.createPriceLine({
+          price: entry,
+          color: long ? BUY : SELL,
+          lineWidth: 2,
+          lineStyle: 0,
+          axisLabelVisible: true,
+          title: positionTitle(position),
+        }),
+      );
+      const mark = Number(position.markPrice);
+      if (mark > 0 && Math.abs(mark - entry) / entry > 1e-6) {
+        linesRef.current.push(
+          series.createPriceLine({
+            price: mark,
+            color: ENTRY,
+            lineWidth: 1,
+            lineStyle: 1,
+            axisLabelVisible: true,
+            title: '标记',
+          }),
+        );
+      }
+    }
+
+    linesRef.current.push(
+      series.createPriceLine({
+        price: last,
+        color: '#1565c0',
+        lineWidth: 1,
+        lineStyle: 1,
+        axisLabelVisible: true,
+        title: 'last',
+      }),
     );
-  }, [symbol, klines, pins, pinLevels, lastProp, quantity, lower, upper, interval, height]);
+
+    chart.timeScale().fitContent();
+  }, [
+    klines,
+    pins,
+    pinLevels,
+    lastProp,
+    quantity,
+    lower,
+    upper,
+    position,
+  ]);
+
+  // indicators
+  useEffect(() => {
+    const chart = chartRef.current;
+    const candle = seriesRef.current;
+    if (!chart || !candle || !klines?.length) return;
+
+    const hasOsc = indicators.some((i) => i.pane === 'oscillator');
+    candle.priceScale().applyOptions({
+      scaleMargins: hasOsc
+        ? { top: 0.06, bottom: 0.42 }
+        : { top: 0.08, bottom: 0.24 },
+    });
+    chart.priceScale('volume').applyOptions({
+      scaleMargins: { top: 0.82, bottom: 0 },
+      borderVisible: false,
+    });
+    if (hasOsc) {
+      chart.priceScale('osc').applyOptions({
+        scaleMargins: { top: 0.58, bottom: 0.2 },
+        borderVisible: false,
+      });
+    }
+
+    // remove old indicator series / price lines
+    Array.from(indicatorSeriesRef.current.values()).forEach((s) => {
+      try {
+        chart.removeSeries(s as any);
+      } catch {
+        /* ignore */
+      }
+    });
+    indicatorSeriesRef.current.clear();
+    for (const line of indicatorLinesRef.current) {
+      try {
+        candle.removePriceLine(line);
+      } catch {
+        /* ignore */
+      }
+    }
+    indicatorLinesRef.current = [];
+
+    const candles = toCandles(klines);
+    const payloads: IndicatorSeriesPayload[] = [];
+    for (const ind of indicators) {
+      payloads.push(...computeIndicator(ind, candles));
+    }
+
+    for (const p of payloads) {
+      if (p.type === 'line') {
+        const s = chart.addLineSeries({
+          color: p.color,
+          lineWidth: (p.lineWidth || 1) as any,
+          lineStyle: p.lineStyle ?? 0,
+          priceScaleId: p.pane === 'oscillator' ? 'osc' : 'right',
+          title: p.title,
+          lastValueVisible: true,
+          priceLineVisible: false,
+          crosshairMarkerVisible: false,
+        });
+        s.setData(p.data);
+        indicatorSeriesRef.current.set(p.id, s);
+      } else if (p.type === 'hist') {
+        const s = chart.addHistogramSeries({
+          priceScaleId: 'osc',
+          title: p.title,
+          lastValueVisible: false,
+          priceLineVisible: false,
+        });
+        s.setData(p.data);
+        indicatorSeriesRef.current.set(p.id, s);
+      } else if (p.type === 'priceline' && p.price > 0) {
+        indicatorLinesRef.current.push(
+          candle.createPriceLine({
+            price: p.price,
+            color: p.color,
+            lineWidth: (p.lineWidth || 2) as any,
+            lineStyle: p.lineStyle ?? 0,
+            axisLabelVisible: true,
+            title: p.title,
+          }),
+        );
+      }
+    }
+  }, [indicators, klines]);
 
   if (!klines?.length) {
     return (
@@ -277,15 +680,258 @@ export default function PinKlineChart({
     );
   }
 
+  const ivLabel = interval === '1d' ? '日线' : interval;
+  const src = klineSource ? ` · ${klineSource}` : '';
+  const entry = Number(position?.entryPrice);
+  const amt = Math.abs(Number(position?.positionAmt || 0));
+  const hasPos = !!(position && entry > 0 && amt > 0);
+  const long = String(position?.side || '').toUpperCase() !== 'SHORT';
+  const up = ohlcv ? ohlcv.c >= ohlcv.o : true;
+  const pxColor = up ? BUY : SELL;
+
   return (
-    <Box sx={{ width: '100%', bgcolor: '#fafafa', borderRadius: 1 }}>
-      <canvas ref={ref} />
+    <Box
+      ref={wrapRef}
+      tabIndex={0}
+      sx={
+        fullscreen
+          ? {
+              position: 'fixed',
+              inset: 0,
+              zIndex: 1400,
+              bgcolor: '#fafafa',
+              p: 1.5,
+              display: 'flex',
+              flexDirection: 'column',
+              overflow: 'hidden', // avoid clipping picker; list uses disablePortal inside
+            }
+          : { width: '100%', position: 'relative' }
+      }
+    >
+      <Box
+        sx={{
+          display: 'flex',
+          flexWrap: 'wrap',
+          alignItems: 'center',
+          gap: 1,
+          mb: 0.5,
+        }}
+      >
+        <Typography variant="caption" color="text.secondary">
+          {symbol} {ivLabel}
+          {src} · TradingView Lightweight Charts · qty@price · 成交量
+          {hasPos && (
+            <Box
+              component="span"
+              sx={{
+                ml: 1,
+                color: long ? BUY : SELL,
+                fontWeight: 600,
+              }}
+            >
+              · 持仓 {long ? '多' : '空'} {fmtCompact(amt, 4)} @{' '}
+              {fmtCompact(entry, 6)}
+              {Number.isFinite(Number(position?.unrealizedPnL)) && (
+                <>
+                  {' '}
+                  (
+                  {Number(position?.unrealizedPnL) > 0 ? '+' : ''}
+                  {fmtCompact(Number(position?.unrealizedPnL), 2)})
+                </>
+              )}
+            </Box>
+          )}
+        </Typography>
+        <Box sx={{ ml: 'auto', display: 'flex', alignItems: 'center', gap: 0.5 }}>
+          <Tooltip title="添加指标（快捷键 /）">
+            <IconButton size="small" onClick={openPicker}>
+              <ShowChartIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+          <Chip
+            size="small"
+            label="指标 /"
+            onClick={openPicker}
+            variant="outlined"
+            sx={{ height: 24 }}
+          />
+          <Tooltip
+            title={
+              fullscreen
+                ? '退出全屏（Esc / F）'
+                : '全屏显示（快捷键 F）'
+            }
+          >
+            <IconButton size="small" onClick={toggleFullscreen}>
+              {fullscreen ? (
+                <FullscreenExitIcon fontSize="small" />
+              ) : (
+                <FullscreenIcon fontSize="small" />
+              )}
+            </IconButton>
+          </Tooltip>
+        </Box>
+      </Box>
+
+      {indicators.length > 0 && (
+        <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75, mb: 0.75 }}>
+          {indicators.map((ind) => (
+            <Chip
+              key={ind.id}
+              size="small"
+              label={ind.name}
+              onDelete={() => removeIndicator(ind.id)}
+              sx={{
+                height: 24,
+                bgcolor: ind.color ? `${ind.color}22` : undefined,
+                borderColor: ind.color,
+                borderStyle: 'solid',
+                borderWidth: 1,
+              }}
+            />
+          ))}
+        </Box>
+      )}
+
+      {ohlcv && (
+        <Box
+          sx={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: 1.5,
+            mb: 0.75,
+            fontFamily:
+              'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+            fontSize: 12,
+            lineHeight: 1.4,
+          }}
+        >
+          {(
+            [
+              ['O', ohlcv.o],
+              ['H', ohlcv.h],
+              ['L', ohlcv.l],
+              ['C', ohlcv.c],
+            ] as const
+          ).map(([k, v]) => (
+            <Box key={k} component="span">
+              <Box component="span" sx={{ color: 'text.secondary', mr: 0.5 }}>
+                {k}
+              </Box>
+              <Box component="span" sx={{ color: pxColor, fontWeight: 600 }}>
+                {fmtCompact(v, 6)}
+              </Box>
+            </Box>
+          ))}
+          <Box component="span">
+            <Box component="span" sx={{ color: 'text.secondary', mr: 0.5 }}>
+              V
+            </Box>
+            <Box component="span" sx={{ fontWeight: 600 }}>
+              {fmtVol(ohlcv.v)}
+            </Box>
+          </Box>
+        </Box>
+      )}
+
+      {pickerOpen && (
+        <ClickAwayListener
+          onClickAway={() => setPickerOpen(false)}
+          mouseEvent="onMouseDown"
+        >
+          <Paper
+            elevation={8}
+            sx={{
+              position: fullscreen ? 'fixed' : 'absolute',
+              top: fullscreen ? 56 : 36,
+              right: fullscreen ? 16 : 8,
+              zIndex: 1600,
+              width: 360,
+              maxWidth: 'min(92vw, 360px)',
+              p: 1,
+              bgcolor: '#fff',
+            }}
+          >
+            <Typography variant="caption" color="text.secondary" sx={{ px: 0.5, mb: 0.5, display: 'block' }}>
+              搜索指标（/）{fullscreen ? ' · 全屏可用' : ''}
+            </Typography>
+            <TextField
+              size="small"
+              fullWidth
+              autoFocus
+              placeholder="MA / UDBox / RSI / MACD…"
+              value={pickerQuery}
+              inputRef={inputRef}
+              onChange={(e) => setPickerQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') {
+                  e.stopPropagation();
+                  setPickerOpen(false);
+                  wrapRef.current?.focus({ preventScroll: true });
+                  return;
+                }
+                if (e.key === 'Enter' && presets[0]) {
+                  e.preventDefault();
+                  addIndicator(presets[0]);
+                }
+              }}
+            />
+            <Box
+              sx={{
+                mt: 1,
+                maxHeight: fullscreen ? '50vh' : 280,
+                overflow: 'auto',
+              }}
+            >
+              {presets.length === 0 ? (
+                <Typography variant="body2" color="text.secondary" sx={{ px: 1, py: 1 }}>
+                  无匹配指标
+                </Typography>
+              ) : (
+                presets.map((option) => (
+                  <Box
+                    key={`${option.kind}-${option.short}-${option.defaults.length || 0}-${option.defaults.window || 0}`}
+                    onClick={() => addIndicator(option)}
+                    sx={{
+                      px: 1,
+                      py: 0.75,
+                      cursor: 'pointer',
+                      borderRadius: 1,
+                      '&:hover': { bgcolor: 'action.hover' },
+                    }}
+                  >
+                    <Typography variant="body2" fontWeight={600}>
+                      {option.short}
+                      <Typography
+                        component="span"
+                        variant="caption"
+                        color="text.secondary"
+                        sx={{ ml: 1 }}
+                      >
+                        {option.pane === 'overlay' ? '主图' : '副图'}
+                      </Typography>
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      {option.description}
+                    </Typography>
+                  </Box>
+                ))
+              )}
+            </Box>
+          </Paper>
+        </ClickAwayListener>
+      )}
+
+      <Box
+        ref={containerRef}
+        sx={{
+          width: '100%',
+          height: chartHeight,
+          bgcolor: '#fafafa',
+          borderRadius: 1,
+          flex: fullscreen ? 1 : undefined,
+        }}
+      />
     </Box>
   );
-}
-
-function formatPrice(p: number) {
-  if (p >= 100) return p.toFixed(2);
-  if (p >= 1) return p.toFixed(4);
-  return p.toFixed(6);
 }

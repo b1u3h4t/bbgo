@@ -152,7 +152,7 @@ CREATE TABLE `orders` (
   `exchange` varchar(24) NOT NULL DEFAULT '',
   `order_id` bigint(20) unsigned NOT NULL,
   `client_order_id` varchar(42) NOT NULL DEFAULT '',
-  `order_type` varchar(16) NOT NULL,
+  `order_type` varchar(32) NOT NULL,
   `symbol` varchar(9) DEFAULT NULL,
   `status` varchar(12) NOT NULL,
   `time_in_force` varchar(4) NOT NULL,

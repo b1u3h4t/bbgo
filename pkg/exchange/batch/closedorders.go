@@ -36,7 +36,7 @@ func (q *ClosedOrderBatchQuery) Query(ctx context.Context, symbol string, startT
 			}
 			return strconv.FormatUint(order.OrderID, 10)
 		},
-		JumpIfEmpty: 30 * 24 * time.Hour,
+		JumpIfEmpty: 7*24*time.Hour - time.Minute, // Binance futures allOrders max interval is 7d (-4165)
 	}
 
 	for _, opt := range opts {

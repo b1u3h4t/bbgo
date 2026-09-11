@@ -217,14 +217,14 @@ func (e *Exchange) queryDeliveryOpenOrders(ctx context.Context, symbol string) (
 func (e *Exchange) queryDeliveryClosedOrders(
 	ctx context.Context, symbol string, since, until time.Time, lastOrderID uint64,
 ) ([]types.Order, error) {
+	since, until = clampBinanceOrderHistoryWindow(since, until)
+
 	req := e.deliveryClient.NewListOrdersService().Symbol(symbol)
 	if lastOrderID > 0 {
 		req.OrderID(int64(lastOrderID))
 	} else {
 		req.StartTime(since.UnixMilli())
-		if until.Sub(since) < 24*time.Hour {
-			req.EndTime(until.UnixMilli())
-		}
+		req.EndTime(until.UnixMilli())
 	}
 
 	binanceOrders, err := req.Do(ctx)

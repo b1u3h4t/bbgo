@@ -1190,5 +1190,7 @@ func (session *ExchangeSession) getSessionSymbols(defaultSymbols ...string) ([]s
 }
 
 func defaultSyncSinceTime() time.Time {
-	return time.Now().AddDate(0, -6, 0)
+	// Binance futures order history lookback is limited to ~90 days (-4166).
+	// Per-request windows are further clamped to 7 days in the exchange client (-4165).
+	return time.Now().Add(-89 * 24 * time.Hour)
 }

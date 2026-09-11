@@ -1,4 +1,6 @@
 /** @type {import('next').NextConfig} */
+const withTM = require('next-transpile-modules')(['lightweight-charts']);
+
 const nextConfig = {
   // Static export for nginx root at /home/admin/bbgo/web
   output: 'export',
@@ -6,4 +8,4 @@ const nextConfig = {
   images: { unoptimized: true },
 };
 
-module.exports = nextConfig;
+module.exports = withTM(nextConfig);

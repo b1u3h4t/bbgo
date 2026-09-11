@@ -20,6 +20,11 @@ import (
 func (e *Exchange) queryFuturesClosedOrders(
 	ctx context.Context, symbol string, since, until time.Time, lastOrderID uint64,
 ) (orders []types.Order, err error) {
+	// Binance USDT-M allOrders:
+	//   - startTime~endTime span must be <= 7 days (-4165)
+	//   - cannot query older than ~90 days from now (-4166)
+	since, until = clampBinanceOrderHistoryWindow(since, until)
+
 	// Query regular orders
 	req := e.futuresClient.NewListOrdersService().Symbol(symbol)
 
@@ -27,9 +32,7 @@ func (e *Exchange) queryFuturesClosedOrders(
 		req.OrderID(int64(lastOrderID))
 	} else {
 		req.StartTime(since.UnixMilli())
-		if until.Sub(since) < 24*time.Hour {
-			req.EndTime(until.UnixMilli())
-		}
+		req.EndTime(until.UnixMilli())
 	}
 
 	binanceOrders, err := req.Do(ctx)
@@ -46,10 +49,8 @@ func (e *Exchange) queryFuturesClosedOrders(
 	// Query algo orders
 	reqAlgo := e.futuresClient.NewListAllAlgoOrdersService().Symbol(symbol)
 	if lastOrderID == 0 {
-		reqAlgo.StartTime(since.UnixMilli() / int64(time.Millisecond))
-		if until.Sub(since) < 24*time.Hour {
-			reqAlgo.EndTime(until.UnixMilli() / int64(time.Millisecond))
-		}
+		reqAlgo.StartTime(since.UnixMilli())
+		reqAlgo.EndTime(until.UnixMilli())
 	} else {
 		// For algo orders, we can use AlgoID to filter
 		reqAlgo.AlgoID(int64(lastOrderID))
@@ -69,6 +70,31 @@ func (e *Exchange) queryFuturesClosedOrders(
 	orders = append(orders, algoOrders...)
 
 	return orders, nil
+}
+
+// clampBinanceOrderHistoryWindow ensures [since, until] fits Binance futures
+// allOrders limits: max 7-day interval (-4165) and ~90-day lookback (-4166).
+// The batch sync always passes overall "until=now", so each request must be clamped.
+func clampBinanceOrderHistoryWindow(since, until time.Time) (time.Time, time.Time) {
+	const maxLookback = 89 * 24 * time.Hour
+	// leave a small slack under 7d to avoid ms boundary / clock skew -4165
+	const maxSpan = 7*24*time.Hour - time.Minute
+
+	now := time.Now()
+	if until.IsZero() || until.After(now) {
+		until = now
+	}
+	earliest := now.Add(-maxLookback)
+	if since.IsZero() || since.Before(earliest) {
+		since = earliest
+	}
+	if !until.After(since) {
+		until = since.Add(time.Second)
+	}
+	if until.Sub(since) > maxSpan {
+		until = since.Add(maxSpan)
+	}
+	return since, until
 }
 
 func (e *Exchange) TransferFuturesAccountAsset(
