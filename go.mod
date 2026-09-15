@@ -24,7 +24,6 @@ require (
 	github.com/go-redis/redis/v8 v8.11.5
 	github.com/go-sql-driver/mysql v1.10.1
 	github.com/gofrs/flock v0.8.1
-	github.com/golang/mock v1.6.0
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/grafana/pyroscope-go v1.2.0
@@ -33,6 +32,7 @@ require (
 	github.com/jmoiron/sqlx v1.4.0
 	github.com/joho/godotenv v1.5.1
 	github.com/leekchan/accounting v0.0.0-20191218023648-17a4ce5f94d4
+	github.com/lib/pq v1.12.3
 	github.com/mattn/go-shellwords v1.0.12
 	github.com/mattn/go-sqlite3 v1.14.50
 	github.com/muesli/clusters v0.0.0-20200529215643-2700303c1762
@@ -116,7 +116,6 @@ require (
 	github.com/lann/builder v0.0.0-20180802200727-47ae307949d0 // indirect
 	github.com/lann/ps v0.0.0-20150810152359-62de8c46ede0 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
-	github.com/lib/pq v1.12.3 // indirect
 	github.com/mattn/go-colorable v0.1.15 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/mattn/go-runewidth v0.0.29 // indirect

@@ -9,7 +9,11 @@ import (
 	"github.com/c9s/rockhopper/v2"
 
 	mysqlMigrations "github.com/c9s/bbgo/pkg/migrations/mysql"
+	postgresMigrations "github.com/c9s/bbgo/pkg/migrations/postgres"
 	sqlite3Migrations "github.com/c9s/bbgo/pkg/migrations/sqlite3"
+
+	// Register SQL drivers. Postgres is opt-in via DB_DRIVER=postgres.
+	_ "github.com/lib/pq"
 )
 
 // reflect cache for database
@@ -72,7 +76,8 @@ func (s *DatabaseService) Upgrade(ctx context.Context) error {
 		migrations = sqlite3Migrations.Migrations()
 	case "mysql":
 		migrations = mysqlMigrations.Migrations()
-
+	case "postgres":
+		migrations = postgresMigrations.Migrations()
 	}
 
 	// sqlx.DB is different from sql.DB

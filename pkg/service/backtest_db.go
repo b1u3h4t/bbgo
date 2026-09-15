@@ -45,6 +45,11 @@ func NewBacktestService(db *sqlx.DB) *BacktestService {
 	return &BacktestService{DB: db}
 }
 
+// adaptSQL rewrites backtick identifiers for Postgres; MySQL/SQLite unchanged.
+func (s *BacktestService) adaptSQL(query string) string {
+	return sqlForDriver(s.DB.DriverName(), query)
+}
+
 func (s *BacktestService) SyncKLineByInterval(
 	ctx context.Context, exchange types.Exchange, symbol string, interval types.Interval, startTime, endTime time.Time,
 ) error {
@@ -180,6 +185,7 @@ func (s *BacktestService) QueryKLine(
 	tableName := targetKlineTable(ex)
 	// make the SQL syntax IDE friendly, so that it can analyze it.
 	sql := fmt.Sprintf("SELECT * FROM `%s` WHERE  `symbol` = :symbol AND `interval` = :interval ORDER BY end_time "+orderBy+" LIMIT "+strconv.Itoa(limit), tableName)
+	sql = s.adaptSQL(sql)
 
 	rows, err := s.DB.NamedQuery(sql, map[string]interface{}{
 		"interval": interval,
@@ -211,6 +217,7 @@ func (s *BacktestService) QueryKLinesForward(
 	tableName := targetKlineTable(exchange)
 	sql := "SELECT * FROM `binance_klines` WHERE `end_time` >= :start_time AND `symbol` = :symbol AND `interval` = :interval and exchange = :exchange ORDER BY end_time ASC LIMIT :limit"
 	sql = strings.ReplaceAll(sql, "binance_klines", tableName)
+	sql = s.adaptSQL(sql)
 
 	rows, err := s.DB.NamedQuery(sql, map[string]interface{}{
 		"start_time": startTime,
@@ -234,6 +241,7 @@ func (s *BacktestService) QueryKLinesBackward(
 	sql := "SELECT * FROM `binance_klines` WHERE `end_time` <= :end_time  and exchange = :exchange  AND `symbol` = :symbol AND `interval` = :interval ORDER BY end_time DESC LIMIT :limit"
 	sql = strings.ReplaceAll(sql, "binance_klines", tableName)
 	sql = "SELECT t.* FROM (" + sql + ") AS t ORDER BY t.end_time ASC"
+	sql = s.adaptSQL(sql)
 
 	rows, err := s.DB.NamedQuery(sql, map[string]interface{}{
 		"limit":    limit,
@@ -268,6 +276,7 @@ func (s *BacktestService) QueryKLinesCh(
 	}
 
 	query = strings.ReplaceAll(query, "binance_klines", tableName)
+	query = s.adaptSQL(query)
 
 	sql, args, err := sqlx.Named(query, map[string]interface{}{
 		"since":     since,
@@ -374,6 +383,7 @@ func (s *BacktestService) Insert(kline types.KLine, ex types.Exchange) error {
 
 	sql := fmt.Sprintf("INSERT INTO `%s` (`exchange`, `start_time`, `end_time`, `symbol`, `interval`, `open`, `high`, `low`, `close`, `closed`, `volume`, `quote_volume`, `taker_buy_base_volume`, `taker_buy_quote_volume`)"+
 		"VALUES (:exchange, :start_time, :end_time, :symbol, :interval, :open, :high, :low, :close, :closed, :volume, :quote_volume, :taker_buy_base_volume, :taker_buy_quote_volume)", tableName)
+	sql = s.adaptSQL(sql)
 
 	_, err := s.DB.NamedExec(sql, kline)
 	return err
@@ -389,6 +399,7 @@ func (s *BacktestService) BatchInsert(kline []types.KLine, ex types.Exchange) er
 
 	sql := fmt.Sprintf("INSERT INTO `%s` (`exchange`, `start_time`, `end_time`, `symbol`, `interval`, `open`, `high`, `low`, `close`, `closed`, `volume`, `quote_volume`, `taker_buy_base_volume`, `taker_buy_quote_volume`)"+
 		" VALUES (:exchange, :start_time, :end_time, :symbol, :interval, :open, :high, :low, :close, :closed, :volume, :quote_volume, :taker_buy_base_volume, :taker_buy_quote_volume); ", tableName)
+	sql = s.adaptSQL(sql)
 
 	tx := s.DB.MustBegin()
 	if _, err := tx.NamedExec(sql, kline); err != nil {
@@ -501,6 +512,8 @@ func (s *BacktestService) FindMissingTimeRanges(
 	if err != nil {
 		return nil, err
 	}
+	sql = s.adaptSQL(sql)
+	sql = s.DB.Rebind(sql)
 
 	rows, err := s.DB.QueryContext(ctx, sql, args...)
 	defer rows.Close()
@@ -546,6 +559,8 @@ func (s *BacktestService) QueryExistingDataRange(
 	if err != nil {
 		return nil, nil, err
 	}
+	sql = s.adaptSQL(sql)
+	sql = s.DB.Rebind(sql)
 
 	var t1, t2 types.Time
 

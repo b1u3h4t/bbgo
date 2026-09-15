@@ -182,7 +182,7 @@ func (sel SyncTask) execute(
 				} else {
 					err = insertType(db, obj, useUpsert)
 				}
-				if isMysqlDuplicateError(err) {
+				if isDuplicateKeyError(err) {
 					// ignore duplicate error
 					logger.Warnf("duplicate entry for %T, skipped: %+v", obj, obj)
 					continue

@@ -1,0 +1,10 @@
+---
+# Opt-in PostgreSQL migrations for bbgo.
+# Does NOT affect production MySQL — only used when DB_DRIVER=postgres.
+driver: postgres
+dialect: postgres
+package: main
+dsn: "postgres://bbgo:bbgo@localhost:5432/bbgo?sslmode=disable"
+migrationsDirs:
+- migrations/postgres
+- pkg/strategy/xfundingv2/migrations/postgres

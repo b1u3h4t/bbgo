@@ -20,17 +20,19 @@ Or, you can generate the migration files separately:
 ```sh
 rockhopper --config rockhopper_sqlite.yaml create --type sql add_pnl_column
 rockhopper --config rockhopper_mysql.yaml create --type sql add_pnl_column
+rockhopper --config rockhopper_postgres.yaml create --type sql add_pnl_column
 ```
 
 
-Be sure to edit both sqlite3 and mysql migration files. ( [Sample](.../../migrations/mysql/20210531234123_add_kline_taker_buy_columns.sql) )
+Be sure to edit sqlite3, mysql, and postgres migration files. ( [Sample](.../../migrations/mysql/20210531234123_add_kline_taker_buy_columns.sql) )
 
-To test the drivers, you have to update the rockhopper_mysql.yaml file to connect your database,
+To test the drivers, you have to update the rockhopper_*.yaml file to connect your database,
 then do:
 
 ```sh
 rockhopper --config rockhopper_sqlite.yaml up
 rockhopper --config rockhopper_mysql.yaml up
+rockhopper --config rockhopper_postgres.yaml up
 ```
 
 Then run the following command to compile the migration files into go files:

@@ -260,12 +260,13 @@ func scanRowsOfType(rows *sqlx.Rows, tpe interface{}) (interface{}, error) {
 }
 
 func insertType(db *sqlx.DB, record interface{}, useUpsert bool) error {
-	// TODO: support upsert for other databases (ex: postgres)
+	// MySQL: ON DUPLICATE KEY upsert.
+	// Postgres/SQLite: plain INSERT; SyncTask treats unique violations as skip.
 	var sql string
 	sqlFunc := dbCache.InsertSqlOf
 	if useUpsert {
 		if db.DriverName() != "mysql" {
-			logrus.Warnf("upsert is only supported in mysql")
+			logrus.Warnf("upsert is only supported in mysql (driver=%s); falling back to insert", db.DriverName())
 		} else {
 			sqlFunc = dbCache.UpsertSqlOf
 		}
@@ -280,6 +281,9 @@ func selectAndScanType(ctx context.Context, db *sqlx.DB, sel squirrel.SelectBuil
 	if err != nil {
 		return nil, err
 	}
+
+	sql = sqlForDriver(db.DriverName(), sql)
+	sql = db.Rebind(sql)
 
 	logrus.Debugf("selectAndScanType: %T <- %s", tpe, sql)
 	logrus.Debugf("queryArgs: %v", args)

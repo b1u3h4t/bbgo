@@ -199,7 +199,7 @@ func genOrderSQL(driver string, options QueryOrdersOptions) string {
 	} else {
 		selColumns = append(selColumns, "orders.*")
 	}
-	selColumns = append(selColumns, "IFNULL(SUM(t.price * t.quantity)/SUM(t.quantity), orders.price) AS average_price")
+	selColumns = append(selColumns, ifNullExpr(driver, "SUM(t.price * t.quantity)/SUM(t.quantity)", "orders.price")+" AS average_price")
 
 	sql := `SELECT ` + strings.Join(selColumns, ", ") + ` FROM orders` +
 		` LEFT JOIN trades AS t ON (t.order_id = orders.order_id)`
