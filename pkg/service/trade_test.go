@@ -56,6 +56,11 @@ func Test_queryTradingVolumeSQL(t *testing.T) {
 		}
 	})
 
+	t.Run("postgres group by day", func(t *testing.T) {
+		o := TradingVolumeQueryOptions{GroupByPeriod: "day", SegmentBy: "exchange"}
+		got := generatePostgresTradingVolumeQuerySQL(o)
+		assert.Equal(t, "SELECT CAST(EXTRACT(YEAR FROM traded_at) AS int) AS year, CAST(EXTRACT(MONTH FROM traded_at) AS int) AS month, CAST(EXTRACT(DAY FROM traded_at) AS int) AS day, exchange, SUM(quantity * price) AS quote_volume FROM trades WHERE traded_at > :start_time GROUP BY exchange, CAST(EXTRACT(DAY FROM traded_at) AS int), CAST(EXTRACT(MONTH FROM traded_at) AS int), CAST(EXTRACT(YEAR FROM traded_at) AS int) ORDER BY year ASC, month ASC, day ASC, exchange", got)
+	})
 }
 
 func Test_queryTradesSQL(t *testing.T) {

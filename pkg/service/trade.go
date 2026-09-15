@@ -152,9 +152,12 @@ func (s *TradeService) QueryTradingVolume(startTime time.Time, options TradingVo
 
 	sql := ""
 	driverName := s.DB.DriverName()
-	if driverName == "mysql" {
+	switch driverName {
+	case "mysql":
 		sql = generateMysqlTradingVolumeQuerySQL(options)
-	} else {
+	case "postgres":
+		sql = generatePostgresTradingVolumeQuerySQL(options)
+	default:
 		sql = generateSqliteTradingVolumeSQL(options)
 	}
 
@@ -262,6 +265,60 @@ func generateMysqlTimeRangeClauses(timeRangeColumn, period string) (selectors []
 func generateMysqlTradingVolumeQuerySQL(options TradingVolumeQueryOptions) string {
 	timeRangeColumn := "traded_at"
 	sel, groupBys, orderBys := generateMysqlTimeRangeClauses(timeRangeColumn, options.GroupByPeriod)
+
+	switch options.SegmentBy {
+	case "symbol":
+		sel = append(sel, "symbol")
+		groupBys = append([]string{"symbol"}, groupBys...)
+		orderBys = append(orderBys, "symbol")
+	case "exchange":
+		sel = append(sel, "exchange")
+		groupBys = append([]string{"exchange"}, groupBys...)
+		orderBys = append(orderBys, "exchange")
+	}
+
+	sel = append(sel, "SUM(quantity * price) AS quote_volume")
+	where := []string{timeRangeColumn + " > :start_time"}
+	sql := `SELECT ` + strings.Join(sel, ", ") + ` FROM trades` +
+		` WHERE ` + strings.Join(where, " AND ") +
+		` GROUP BY ` + strings.Join(groupBys, ", ") +
+		` ORDER BY ` + strings.Join(orderBys, ", ")
+
+	return sql
+}
+
+func generatePostgresTimeRangeClauses(timeRangeColumn, period string) (selectors []string, groupBys []string, orderBys []string) {
+	// Use CAST(... AS int), not ::int — sqlx NamedQuery treats ":name" as bindvars.
+	year := "CAST(EXTRACT(YEAR FROM " + timeRangeColumn + ") AS int)"
+	month := "CAST(EXTRACT(MONTH FROM " + timeRangeColumn + ") AS int)"
+	day := "CAST(EXTRACT(DAY FROM " + timeRangeColumn + ") AS int)"
+
+	switch period {
+	case "month":
+		selectors = append(selectors, year+" AS year", month+" AS month")
+		groupBys = append([]string{month, year}, groupBys...)
+		orderBys = append(orderBys, "year ASC", "month ASC")
+
+	case "year":
+		selectors = append(selectors, year+" AS year")
+		groupBys = append([]string{year}, groupBys...)
+		orderBys = append(orderBys, "year ASC")
+
+	case "day":
+		fallthrough
+
+	default:
+		selectors = append(selectors, year+" AS year", month+" AS month", day+" AS day")
+		groupBys = append([]string{day, month, year}, groupBys...)
+		orderBys = append(orderBys, "year ASC", "month ASC", "day ASC")
+	}
+
+	return
+}
+
+func generatePostgresTradingVolumeQuerySQL(options TradingVolumeQueryOptions) string {
+	timeRangeColumn := "traded_at"
+	sel, groupBys, orderBys := generatePostgresTimeRangeClauses(timeRangeColumn, options.GroupByPeriod)
 
 	switch options.SegmentBy {
 	case "symbol":
