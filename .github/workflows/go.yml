@@ -11,7 +11,7 @@ jobs:
     # Public repo: never run untrusted fork PRs on self-hosted hardware.
     # push / same-repo work → nc3 bbgo runner; pull_request → GitHub-hosted.
     runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || fromJSON('["self-hosted","bbgo"]') }}
-    timeout-minutes: ${{ github.event_name == 'pull_request' && 15 || 45 }}
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 25 || 45 }}
     concurrency:
       group: go-ci-${{ github.event_name }}-${{ github.ref }}
       cancel-in-progress: true
@@ -32,6 +32,12 @@ jobs:
       # Per-run names so a cancelled job's cleanup cannot docker-rm the new job's containers.
       CI_MYSQL_NAME: bbgo-ci-mysql-${{ github.run_id }}
       CI_REDIS_NAME: bbgo-ci-redis-${{ github.run_id }}
+      POSTGRES_USER: bbgo
+      POSTGRES_PASSWORD: bbgo # pragma: allowlist secret
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_HOST_PORT: "5432"
+      CI_PG_NAME: bbgo-ci-pg-${{ github.run_id }}
+      CI_PG_DB: bbgo_ci_${{ github.run_id }}
 
     steps:
 
@@ -124,6 +130,62 @@ jobs:
           fi
         fi
 
+    - name: Set up PostgreSQL (ubuntu-latest Docker)
+      if: github.event_name == 'pull_request'
+      run: |
+        docker rm -f "${CI_PG_NAME}" >/dev/null 2>&1 || true
+        docker run -d --name "${CI_PG_NAME}" \
+          -e POSTGRES_USER="${POSTGRES_USER}" \
+          -e POSTGRES_PASSWORD="${POSTGRES_PASSWORD}" \
+          -e POSTGRES_DB=bbgo \
+          -p 127.0.0.1:${POSTGRES_HOST_PORT}:5432 \
+          postgres:17
+        ready=0
+        for i in $(seq 1 60); do
+          if docker exec "${CI_PG_NAME}" pg_isready -U "${POSTGRES_USER}" >/dev/null 2>&1; then
+            ready=1
+            break
+          fi
+          sleep 1
+        done
+        if [ "$ready" != "1" ]; then
+          echo "PostgreSQL did not become ready in time"
+          docker logs "${CI_PG_NAME}" || true
+          exit 1
+        fi
+        docker exec "${CI_PG_NAME}" psql -U "${POSTGRES_USER}" -d postgres -c "CREATE DATABASE ${CI_PG_DB} OWNER ${POSTGRES_USER};"
+
+    - name: Set up PostgreSQL (self-hosted native)
+      if: github.event_name != 'pull_request'
+      run: |
+        set -euo pipefail
+        if [ -f "${HOME}/.bbgo-ci-postgres.env" ]; then
+          set -a
+          # shellcheck disable=SC1091
+          . "${HOME}/.bbgo-ci-postgres.env"
+          set +a
+        fi
+        POSTGRES_USER="${POSTGRES_USER:-bbgo}"
+        POSTGRES_PASSWORD="${POSTGRES_PASSWORD:?postgres password missing}"
+        POSTGRES_HOST="${POSTGRES_HOST:-127.0.0.1}"
+        POSTGRES_HOST_PORT="${POSTGRES_PORT:-${POSTGRES_HOST_PORT:-5432}}"
+        export PGPASSWORD="${POSTGRES_PASSWORD}"
+        if ! command -v psql >/dev/null 2>&1; then
+          echo "psql not found; install postgresql-client on the runner"
+          exit 1
+        fi
+        psql -h "${POSTGRES_HOST}" -p "${POSTGRES_HOST_PORT}" -U "${POSTGRES_USER}" -d postgres -c "SELECT 1" >/dev/null
+        psql -h "${POSTGRES_HOST}" -p "${POSTGRES_HOST_PORT}" -U "${POSTGRES_USER}" -d postgres \
+          -c "DROP DATABASE IF EXISTS ${CI_PG_DB} WITH (FORCE);"
+        psql -h "${POSTGRES_HOST}" -p "${POSTGRES_HOST_PORT}" -U "${POSTGRES_USER}" -d postgres \
+          -c "CREATE DATABASE ${CI_PG_DB} OWNER ${POSTGRES_USER};"
+        {
+          echo "POSTGRES_USER=${POSTGRES_USER}"
+          echo "POSTGRES_PASSWORD=${POSTGRES_PASSWORD}"
+          echo "POSTGRES_HOST=${POSTGRES_HOST}"
+          echo "POSTGRES_HOST_PORT=${POSTGRES_HOST_PORT}"
+        } >> "$GITHUB_ENV"
+
     - name: Set up Go
       uses: actions/setup-go@v7
       with:
@@ -148,6 +210,19 @@ jobs:
       run: |
         rockhopper --config rockhopper_sqlite.yaml up
 
+    - name: Test Migration SQL Files For PostgreSQL
+      run: |
+        cat > /tmp/rockhopper_postgres_ci.yaml <<EOF
+        driver: postgres
+        dialect: postgres
+        package: main
+        dsn: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_HOST_PORT}/${CI_PG_DB}?sslmode=disable"
+        migrationsDirs:
+        - migrations/postgres
+        - pkg/strategy/xfundingv2/migrations/postgres
+        EOF
+        rockhopper --config /tmp/rockhopper_postgres_ci.yaml up
+
     - name: Build
       run: go build -o /dev/null ./cmd/bbgo
 
@@ -163,6 +238,8 @@ jobs:
         if [ "${{ github.event_name }}" != "pull_request" ]; then
           docker exec "${CI_REDIS_NAME}" redis-cli ping | grep -q PONG
         fi
+        export DB_DRIVER=mysql
+        export DB_DSN="root:root@tcp(127.0.0.1:${MYSQL_HOST_PORT})/bbgo"
         # Persist stdout on the runner so we can SSH-diagnose without waiting on API logs.
         LOG="/tmp/bbgo-gotest-${{ github.run_id }}.txt"
         set +e
@@ -182,6 +259,8 @@ jobs:
         if [ "${{ github.event_name }}" != "pull_request" ]; then
           docker exec "${CI_REDIS_NAME}" redis-cli ping | grep -q PONG
         fi
+        export DB_DRIVER=mysql
+        export DB_DSN="root:root@tcp(127.0.0.1:${MYSQL_HOST_PORT})/bbgo"
         LOG="/tmp/bbgo-gotest-dnum-${{ github.run_id }}.txt"
         set +e
         # dnum checks decimal semantics; race is already covered by the Test step above.
@@ -194,6 +273,24 @@ jobs:
           exit "$ec"
         fi
         sed -i -e '/_requestgen.go/d' coverage_dnum.txt
+
+    - name: Test PostgreSQL
+      run: |
+        export DB_DRIVER=postgres
+        export DB_DSN="postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_HOST_PORT}/${CI_PG_DB}?sslmode=disable"
+        LOG="/tmp/bbgo-gotest-pg-${{ github.run_id }}.txt"
+        set +e
+        go test -count=1 -race \
+          -coverprofile coverage_pg.txt -covermode atomic \
+          ./pkg/service/ ./pkg/strategy/xfundingv2/ \
+          -run 'PostgresCISchema|RoundInsert' 2>&1 | tee "$LOG"
+        ec=${PIPESTATUS[0]}
+        set -e
+        if [ "$ec" -ne 0 ]; then
+          echo "==== FAIL summary (${LOG}) ===="
+          grep -E '^--- FAIL:|^FAIL[[:space:]]' "$LOG" || true
+          exit "$ec"
+        fi
 
     - name: Revive Check
       uses: morphy2k/revive-action@v2.7.8
@@ -209,15 +306,33 @@ jobs:
     - name: Upload Coverage Report
       uses: codecov/codecov-action@v7
       with:
-        files: ./coverage.txt,./coverage_dnum.txt
+        files: ./coverage.txt,./coverage_dnum.txt,./coverage_pg.txt
       continue-on-error: true
 
     - name: Create dotenv file
       run: |
         echo "DB_DRIVER=mysql" >> .env.local
         echo "DB_DSN=root:root@tcp(127.0.0.1:${MYSQL_HOST_PORT})/bbgo" >> .env.local
+        echo "POSTGRES_DSN=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_HOST_PORT}/${CI_PG_DB}?sslmode=disable" >> .env.local
 
     - name: Cleanup CI containers
       if: always() && github.event_name != 'pull_request'
       run: |
         docker rm -f "${CI_MYSQL_NAME}" "${CI_REDIS_NAME}" >/dev/null 2>&1 || true
+        if [ -f "${HOME}/.bbgo-ci-postgres.env" ]; then
+          set -a
+          # shellcheck disable=SC1091
+          . "${HOME}/.bbgo-ci-postgres.env"
+          set +a
+          POSTGRES_HOST_PORT="${POSTGRES_PORT:-${POSTGRES_HOST_PORT:-5432}}"
+        fi
+        if command -v psql >/dev/null 2>&1; then
+          export PGPASSWORD="${POSTGRES_PASSWORD}"
+          psql -h "${POSTGRES_HOST:-127.0.0.1}" -p "${POSTGRES_HOST_PORT}" -U "${POSTGRES_USER:-bbgo}" -d postgres \
+            -c "DROP DATABASE IF EXISTS ${CI_PG_DB} WITH (FORCE);" || true
+        fi
+
+    - name: Cleanup CI PostgreSQL (ubuntu-latest)
+      if: always() && github.event_name == 'pull_request'
+      run: |
+        docker rm -f "${CI_PG_NAME}" >/dev/null 2>&1 || true

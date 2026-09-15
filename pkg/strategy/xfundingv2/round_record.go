@@ -218,6 +218,7 @@ func (s *RoundInsertService) insertClosedRound(
 		return fmt.Errorf("failed to build round insert query: %w", err)
 	}
 
+	roundSQL = tx.Rebind(roundSQL)
 	if _, err := tx.ExecContext(s.ctx, roundSQL, roundArgs...); err != nil {
 		return fmt.Errorf("failed to insert arbitrage round: %w", err)
 	}
@@ -365,6 +366,7 @@ func (s *RoundInsertService) insertActiveRound(
 		return fmt.Errorf("failed to build active round snapshot query: %w", err)
 	}
 
+	snapshotSQL = tx.Rebind(snapshotSQL)
 	if _, err := tx.ExecContext(s.ctx, snapshotSQL, snapshotArgs...); err != nil {
 		return fmt.Errorf("failed to upsert active round snapshot: %w", err)
 	}
@@ -404,6 +406,7 @@ func upsertFundingFees(
 		return fmt.Errorf("failed to build funding fee upsert query: %w", err)
 	}
 
+	feeSQL = tx.Rebind(feeSQL)
 	if _, err := tx.ExecContext(ctx, feeSQL, feeArgs...); err != nil {
 		return fmt.Errorf("failed to upsert round funding fees: %w", err)
 	}

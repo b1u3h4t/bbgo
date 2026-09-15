@@ -14,6 +14,7 @@ import (
 
 	// register the DB drivers that DB_DRIVER may select.
 	_ "github.com/go-sql-driver/mysql"
+	_ "github.com/lib/pq"
 	_ "github.com/mattn/go-sqlite3"
 
 	"github.com/c9s/bbgo/pkg/fixedpoint"
@@ -46,15 +47,19 @@ func newTestInsertDB(t *testing.T) *sqlx.DB {
 	return db
 }
 
+// q rebinds squirrel-style ? placeholders for the active driver (postgres uses $1).
+func q(db *sqlx.DB, query string) string {
+	return db.Rebind(query)
+}
+
 // cleanupRound removes the round record and its funding-fee records that were
-// created during a test, keyed by the round's own id. Both sqlite3 and mysql use
-// the `?` placeholder so the same statements work for either driver.
+// created during a test, keyed by the round's own id.
 func cleanupRound(t *testing.T, db *sqlx.DB, roundID string) {
 	t.Cleanup(func() {
-		if _, err := db.Exec("DELETE FROM xfundingv2_funding_fees WHERE round_id = ?", roundID); err != nil {
+		if _, err := db.Exec(q(db, "DELETE FROM xfundingv2_funding_fees WHERE round_id = ?"), roundID); err != nil {
 			t.Logf("cleanup: failed to delete funding fees for round %s: %v", roundID, err)
 		}
-		if _, err := db.Exec("DELETE FROM xfundingv2_closed_rounds WHERE id = ?", roundID); err != nil {
+		if _, err := db.Exec(q(db, "DELETE FROM xfundingv2_closed_rounds WHERE id = ?"), roundID); err != nil {
 			t.Logf("cleanup: failed to delete closed round %s: %v", roundID, err)
 		}
 	})
@@ -64,7 +69,7 @@ func cleanupRound(t *testing.T, db *sqlx.DB, roundID string) {
 // keyed by the round's own id.
 func cleanupSnapshot(t *testing.T, db *sqlx.DB, roundID string) {
 	t.Cleanup(func() {
-		if _, err := db.Exec("DELETE FROM xfundingv2_round_snapshots WHERE id = ?", roundID); err != nil {
+		if _, err := db.Exec(q(db, "DELETE FROM xfundingv2_round_snapshots WHERE id = ?"), roundID); err != nil {
 			t.Logf("cleanup: failed to delete round snapshot %s: %v", roundID, err)
 		}
 	})
@@ -118,17 +123,17 @@ func TestRoundInsertService_ClosedRound(t *testing.T) {
 		require.NoError(t, err)
 
 		var roundCount int
-		require.NoError(t, db.Get(&roundCount, "SELECT COUNT(*) FROM xfundingv2_closed_rounds WHERE id = ?", roundID))
+		require.NoError(t, db.Get(&roundCount, q(db, "SELECT COUNT(*) FROM xfundingv2_closed_rounds WHERE id = ?"), roundID))
 		assert.Equal(t, 1, roundCount)
 
 		var feeCount int
-		require.NoError(t, db.Get(&feeCount, "SELECT COUNT(*) FROM xfundingv2_funding_fees WHERE round_id = ?", roundID))
+		require.NoError(t, db.Get(&feeCount, q(db, "SELECT COUNT(*) FROM xfundingv2_funding_fees WHERE round_id = ?"), roundID))
 		assert.Equal(t, len(fees), feeCount)
 
 		// the round row should carry the values we inserted
 		var gotRoundID, gotSymbol, gotDirection string
 		require.NoError(t, db.QueryRow(
-			"SELECT id, spot_symbol, direction FROM xfundingv2_closed_rounds WHERE id = ?", roundID,
+			q(db, "SELECT id, spot_symbol, direction FROM xfundingv2_closed_rounds WHERE id = ?"), roundID,
 		).Scan(&gotRoundID, &gotSymbol, &gotDirection))
 		assert.Equal(t, roundID, gotRoundID)
 		assert.Equal(t, "BTCUSDT", gotSymbol)
@@ -159,17 +164,17 @@ func TestRoundInsertService_ClosedRound(t *testing.T) {
 		require.NoError(t, err)
 
 		var roundCount int
-		require.NoError(t, db.Get(&roundCount, "SELECT COUNT(*) FROM xfundingv2_closed_rounds WHERE id = ?", roundID))
+		require.NoError(t, db.Get(&roundCount, q(db, "SELECT COUNT(*) FROM xfundingv2_closed_rounds WHERE id = ?"), roundID))
 		assert.Equal(t, 1, roundCount)
 
 		var feeCount int
-		require.NoError(t, db.Get(&feeCount, "SELECT COUNT(*) FROM xfundingv2_funding_fees WHERE round_id = ?", roundID))
+		require.NoError(t, db.Get(&feeCount, q(db, "SELECT COUNT(*) FROM xfundingv2_funding_fees WHERE round_id = ?"), roundID))
 		assert.Equal(t, 0, feeCount)
 
 		// ready_time must be persisted as NULL when the round never became ready
 		var readyAt sql.NullTime
 		require.NoError(t, db.QueryRow(
-			"SELECT ready_at FROM xfundingv2_closed_rounds WHERE id = ?", roundID,
+			q(db, "SELECT ready_at FROM xfundingv2_closed_rounds WHERE id = ?"), roundID,
 		).Scan(&readyAt))
 		assert.False(t, readyAt.Valid, "ready_time should be NULL when unset")
 	})
@@ -228,11 +233,11 @@ func TestRoundInsertService_ActiveRoundSnapshot(t *testing.T) {
 	require.NoError(t, svc.insertActiveRound(record, fees))
 
 	var count int
-	require.NoError(t, db.Get(&count, "SELECT COUNT(*) FROM xfundingv2_round_snapshots WHERE id = ?", roundID))
+	require.NoError(t, db.Get(&count, q(db, "SELECT COUNT(*) FROM xfundingv2_round_snapshots WHERE id = ?"), roundID))
 	assert.Equal(t, 1, count)
 
 	var feeCount int
-	require.NoError(t, db.Get(&feeCount, "SELECT COUNT(*) FROM xfundingv2_funding_fees WHERE round_id = ?", roundID))
+	require.NoError(t, db.Get(&feeCount, q(db, "SELECT COUNT(*) FROM xfundingv2_funding_fees WHERE round_id = ?"), roundID))
 	assert.Equal(t, len(fees), feeCount, "each funding transaction should be a distinct row")
 
 	// a second snapshot for the same round should create a new record
@@ -242,16 +247,16 @@ func TestRoundInsertService_ActiveRoundSnapshot(t *testing.T) {
 	fees[0].Amount = fixedpoint.NewFromFloat(3.3)
 	require.NoError(t, svc.insertActiveRound(record, fees))
 
-	require.NoError(t, db.Get(&count, "SELECT COUNT(*) FROM xfundingv2_round_snapshots WHERE id = ?", roundID))
+	require.NoError(t, db.Get(&count, q(db, "SELECT COUNT(*) FROM xfundingv2_round_snapshots WHERE id = ?"), roundID))
 	assert.Equal(t, 2, count, "snapshotting the same round must create a new row")
 
-	require.NoError(t, db.Get(&feeCount, "SELECT COUNT(*) FROM xfundingv2_funding_fees WHERE round_id = ?", roundID))
+	require.NoError(t, db.Get(&feeCount, q(db, "SELECT COUNT(*) FROM xfundingv2_funding_fees WHERE round_id = ?"), roundID))
 	assert.Equal(t, len(fees), feeCount, "re-snapshotting must upsert funding fees, not duplicate them")
 
 	// the lastest row should carry the latest values
 	var gotTotalNetPnL, gotNetPnL fixedpoint.Value
 	require.NoError(t, db.QueryRow(
-		"SELECT total_net_pnl, net_pnl FROM xfundingv2_round_snapshots WHERE id = ? ORDER BY gid DESC LIMIT 1", roundID,
+		q(db, "SELECT total_net_pnl, net_pnl FROM xfundingv2_round_snapshots WHERE id = ? ORDER BY gid DESC LIMIT 1"), roundID,
 	).Scan(&gotTotalNetPnL, &gotNetPnL))
 	assert.Equal(t, 0, gotTotalNetPnL.Compare(fixedpoint.NewFromFloat(2000.75)),
 		"total_net_pnl should be updated, got: %s", gotTotalNetPnL)
@@ -261,7 +266,7 @@ func TestRoundInsertService_ActiveRoundSnapshot(t *testing.T) {
 	// the revised funding fee amount should be reflected in the upserted row
 	var gotFeeAmount fixedpoint.Value
 	require.NoError(t, db.QueryRow(
-		"SELECT amount FROM xfundingv2_funding_fees WHERE round_id = ? AND txn = ?", roundID, int64(2001),
+		q(db, "SELECT amount FROM xfundingv2_funding_fees WHERE round_id = ? AND txn = ?"), roundID, int64(2001),
 	).Scan(&gotFeeAmount))
 	assert.Equal(t, 0, gotFeeAmount.Compare(fixedpoint.NewFromFloat(3.3)),
 		"funding fee amount should be updated, got: %s", gotFeeAmount)
@@ -284,6 +289,6 @@ func TestRoundInsertService_ActiveRoundSnapshot(t *testing.T) {
 		ClosedAt:  time.Now().Add(-time.Hour),
 	}, fees))
 
-	require.NoError(t, db.Get(&feeCount, "SELECT COUNT(*) FROM xfundingv2_funding_fees WHERE round_id = ?", roundID))
+	require.NoError(t, db.Get(&feeCount, q(db, "SELECT COUNT(*) FROM xfundingv2_funding_fees WHERE round_id = ?"), roundID))
 	assert.Equal(t, len(fees), feeCount, "closing the round must upsert the same funding fees, not duplicate them")
 }

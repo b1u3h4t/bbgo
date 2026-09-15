@@ -46,6 +46,7 @@ or
 ```shell
 rockhopper compile --config rockhopper_mysql.yaml --output pkg/migrations/mysql
 rockhopper compile --config rockhopper_sqlite.yaml --output pkg/migrations/sqlite3
+rockhopper compile --config rockhopper_postgres.yaml --output pkg/migrations/postgres
 git add -v pkg/migrations && git commit -m "compile and update migration package" pkg/migrations || true
 ```
 
