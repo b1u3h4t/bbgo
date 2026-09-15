@@ -470,10 +470,17 @@ func queryTradesToUpdateTwinOrderBook(
 			// add 1 to avoid duplicate
 			fromTradeID = trade.ID + 1
 
+			if order.Type == types.OrderTypeMarket || order.Price.IsZero() {
+				if logger != nil {
+					logger("[Recover] skip market order #%d", order.OrderID)
+				}
+				continue
+			}
+
 			if err := twinOrderBook.AddOrder(*order, true); err != nil {
 				// Historical fills from a previous grid range must not abort recover.
 				if logger != nil {
-					logger("[Recover] skip queried order not on current pins: %s (%v)", order.String(), err)
+					logger("[Recover] skip order #%d not in twin orderbook pins: %v", order.OrderID, err)
 				}
 				continue
 			}

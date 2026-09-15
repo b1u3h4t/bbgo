@@ -103,8 +103,8 @@ func TestNotifyInteractiveCloseRound(t *testing.T) {
 	go messenger.Start(context.Background())
 
 	spotPrice, futuresPrice, _ := s.getLastPrices("BTCUSDT", "BTCUSDT")
-	c := newInteractiveCloseRound(round, s.slackEvtID, Number(50000.0), Number(50010.0))
-	bbgo.Notify("Active Rounds", round.NewNotification(spotPrice, futuresPrice), c)
+	c := newInteractiveCloseRound(round, s.slackEvtID, spotPrice, futuresPrice)
+	bbgo.Notify(c, round.NewNotification(spotPrice, futuresPrice))
 
 	// the Slack notifier posts asynchronously and socket mode delivers clicks on
 	// its own goroutine; keep the process alive so the handler can run.

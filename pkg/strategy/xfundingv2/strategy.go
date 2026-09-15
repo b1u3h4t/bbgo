@@ -1304,6 +1304,25 @@ func (s *Strategy) transitOpeningOrReadyRoundToClosing(round *ArbitrageRound, in
 			round.SetClosing(currentTime, s.TWAPWorkerConfig.ClosingDuration, futuresPrice)
 			return
 		}
+
+		if withinMinHoldingTime {
+			// if it's within the minimum holding time, add an interactive close round notification
+			msg := fmt.Sprintf(
+				"⚠️ Round funding rate flipped %s -> %s (%s)",
+				round.TriggeredFundingRate().String(), index.LastFundingRate.String(), round.SpotSymbol(),
+			)
+			if s.slackEvtID != "" {
+				spotPrice, futuresPrice, _ := s.getLastPrices(
+					round.SpotSymbol(),
+					round.FuturesSymbol(),
+				)
+				// send a interactive close round notification when funding rate flipped
+				closeRoundNotification := newInteractiveCloseRound(round, s.slackEvtID, spotPrice, futuresPrice).SetText(msg)
+				bbgo.Notify(closeRoundNotification)
+			} else {
+				bbgo.Notify(msg)
+			}
+		}
 	}
 
 	negFundingIncomeCnt := 0
@@ -1356,21 +1375,6 @@ func (s *Strategy) transitOpeningOrReadyRoundToClosing(round *ArbitrageRound, in
 	}
 
 	// nothing critical happened
-	var args []any = []any{
-		round.TriggeredFundingRate().String(), index.LastFundingRate.String(), round.SpotSymbol(),
-	}
-	// if it's within the minimum holding time, add an interactive close round notification
-	if withinMinHoldingTime && s.slackEvtID != "" {
-		spotPrice, futuresPrice, _ := s.getLastPrices(
-			round.SpotSymbol(),
-			round.FuturesSymbol(),
-		)
-		args = append(args, newInteractiveCloseRound(round, s.slackEvtID, spotPrice, futuresPrice))
-	}
-	bbgo.Notify("⚠️ Round funding rate flipped %s -> %s (%s)",
-		args...,
-	)
-
 	if s.allowLog(currentTime) {
 		s.logger.Infof(
 			"[transitOpeningOrReadyRound %s] round stays %s, current funding rate %s: %s",
@@ -1924,17 +1928,15 @@ func (s *Strategy) notifyStats() {
 		// additionally emit an interactive "Close Round" message for Ready rounds
 		// so an operator can close them on demand. The plain attachment above is
 		// left unchanged, so the round still appears in the "Active Rounds" batch.
-		if s.slackEvtID != "" && round.State() == RoundReady {
-			bbgo.Notify(
-				" ", // dummy text for fixing slack notification error
-				newInteractiveCloseRound(round, s.slackEvtID, spotPrice, futuresPrice),
-				round.NewNotification(spotPrice, futuresPrice),
-			)
-		} else {
-			bbgo.Notify(
-				" ", // dummy text for fixing slack notification error
-				round.NewNotification(spotPrice, futuresPrice),
-			)
+		if round.State() == RoundReady {
+			if s.slackEvtID != "" {
+				bbgo.Notify(
+					round.NewNotification(spotPrice, futuresPrice),
+					newInteractiveCloseRound(round, s.slackEvtID, spotPrice, futuresPrice),
+				)
+			} else {
+				bbgo.Notify(round.NewNotification(spotPrice, futuresPrice))
+			}
 		}
 
 		if s.roundInsertService != nil {
