@@ -126,6 +126,7 @@ func (s *ProfitService) Delete(ctx context.Context, options ProfitQueryOptions) 
 	if err != nil {
 		return err
 	}
+	sql = prepareSQL(s.DB, sql)
 	_, err = s.DB.ExecContext(ctx, sql, args...)
 	return err
 }

@@ -273,6 +273,7 @@ func (s *OrderService) DeleteByGID(ctx context.Context, gids []uint64) error {
 		if err != nil {
 			return err
 		}
+		sql = prepareSQL(s.DB, sql)
 		if _, err := s.DB.ExecContext(ctx, sql, args...); err != nil {
 			return err
 		}

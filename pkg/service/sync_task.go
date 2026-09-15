@@ -257,6 +257,7 @@ func detectLastestSelfTrade(ctx context.Context, db *sqlx.DB, sel SyncTask, reco
 		logrus.Warnf("can not build sql for self-trade records: %s", err)
 		return false
 	}
+	sql = prepareSQL(db, sql)
 	rows, err := db.QueryxContext(ctx, sql, args...)
 	if err != nil {
 		logrus.Warnf("can not query self-trade records: %s", err)

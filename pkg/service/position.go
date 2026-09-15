@@ -126,6 +126,7 @@ func (s *PositionService) Delete(ctx context.Context, options PositionQueryOptio
 	if err != nil {
 		return err
 	}
+	sql = prepareSQL(s.DB, sql)
 	_, err = s.DB.ExecContext(ctx, sql, args...)
 	return err
 }

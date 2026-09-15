@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jmoiron/sqlx"
 	"github.com/lib/pq"
 )
 
@@ -15,6 +16,12 @@ func sqlForDriver(driver, sql string) string {
 		return strings.ReplaceAll(sql, "`", `"`)
 	}
 	return sql
+}
+
+// prepareSQL adapts identifier quoting and bindvars (? → $1) for the active driver.
+// Squirrel emits ? placeholders; lib/pq requires $N.
+func prepareSQL(db *sqlx.DB, sql string) string {
+	return db.Rebind(sqlForDriver(db.DriverName(), sql))
 }
 
 // intervalColumn returns a safely quoted interval column name for the driver.

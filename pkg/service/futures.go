@@ -139,6 +139,7 @@ func (s *FuturesService) QueryPositionRisks(options QueryFuturesPositionRiskOpti
 	if err != nil {
 		return nil, err
 	}
+	sql = prepareSQL(s.DB, sql)
 	rows, err := s.DB.Queryx(sql, args...)
 	if err != nil {
 		return nil, err
@@ -209,6 +210,7 @@ func (s *FuturesService) QueryFundingFeeHistory(options QueryFundingFeeOptions) 
 	if err != nil {
 		return nil, err
 	}
+	sql = prepareSQL(s.DB, sql)
 	rows, err := s.DB.Queryx(sql, args...)
 	if err != nil {
 		return nil, err

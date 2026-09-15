@@ -282,8 +282,7 @@ func selectAndScanType(ctx context.Context, db *sqlx.DB, sel squirrel.SelectBuil
 		return nil, err
 	}
 
-	sql = sqlForDriver(db.DriverName(), sql)
-	sql = db.Rebind(sql)
+	sql = prepareSQL(db, sql)
 
 	logrus.Debugf("selectAndScanType: %T <- %s", tpe, sql)
 	logrus.Debugf("queryArgs: %v", args)

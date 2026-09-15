@@ -371,6 +371,7 @@ func (s *TradeService) Query(options QueryTradesOptions) ([]types.Trade, error) 
 		return nil, err
 	}
 
+	sql = prepareSQL(s.DB, sql)
 	log.Debug(sql)
 	log.Debug(args)
 
@@ -510,6 +511,7 @@ func (s *TradeService) DeleteByGID(ctx context.Context, gids []int64) error {
 		if err != nil {
 			return err
 		}
+		sql = prepareSQL(s.DB, sql)
 		if _, err := s.DB.ExecContext(ctx, sql, args...); err != nil {
 			return err
 		}
