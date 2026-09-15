@@ -159,6 +159,8 @@ jobs:
       if: github.event_name != 'pull_request'
       run: |
         set -euo pipefail
+        # Actions runners sometimes ship a narrow PATH; keep system bins first.
+        export PATH="/usr/local/bin:/usr/bin:/bin:${PATH:-}"
         if [ -f "${HOME}/.bbgo-ci-postgres.env" ]; then
           set -a
           # shellcheck disable=SC1091
@@ -166,19 +168,56 @@ jobs:
           set +a
         fi
         POSTGRES_USER="${POSTGRES_USER:-bbgo}"
-        POSTGRES_PASSWORD="${POSTGRES_PASSWORD:?postgres password missing}"
+        POSTGRES_PASSWORD="${POSTGRES_PASSWORD:?postgres password missing (set workflow env or ${HOME}/.bbgo-ci-postgres.env)}"
         POSTGRES_HOST="${POSTGRES_HOST:-127.0.0.1}"
         POSTGRES_HOST_PORT="${POSTGRES_PORT:-${POSTGRES_HOST_PORT:-5432}}"
         export PGPASSWORD="${POSTGRES_PASSWORD}"
-        if ! command -v psql >/dev/null 2>&1; then
-          echo "psql not found; install postgresql-client on the runner"
-          exit 1
+
+        PSQL=""
+        for c in psql /usr/bin/psql /bin/psql; do
+          if command -v "$c" >/dev/null 2>&1 || [ -x "$c" ]; then
+            PSQL="$(command -v "$c" 2>/dev/null || true)"
+            [ -n "$PSQL" ] || PSQL="$c"
+            break
+          fi
+        done
+
+        if [ -z "$PSQL" ] || ! "$PSQL" --version >/dev/null 2>&1; then
+          echo "native psql missing (PATH=${PATH}); falling back to Docker postgres:17 on :15432"
+          docker rm -f "${CI_PG_NAME}" >/dev/null 2>&1 || true
+          docker ps --filter name=bbgo-ci-pg- --format '{{.ID}}' | xargs -r docker rm -f || true
+          POSTGRES_HOST_PORT=15432
+          docker run -d --name "${CI_PG_NAME}" \
+            -e POSTGRES_USER="${POSTGRES_USER}" \
+            -e POSTGRES_PASSWORD="${POSTGRES_PASSWORD}" \
+            -e POSTGRES_DB=bbgo \
+            -p 127.0.0.1:${POSTGRES_HOST_PORT}:5432 \
+            postgres:17
+          ready=0
+          for i in $(seq 1 60); do
+            if docker exec "${CI_PG_NAME}" pg_isready -U "${POSTGRES_USER}" >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" != "1" ]; then
+            echo "PostgreSQL docker did not become ready"
+            docker logs "${CI_PG_NAME}" || true
+            exit 1
+          fi
+          docker exec "${CI_PG_NAME}" psql -U "${POSTGRES_USER}" -d postgres \
+            -c "CREATE DATABASE ${CI_PG_DB} OWNER ${POSTGRES_USER};"
+          echo "CI_PG_DOCKER=1" >> "$GITHUB_ENV"
+        else
+          echo "using native psql: $PSQL ($("$PSQL" --version | head -1))"
+          "$PSQL" -h "${POSTGRES_HOST}" -p "${POSTGRES_HOST_PORT}" -U "${POSTGRES_USER}" -d postgres -c "SELECT 1" >/dev/null
+          "$PSQL" -h "${POSTGRES_HOST}" -p "${POSTGRES_HOST_PORT}" -U "${POSTGRES_USER}" -d postgres \
+            -c "DROP DATABASE IF EXISTS ${CI_PG_DB} WITH (FORCE);"
+          "$PSQL" -h "${POSTGRES_HOST}" -p "${POSTGRES_HOST_PORT}" -U "${POSTGRES_USER}" -d postgres \
+            -c "CREATE DATABASE ${CI_PG_DB} OWNER ${POSTGRES_USER};"
+          echo "CI_PG_DOCKER=0" >> "$GITHUB_ENV"
         fi
-        psql -h "${POSTGRES_HOST}" -p "${POSTGRES_HOST_PORT}" -U "${POSTGRES_USER}" -d postgres -c "SELECT 1" >/dev/null
-        psql -h "${POSTGRES_HOST}" -p "${POSTGRES_HOST_PORT}" -U "${POSTGRES_USER}" -d postgres \
-          -c "DROP DATABASE IF EXISTS ${CI_PG_DB} WITH (FORCE);"
-        psql -h "${POSTGRES_HOST}" -p "${POSTGRES_HOST_PORT}" -U "${POSTGRES_USER}" -d postgres \
-          -c "CREATE DATABASE ${CI_PG_DB} OWNER ${POSTGRES_USER};"
         {
           echo "POSTGRES_USER=${POSTGRES_USER}"
           echo "POSTGRES_PASSWORD=${POSTGRES_PASSWORD}"
@@ -318,18 +357,25 @@ jobs:
     - name: Cleanup CI containers
       if: always() && github.event_name != 'pull_request'
       run: |
+        export PATH="/usr/local/bin:/usr/bin:/bin:${PATH:-}"
         docker rm -f "${CI_MYSQL_NAME}" "${CI_REDIS_NAME}" >/dev/null 2>&1 || true
-        if [ -f "${HOME}/.bbgo-ci-postgres.env" ]; then
-          set -a
-          # shellcheck disable=SC1091
-          . "${HOME}/.bbgo-ci-postgres.env"
-          set +a
-          POSTGRES_HOST_PORT="${POSTGRES_PORT:-${POSTGRES_HOST_PORT:-5432}}"
-        fi
-        if command -v psql >/dev/null 2>&1; then
-          export PGPASSWORD="${POSTGRES_PASSWORD}"
-          psql -h "${POSTGRES_HOST:-127.0.0.1}" -p "${POSTGRES_HOST_PORT}" -U "${POSTGRES_USER:-bbgo}" -d postgres \
-            -c "DROP DATABASE IF EXISTS ${CI_PG_DB} WITH (FORCE);" || true
+        if [ "${CI_PG_DOCKER:-0}" = "1" ]; then
+          docker rm -f "${CI_PG_NAME}" >/dev/null 2>&1 || true
+        else
+          if [ -f "${HOME}/.bbgo-ci-postgres.env" ]; then
+            set -a
+            # shellcheck disable=SC1091
+            . "${HOME}/.bbgo-ci-postgres.env"
+            set +a
+            POSTGRES_HOST_PORT="${POSTGRES_PORT:-${POSTGRES_HOST_PORT:-5432}}"
+          fi
+          PSQL="$(command -v psql 2>/dev/null || true)"
+          [ -n "$PSQL" ] || PSQL=/usr/bin/psql
+          if [ -x "$PSQL" ]; then
+            export PGPASSWORD="${POSTGRES_PASSWORD}"
+            "$PSQL" -h "${POSTGRES_HOST:-127.0.0.1}" -p "${POSTGRES_HOST_PORT}" -U "${POSTGRES_USER:-bbgo}" -d postgres \
+              -c "DROP DATABASE IF EXISTS ${CI_PG_DB} WITH (FORCE);" || true
+          fi
         fi
 
     - name: Cleanup CI PostgreSQL (ubuntu-latest)
