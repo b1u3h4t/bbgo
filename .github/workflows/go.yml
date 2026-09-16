@@ -140,11 +140,15 @@ jobs:
           -e POSTGRES_DB=bbgo \
           -p 127.0.0.1:${POSTGRES_HOST_PORT}:5432 \
           postgres:17
+        # Avoid the initdb temporary-server race (pg_isready can succeed then restart).
         ready=0
         for i in $(seq 1 60); do
-          if docker exec "${CI_PG_NAME}" pg_isready -U "${POSTGRES_USER}" >/dev/null 2>&1; then
-            ready=1
-            break
+          if docker exec "${CI_PG_NAME}" psql -U "${POSTGRES_USER}" -d postgres -c "SELECT 1" >/dev/null 2>&1; then
+            sleep 3
+            if docker exec "${CI_PG_NAME}" psql -U "${POSTGRES_USER}" -d postgres -c "SELECT 1" >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
           fi
           sleep 1
         done
@@ -153,7 +157,10 @@ jobs:
           docker logs "${CI_PG_NAME}" || true
           exit 1
         fi
-        docker exec "${CI_PG_NAME}" psql -U "${POSTGRES_USER}" -d postgres -c "CREATE DATABASE ${CI_PG_DB} OWNER ${POSTGRES_USER};"
+        docker exec "${CI_PG_NAME}" psql -U "${POSTGRES_USER}" -d postgres \
+          -c "DROP DATABASE IF EXISTS ${CI_PG_DB} WITH (FORCE);"
+        docker exec "${CI_PG_NAME}" psql -U "${POSTGRES_USER}" -d postgres \
+          -c "CREATE DATABASE ${CI_PG_DB} OWNER ${POSTGRES_USER};"
 
     - name: Set up PostgreSQL (self-hosted native)
       if: github.event_name != 'pull_request'
@@ -184,6 +191,8 @@ jobs:
 
         if [ -z "$PSQL" ] || ! "$PSQL" --version >/dev/null 2>&1; then
           echo "native psql missing (PATH=${PATH}); falling back to Docker postgres:17 on :15432"
+          # Mark docker mode early so always() cleanup removes this container even if CREATE fails.
+          echo "CI_PG_DOCKER=1" >> "$GITHUB_ENV"
           docker rm -f "${CI_PG_NAME}" >/dev/null 2>&1 || true
           docker ps --filter name=bbgo-ci-pg- --format '{{.ID}}' | xargs -r docker rm -f || true
           POSTGRES_HOST_PORT=15432
@@ -193,11 +202,17 @@ jobs:
             -e POSTGRES_DB=bbgo \
             -p 127.0.0.1:${POSTGRES_HOST_PORT}:5432 \
             postgres:17
+          # pg_isready alone is not enough: the official image briefly accepts
+          # connections during initdb, then restarts. Require a real query twice
+          # (same pattern as the MySQL self-hosted setup) to pass the restart gap.
           ready=0
           for i in $(seq 1 60); do
-            if docker exec "${CI_PG_NAME}" pg_isready -U "${POSTGRES_USER}" >/dev/null 2>&1; then
-              ready=1
-              break
+            if docker exec "${CI_PG_NAME}" psql -U "${POSTGRES_USER}" -d postgres -c "SELECT 1" >/dev/null 2>&1; then
+              sleep 3
+              if docker exec "${CI_PG_NAME}" psql -U "${POSTGRES_USER}" -d postgres -c "SELECT 1" >/dev/null 2>&1; then
+                ready=1
+                break
+              fi
             fi
             sleep 1
           done
@@ -207,16 +222,17 @@ jobs:
             exit 1
           fi
           docker exec "${CI_PG_NAME}" psql -U "${POSTGRES_USER}" -d postgres \
+            -c "DROP DATABASE IF EXISTS ${CI_PG_DB} WITH (FORCE);"
+          docker exec "${CI_PG_NAME}" psql -U "${POSTGRES_USER}" -d postgres \
             -c "CREATE DATABASE ${CI_PG_DB} OWNER ${POSTGRES_USER};"
-          echo "CI_PG_DOCKER=1" >> "$GITHUB_ENV"
         else
           echo "using native psql: $PSQL ($("$PSQL" --version | head -1))"
+          echo "CI_PG_DOCKER=0" >> "$GITHUB_ENV"
           "$PSQL" -h "${POSTGRES_HOST}" -p "${POSTGRES_HOST_PORT}" -U "${POSTGRES_USER}" -d postgres -c "SELECT 1" >/dev/null
           "$PSQL" -h "${POSTGRES_HOST}" -p "${POSTGRES_HOST_PORT}" -U "${POSTGRES_USER}" -d postgres \
             -c "DROP DATABASE IF EXISTS ${CI_PG_DB} WITH (FORCE);"
           "$PSQL" -h "${POSTGRES_HOST}" -p "${POSTGRES_HOST_PORT}" -U "${POSTGRES_USER}" -d postgres \
             -c "CREATE DATABASE ${CI_PG_DB} OWNER ${POSTGRES_USER};"
-          echo "CI_PG_DOCKER=0" >> "$GITHUB_ENV"
         fi
         {
           echo "POSTGRES_USER=${POSTGRES_USER}"
@@ -358,10 +374,11 @@ jobs:
       if: always() && github.event_name != 'pull_request'
       run: |
         export PATH="/usr/local/bin:/usr/bin:/bin:${PATH:-}"
-        docker rm -f "${CI_MYSQL_NAME}" "${CI_REDIS_NAME}" >/dev/null 2>&1 || true
-        if [ "${CI_PG_DOCKER:-0}" = "1" ]; then
-          docker rm -f "${CI_PG_NAME}" >/dev/null 2>&1 || true
-        else
+        # Always remove per-run PG docker containers (even when CI_PG_DOCKER was never
+        # exported because setup failed mid-way after docker run).
+        docker rm -f "${CI_MYSQL_NAME}" "${CI_REDIS_NAME}" "${CI_PG_NAME}" >/dev/null 2>&1 || true
+        docker ps --filter name=bbgo-ci-pg- --format '{{.ID}}' | xargs -r docker rm -f || true
+        if [ "${CI_PG_DOCKER:-0}" != "1" ]; then
           if [ -f "${HOME}/.bbgo-ci-postgres.env" ]; then
             set -a
             # shellcheck disable=SC1091
