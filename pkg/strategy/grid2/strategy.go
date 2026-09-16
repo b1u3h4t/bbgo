@@ -1057,15 +1057,6 @@ func (s *Strategy) checkRequiredInvestmentByQuantity(
 					nextLowerPrice := fixedpoint.Value(nextLowerPin)
 					requiredQuote = requiredQuote.Add(quantity.Mul(nextLowerPrice))
 				}
-
-				// leverage the quote
-				if s.Leverage.Sign() > 0 {
-					leverage := s.Leverage
-					if s.Leverage.Compare(fixedpoint.NewFromFloat(10)) > 0 {
-						leverage = fixedpoint.NewFromFloat(10)
-					}
-					requiredQuote = requiredQuote.Div(leverage)
-				}
 			}
 		} else {
 			// for orders that buy
@@ -1073,16 +1064,19 @@ func (s *Strategy) checkRequiredInvestmentByQuantity(
 				continue
 			}
 			requiredQuote = requiredQuote.Add(quantity.Mul(price))
-
-			// leverage the quote
-			if s.Leverage.Sign() > 0 {
-				leverage := s.Leverage
-				if s.Leverage.Compare(fixedpoint.NewFromFloat(10)) > 0 {
-					leverage = fixedpoint.NewFromFloat(10)
-				}
-				requiredQuote = requiredQuote.Div(leverage)
-			}
 		}
+	}
+
+	// apply leverage once on the accumulated quote notional.
+	// NOTE: previously the division was done inside the loop, which divided the
+	// running accumulator by leverage on every order and under-reported the
+	// required margin (e.g. 3 buy orders with leverage 3 => divided 3 times).
+	if s.Leverage.Sign() > 0 {
+		leverage := s.Leverage
+		if leverage.Compare(fixedpoint.NewFromFloat(10)) > 0 {
+			leverage = fixedpoint.NewFromFloat(10)
+		}
+		requiredQuote = requiredQuote.Div(leverage)
 	}
 
 	if requiredBase.Compare(baseBalance) > 0 && requiredQuote.Compare(quoteBalance) > 0 {
@@ -1141,15 +1135,6 @@ func (s *Strategy) checkRequiredInvestmentByAmount(
 					nextLowerPrice := fixedpoint.Value(nextLowerPin)
 					requiredQuote = requiredQuote.Add(quantity.Mul(nextLowerPrice))
 				}
-
-				// leverage the quote
-				if s.Leverage.Sign() > 0 {
-					leverage := s.Leverage
-					if s.Leverage.Compare(fixedpoint.NewFromFloat(10)) > 0 {
-						leverage = fixedpoint.NewFromFloat(10)
-					}
-					requiredQuote = requiredQuote.Div(leverage)
-				}
 			}
 		} else {
 			// for orders that buy
@@ -1158,16 +1143,16 @@ func (s *Strategy) checkRequiredInvestmentByAmount(
 			}
 
 			requiredQuote = requiredQuote.Add(amount)
-
-			// leverage the quote
-			if s.Leverage.Sign() > 0 {
-				leverage := s.Leverage
-				if s.Leverage.Compare(fixedpoint.NewFromFloat(10)) > 0 {
-					leverage = fixedpoint.NewFromFloat(10)
-				}
-				requiredQuote = requiredQuote.Div(leverage)
-			}
 		}
+	}
+
+	// apply leverage once on the accumulated quote notional (see checkRequiredInvestmentByQuantity).
+	if s.Leverage.Sign() > 0 {
+		leverage := s.Leverage
+		if leverage.Compare(fixedpoint.NewFromFloat(10)) > 0 {
+			leverage = fixedpoint.NewFromFloat(10)
+		}
+		requiredQuote = requiredQuote.Div(leverage)
 	}
 
 	if requiredBase.Compare(baseBalance) > 0 && requiredQuote.Compare(quoteBalance) > 0 {

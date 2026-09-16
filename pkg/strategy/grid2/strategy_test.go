@@ -75,6 +75,37 @@ func TestStrategy_checkRequiredInvestmentByQuantity(t *testing.T) {
 		assert.EqualError(t, err, "quote balance (5000.000000 USDT) is not enough, required = quote 6000.000000")
 		assert.Equal(t, number(6000.0), requiredQuote)
 	})
+
+	// Regression: leverage must be applied ONCE on the total quote notional, not
+	// per-order inside the loop (which divided the running accumulator repeatedly
+	// and under-reported the required margin).
+	// lastPrice == 110 => pins 80/90/100 are below, but the twin book skips the pin
+	// adjacent to the sell side (i+1 == si), so only 90 and 80 accumulate (170).
+	// With leverage 3 => 170/3 = 56.6667 (NOT the old per-order 36.6667).
+	t.Run("leverage applied once on total notional", func(t *testing.T) {
+		s := &Strategy{
+			logger:   logrus.NewEntry(logrus.New()),
+			Leverage: number(3.0),
+			Market: types.Market{
+				BaseCurrency:  "BTC",
+				QuoteCurrency: "USDT",
+			},
+		}
+		_, requiredQuote, err := s.checkRequiredInvestmentByQuantity(
+			number(1_000_000.0), number(1_000_000.0), number(1.0), number(110.0), []grid2types.Pin{
+				grid2types.Pin(number(80.0)),
+				grid2types.Pin(number(90.0)),
+				grid2types.Pin(number(100.0)),
+				grid2types.Pin(number(110.0)),
+				grid2types.Pin(number(120.0)),
+				grid2types.Pin(number(130.0)),
+			})
+		assert.NoError(t, err)
+		expected := number(170.0).Div(number(3.0))
+		assert.Equal(t, expected, requiredQuote, "requiredQuote must be total notional / leverage = 170/3 = 56.6667 (old bug gave 36.6667)")
+		// also assert it is strictly greater than the old buggy value
+		assert.True(t, requiredQuote.Compare(number(36.6667)) > 0, "must not be the old per-order-divided value 36.6667")
+	})
 }
 
 type PriceSideAssert struct {
@@ -487,6 +518,36 @@ func TestStrategy_checkRequiredInvestmentByAmount(t *testing.T) {
 			})
 		assert.EqualError(t, err, "quote balance (3000.000000 USDT) is not enough, required = quote 4999.999890")
 		assert.InDelta(t, 4999.999890, requiredQuote.Float64(), number(0.001).Float64())
+	})
+
+	// Regression: leverage applied once on the total quote notional, not per-order.
+	// With amount=1000 and 5 buy orders, requiredQuote accumulates 5*1000=5000,
+	// then /3 once = 1666.6667 (old bug divided 5 times => 5000/3^5 = 20.58).
+	t.Run("leverage applied once on total notional", func(t *testing.T) {
+		s := &Strategy{
+			logger:   logrus.NewEntry(logrus.New()),
+			Leverage: number(3.0),
+			Market: types.Market{
+				BaseCurrency:  "BTC",
+				QuoteCurrency: "USDT",
+			},
+		}
+		_, requiredQuote, err := s.checkRequiredInvestmentByAmount(
+			number(0.0), number(1_000_000.0),
+			number(1000.0),
+			number(13_500.0), []grid2types.Pin{
+				grid2types.Pin(number(10_000.0)),
+				grid2types.Pin(number(11_000.0)),
+				grid2types.Pin(number(12_000.0)),
+				grid2types.Pin(number(13_000.0)),
+				grid2types.Pin(number(14_000.0)),
+				grid2types.Pin(number(15_000.0)),
+			})
+		assert.NoError(t, err)
+		// requiredQuote must be total notional / leverage = 5000/3 = 1666.6667
+		// (old bug divided per-order: 5000/3^5 = ~20.58).
+		assert.InDelta(t, 1666.6667, requiredQuote.Float64(), 0.001)
+		assert.True(t, requiredQuote.Compare(number(20.58)) > 0, "must not be the old per-order-divided value ~20.58")
 	})
 }
 
