@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -235,7 +236,12 @@ type Strategy struct {
 	// reverse twin orders. Profit/Slack must be skipped: those fills were already
 	// counted when they happened live (restart would otherwise inflate ArbitrageCount
 	// and TotalQuoteProfit).
-	recovering bool
+	recovering atomic.Bool
+
+	// gridStopped is set by CloseGrid (take-profit / stop-loss / shutdown) so
+	// recoverPeriodically does not rebuild the grid from historical fills and
+	// re-open positions after an intentional close.
+	gridStopped atomic.Bool
 
 	// orderExchangeRealized accumulates Binance userTrades.realizedPnl (or WS "rp")
 	// per order ID. Preferred for USDT-M Slack "已实现" because strategy Position
@@ -245,6 +251,11 @@ type Strategy struct {
 	// orderPositionProfit accumulates Position/avg-cost realized PnL per order ID
 	// (from TradeCollector OnProfit). Fallback when exchange realized PnL is missing.
 	orderPositionProfit map[uint64]fixedpoint.Value
+
+	// profitMu protects orderExchangeRealized / orderPositionProfit.
+	// Must not share s.mu: recover holds s.mu while EmitFilled synchronously
+	// re-enters processFilledOrder → takeOrder* (see recover.go).
+	profitMu sync.Mutex
 
 	// mu is used for locking the grid object field, avoid double grid opening
 	mu sync.Mutex
@@ -679,8 +690,8 @@ func (s *Strategy) aggregateOrderQuoteAmountAndFee(o types.Order) (fixedpoint.Va
 }
 
 func (s *Strategy) addOrderExchangeRealized(orderID uint64, pnl fixedpoint.Value) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.profitMu.Lock()
+	defer s.profitMu.Unlock()
 	if s.orderExchangeRealized == nil {
 		s.orderExchangeRealized = make(map[uint64]fixedpoint.Value)
 	}
@@ -688,8 +699,8 @@ func (s *Strategy) addOrderExchangeRealized(orderID uint64, pnl fixedpoint.Value
 }
 
 func (s *Strategy) peekOrderExchangeRealized(orderID uint64) (fixedpoint.Value, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.profitMu.Lock()
+	defer s.profitMu.Unlock()
 	if s.orderExchangeRealized == nil {
 		return fixedpoint.Zero, false
 	}
@@ -698,8 +709,8 @@ func (s *Strategy) peekOrderExchangeRealized(orderID uint64) (fixedpoint.Value, 
 }
 
 func (s *Strategy) takeOrderExchangeRealized(orderID uint64) (fixedpoint.Value, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.profitMu.Lock()
+	defer s.profitMu.Unlock()
 	if s.orderExchangeRealized == nil {
 		return fixedpoint.Zero, false
 	}
@@ -711,8 +722,8 @@ func (s *Strategy) takeOrderExchangeRealized(orderID uint64) (fixedpoint.Value, 
 }
 
 func (s *Strategy) addOrderPositionProfit(orderID uint64, profit fixedpoint.Value) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.profitMu.Lock()
+	defer s.profitMu.Unlock()
 	if s.orderPositionProfit == nil {
 		s.orderPositionProfit = make(map[uint64]fixedpoint.Value)
 	}
@@ -720,8 +731,8 @@ func (s *Strategy) addOrderPositionProfit(orderID uint64, profit fixedpoint.Valu
 }
 
 func (s *Strategy) peekOrderPositionProfit(orderID uint64) (fixedpoint.Value, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.profitMu.Lock()
+	defer s.profitMu.Unlock()
 	if s.orderPositionProfit == nil {
 		return fixedpoint.Zero, false
 	}
@@ -730,8 +741,8 @@ func (s *Strategy) peekOrderPositionProfit(orderID uint64) (fixedpoint.Value, bo
 }
 
 func (s *Strategy) takeOrderPositionProfit(orderID uint64) (fixedpoint.Value, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.profitMu.Lock()
+	defer s.profitMu.Unlock()
 	if s.orderPositionProfit == nil {
 		return fixedpoint.Zero, false
 	}
@@ -975,7 +986,7 @@ func (s *Strategy) processFilledOrder(o types.Order) {
 
 	// we calculate profit only when the order is placed successfully
 	if profit != nil {
-		if s.recovering {
+		if s.recovering.Load() {
 			s.logger.Infof("skip grid profit during recover (already counted live): %+v", profit)
 			s.consumeOrderProfitAccumulators(o.OrderID)
 			return
@@ -1495,6 +1506,10 @@ func (s *Strategy) CloseGrid(ctx context.Context) error {
 	err := s.cancelAll(ctx)
 	s.unlockWriteOrders()
 
+	// Mark stopped before clearing grid so periodic recover cannot rebuild from
+	// historical fills and re-open positions after TP/SL/shutdown.
+	s.gridStopped.Store(true)
+
 	// free the grid object
 	s.setGrid(nil)
 	s.updateGridNumOfOrdersMetricsWithLock()
@@ -1522,6 +1537,9 @@ func (s *Strategy) openGrid(ctx context.Context, session *bbgo.ExchangeSession) 
 	if s.grid != nil {
 		return nil
 	}
+
+	// Intentional (re)open clears the CloseGrid stop latch so recover can run again.
+	s.gridStopped.Store(false)
 
 	lastPrice, err := s.getLastTradePrice(ctx, session)
 	if err != nil {

@@ -65,12 +65,20 @@ func (s *Strategy) recoverPeriodically(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-recoverTicker.C:
+			if s.gridStopped.Load() {
+				s.logger.Info("[Recover] grid was closed, stop recover loop")
+				return
+			}
 			s.recoverC <- struct{}{}
 		case <-syncMarketTicker.C:
 			if err := s.ExchangeSession.UpdateMarkets(ctx); err != nil {
 				s.logger.WithError(err).Warn("failed to update markets")
 			}
 		case <-s.recoverC:
+			if s.gridStopped.Load() {
+				s.logger.Info("[Recover] grid was closed, stop recover loop")
+				return
+			}
 			// if we already recovered in 10 min, we should skip to avoid recovering too frequently
 			if !time.Now().After(lastRecoverTime.Add(10 * time.Minute)) {
 				continue
@@ -117,6 +125,11 @@ func (s *Strategy) recoverPeriodically(ctx context.Context) {
 
 func (s *Strategy) recover(ctx context.Context) error {
 	s.logger.Info("[Recover] try to recover")
+	if s.gridStopped.Load() {
+		s.logger.Info("[Recover] grid was closed, skip recover")
+		return nil
+	}
+
 	historyService, implemented := s.session.Exchange.(types.ExchangeTradeHistoryService)
 	// if the exchange doesn't support ExchangeTradeHistoryService, do not run recover
 	if !implemented {
@@ -155,23 +168,42 @@ func (s *Strategy) recover(ctx context.Context) error {
 
 	s.logger.Info("[Recover] start recovering")
 
+	if s.gridStopped.Load() {
+		s.logger.Info("[Recover] grid was closed, skip recover")
+		return nil
+	}
+
 	if s.getGrid() == nil {
+		// Intentional CloseGrid sets gridStopped; do not rebuild from history.
+		if s.gridStopped.Load() {
+			s.logger.Info("[Recover] grid was closed, skip rebuilding grid")
+			return nil
+		}
 		s.setGrid(s.newGrid())
 	}
 
 	pins := s.getGrid().Pins
+	if pins == nil {
+		return fmt.Errorf("[Recover] grid pins are nil")
+	}
 
 	syncBefore := time.Now().Add(syncWindow)
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	if s.gridStopped.Load() {
+		s.mu.Unlock()
+		s.logger.Info("[Recover] grid was closed, skip recover")
+		return nil
+	}
 
 	activeOrdersInTwinOrderBook, err := buildTwinOrderBook(pins, activeOrders)
 	if err != nil {
+		s.mu.Unlock()
 		return errors.Wrapf(err, "[Recover] failed to build twin orderbook from active orders")
 	}
 	openOrdersInTwinOrderBook, err := buildTwinOrderBook(pins, openOrders)
 	if err != nil {
+		s.mu.Unlock()
 		return errors.Wrapf(err, "[Recover] failed to build twin orderbook from open orders")
 	}
 
@@ -181,12 +213,14 @@ func (s *Strategy) recover(ctx context.Context) error {
 	// remove index 0, because twin orderbook's price is from the second one
 	pins = pins[1:]
 	var noTwinOrderPins []fixedpoint.Value
+	var case3Orders []types.Order
 
 	for _, pin := range pins {
 		v := fixedpoint.Value(pin)
 		activeOrder := activeOrdersInTwinOrderBook.GetTwinOrder(v)
 		openOrder := openOrdersInTwinOrderBook.GetTwinOrder(v)
 		if activeOrder == nil || openOrder == nil {
+			s.mu.Unlock()
 			return fmt.Errorf("this pin (%s) is invalid. Please check it.", v.String())
 		}
 
@@ -221,24 +255,18 @@ func (s *Strategy) recover(ctx context.Context) error {
 			continue
 		}
 
-		// case 3
+		// case 3 — defer sync/EmitFilled until after s.mu is released (Update→EmitFilled
+		// synchronously re-enters processFilledOrder which must not contend on s.mu).
 		if openOrderID == 0 {
 			order := activeOrder.GetOrder()
-			s.logger.Infof("[Recover] found active order #%d is not in the open orders, updating...", order.OrderID)
-			isActiveOrderBookUpdated, err := syncActiveOrder(ctx, activeOrderBook, s.orderQueryService, order.OrderID, syncBefore)
-			if err != nil {
-				s.logger.WithError(err).Errorf("[Recover] unable to query order #%d", order.OrderID)
-				continue
-			}
-
-			if !isActiveOrderBookUpdated {
-				s.logger.Infof("[Recover] active order #%d is updated in 3 min, skip updating...", order.OrderID)
-			}
+			s.logger.Infof("[Recover] found active order #%d is not in the open orders, will sync after unlock...", order.OrderID)
+			case3Orders = append(case3Orders, order)
 			continue
 		}
 
 		// case 4
 		if activeOrderID != openOrderID {
+			s.mu.Unlock()
 			return fmt.Errorf("[Recover] there are two different orders in the same pin, can not recover")
 		}
 
@@ -249,10 +277,20 @@ func (s *Strategy) recover(ctx context.Context) error {
 	s.logger.Infof("[Recover] twin orderbook after adding open orders\n%s", activeOrdersInTwinOrderBook.String())
 	s.logger.Infof("[Recover] pins without twin orders: %+v", noTwinOrderPins)
 
+	var pendingEmit []types.Order
+
 	if len(noTwinOrderPins) != 0 {
+		// Release s.mu around REST history queries; twin book is local.
+		s.mu.Unlock()
 		if err := s.recoverEmptyGridOnTwinOrderBook(ctx, activeOrdersInTwinOrderBook, historyService, s.orderQueryService); err != nil {
 			s.logger.WithError(err).Error("[Recover] failed to recover empty grid")
 			return err
+		}
+		s.mu.Lock()
+		if s.gridStopped.Load() {
+			s.mu.Unlock()
+			s.logger.Info("[Recover] grid was closed during empty-grid recover, abort")
+			return nil
 		}
 
 		s.logger.Infof("[Recover] twin orderbook after recovering no twin order on grid\n%s", activeOrdersInTwinOrderBook.String())
@@ -262,42 +300,76 @@ func (s *Strategy) recover(ctx context.Context) error {
 			// rebuild those twins. Soft-skip so periodic recover does not spam Slack —
 			// operational fix is to reband around the market.
 			if s.session != nil && !s.LowerPrice.IsZero() && !s.UpperPrice.IsZero() {
-				if lastPrice, err := s.getLastTradePrice(ctx, s.session); err == nil && !lastPrice.IsZero() {
+				s.mu.Unlock()
+				lastPrice, err := s.getLastTradePrice(ctx, s.session)
+				s.mu.Lock()
+				if err == nil && !lastPrice.IsZero() {
 					if lastPrice.Compare(s.LowerPrice) < 0 || lastPrice.Compare(s.UpperPrice) > 0 {
 						s.logger.Warnf(
 							"[Recover] price %s outside band [%s, %s] with empty twin pins %+v; skip hard fail (reband needed)",
 							lastPrice, s.LowerPrice, s.UpperPrice, noTwinOrderPins,
 						)
+						s.mu.Unlock()
 						return nil
 					}
 				}
 			}
+			s.mu.Unlock()
 			return fmt.Errorf("[Recover] there is still empty grid in twin orderbook")
 		}
-
-		// EmitFilled places missing reverse orders; do not recount profit/Slack.
-		s.recovering = true
-		defer func() { s.recovering = false }()
 
 		for _, pin := range noTwinOrderPins {
 			twinOrder := activeOrdersInTwinOrderBook.GetTwinOrder(pin)
 			if twinOrder == nil {
+				s.mu.Unlock()
 				return fmt.Errorf("[Recover] should not get nil twin order after recovering empty grid, check it")
 			}
 
 			if !twinOrder.Exist() {
+				s.mu.Unlock()
 				return fmt.Errorf("[Recover] should not get empty twin order after recovering empty grid, check it")
 			}
 
 			filledOrder := twinOrder.GetOrder()
 			s.logger.Infof("[Recover] find filled order #%d (status: %s)", filledOrder.OrderID, filledOrder.Status)
 			if filledOrder.Status != types.OrderStatusFilled {
+				s.mu.Unlock()
 				return fmt.Errorf("[Recover] should not get non-filled status, check it")
 			}
 
-			s.logger.Infof("[Recover] emit filled order %s", filledOrder)
-			activeOrderBook.EmitFilled(twinOrder.GetOrder())
+			pendingEmit = append(pendingEmit, filledOrder)
+		}
+	}
 
+	// Drop s.mu before any EmitFilled / syncActiveOrder path. Those callbacks call
+	// processFilledOrder → takeOrder* which used to re-lock s.mu (deadlock).
+	s.mu.Unlock()
+
+	for _, order := range case3Orders {
+		s.logger.Infof("[Recover] syncing active order #%d outside recover lock...", order.OrderID)
+		isActiveOrderBookUpdated, err := syncActiveOrder(ctx, activeOrderBook, s.orderQueryService, order.OrderID, syncBefore)
+		if err != nil {
+			s.logger.WithError(err).Errorf("[Recover] unable to query order #%d", order.OrderID)
+			continue
+		}
+		if !isActiveOrderBookUpdated {
+			s.logger.Infof("[Recover] active order #%d is updated in 3 min, skip updating...", order.OrderID)
+		}
+	}
+
+	if len(pendingEmit) > 0 {
+		if s.gridStopped.Load() {
+			s.logger.Info("[Recover] grid was closed before EmitFilled, abort")
+			return nil
+		}
+
+		// EmitFilled places missing reverse orders; do not recount profit/Slack.
+		s.recovering.Store(true)
+		defer s.recovering.Store(false)
+
+		for _, filledOrder := range pendingEmit {
+			s.logger.Infof("[Recover] emit filled order %s", filledOrder)
+			activeOrderBook.EmitFilled(filledOrder)
 			time.Sleep(100 * time.Millisecond)
 		}
 	}
@@ -306,7 +378,7 @@ func (s *Strategy) recover(ctx context.Context) error {
 	// s.EmitGridReady()
 
 	time.Sleep(2 * time.Second)
-	debugGrid(s.logger, s.grid, s.orderExecutor.ActiveMakerOrders())
+	debugGrid(s.logger, s.getGrid(), s.orderExecutor.ActiveMakerOrders())
 
 	bbgo.Sync(ctx, s)
 
