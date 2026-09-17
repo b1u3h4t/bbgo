@@ -1428,9 +1428,38 @@ func (s *Strategy) newStopLossPriceHandler(ctx context.Context, session *bbgo.Ex
 	})
 }
 
+// canTakeProfitClose reports whether take-profit may cancel the grid / flatten.
+// Flat or dust positions are allowed (grid-only exit). Open positions must have
+// positive unrealized PnL at mark — never flatten a losing book on TP.
+func (s *Strategy) canTakeProfitClose(mark fixedpoint.Value) bool {
+	if s.Position == nil {
+		return true
+	}
+	base := s.Position.GetBase()
+	if base.IsZero() || s.Position.IsDust(mark) {
+		return true
+	}
+	return s.Position.UnrealizedProfit(mark).Sign() > 0
+}
+
 func (s *Strategy) newTakeProfitHandler(ctx context.Context, session *bbgo.ExchangeSession) types.KLineCallback {
 	return types.KLineWith(s.Symbol, types.Interval1m, func(k types.KLine) {
+		if s.gridStopped.Load() {
+			return
+		}
 		if s.TakeProfitPrice.Compare(k.High) > 0 {
+			return
+		}
+
+		mark := k.Close
+		if !s.canTakeProfitClose(mark) {
+			base, avg := s.Position.GetBaseAndAverageCost()
+			s.logger.Infof(
+				"takeProfitPrice %s hit (high=%s) but position not profitable (base=%s avgCost=%s mark=%s upnl=%s), skip close",
+				s.TakeProfitPrice.String(), k.High.String(),
+				base.String(), avg.String(), mark.String(),
+				s.Position.UnrealizedProfit(mark).String(),
+			)
 			return
 		}
 
@@ -1441,12 +1470,11 @@ func (s *Strategy) newTakeProfitHandler(ctx context.Context, session *bbgo.Excha
 			return
 		}
 
-		base := s.Position.GetBase()
-		if base.Sign() < 0 {
+		if s.Position.IsDust(mark) {
 			return
 		}
 
-		s.logger.Infof("position base %f > 0, closing position...", base.Float64())
+		s.logger.Infof("position base %s profitable at mark %s, closing position...", s.Position.GetBase().String(), mark.String())
 		if err := s.orderExecutor.ClosePosition(ctx, fixedpoint.One, "grid2:takeProfit"); err != nil {
 			s.logger.WithError(err).Errorf("can not close position")
 			return

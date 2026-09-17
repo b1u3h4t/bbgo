@@ -151,11 +151,26 @@ func (s *Strategy) applyAutoBollinger(session *bbgo.ExchangeSession) error {
 
 func (s *Strategy) newTakeProfitRatioHandler(ctx context.Context, _ *bbgo.ExchangeSession) types.KLineCallback {
 	return types.KLineWith(s.Symbol, types.Interval1m, func(k types.KLine) {
+		if s.gridStopped.Load() {
+			return
+		}
 		if s.TakeProfitRatio.Sign() <= 0 || s.takeProfitAnchor.IsZero() {
 			return
 		}
 		target := s.takeProfitAnchor.Mul(fixedpoint.One.Add(s.TakeProfitRatio))
 		if k.High.Compare(target) < 0 {
+			return
+		}
+
+		mark := k.Close
+		if !s.canTakeProfitClose(mark) {
+			base, avg := s.Position.GetBaseAndAverageCost()
+			s.logger.Infof(
+				"takeProfitRatio %s hit (high=%s target=%s) but position not profitable (base=%s avgCost=%s mark=%s upnl=%s), skip close",
+				s.TakeProfitRatio.Percentage(), k.High.String(), target.String(),
+				base.String(), avg.String(), mark.String(),
+				s.Position.UnrealizedProfit(mark).String(),
+			)
 			return
 		}
 
@@ -169,11 +184,10 @@ func (s *Strategy) newTakeProfitRatioHandler(ctx context.Context, _ *bbgo.Exchan
 			return
 		}
 
-		base := s.Position.GetBase()
-		if base.Sign() <= 0 {
+		if s.Position.IsDust(mark) {
 			return
 		}
-		s.logger.Infof("position base %f > 0, closing position...", base.Float64())
+		s.logger.Infof("position base %s profitable at mark %s, closing position...", s.Position.GetBase().String(), mark.String())
 		if err := s.orderExecutor.ClosePosition(ctx, fixedpoint.One, "grid2:takeProfitRatio"); err != nil {
 			s.logger.WithError(err).Errorf("can not close position")
 		}
