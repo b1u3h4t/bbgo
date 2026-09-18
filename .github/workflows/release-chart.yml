@@ -19,6 +19,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Per-run tmpdir (scoped; safe on shared runners)
+        run: bash scripts/ci-bbgo-tmpdir.sh setup
+
       - name: Package and push chart to Harbor (OCI)
         run: |
           set -euo pipefail
@@ -26,7 +29,9 @@ jobs:
             curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
           }
           helm version --short
-          helm package ./charts/bbgo -d /tmp/bbgo-helm
+          helm_out="${TMPDIR}/bbgo-helm"
+          mkdir -p "${helm_out}"
+          helm package ./charts/bbgo -d "${helm_out}"
           python3 <<'PY'
           import glob, os, subprocess, sys
           from pathlib import Path
@@ -64,7 +69,8 @@ jobs:
               text=True,
               check=True,
           )
-          pkgs = sorted(glob.glob("/tmp/bbgo-helm/bbgo-*.tgz"))
+          helm_out = Path(os.environ["TMPDIR"]) / "bbgo-helm"
+          pkgs = sorted(glob.glob(str(helm_out / "bbgo-*.tgz")))
           if not pkgs:
               sys.exit("no packaged chart found")
           pkg = pkgs[-1]
@@ -80,3 +86,7 @@ jobs:
           HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
           HARBOR_REGISTRY: ${{ secrets.HARBOR_REGISTRY }}
           HARBOR_PROJECT: ${{ secrets.HARBOR_PROJECT }}
+
+      - name: Cleanup per-run tmpdir
+        if: always()
+        run: bash scripts/ci-bbgo-tmpdir.sh cleanup

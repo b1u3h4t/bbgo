@@ -16,6 +16,8 @@ jobs:
     runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || fromJSON('["self-hosted","bbgo"]') }}
     steps:
       - uses: actions/checkout@v7
+      - name: Per-run tmpdir (scoped; safe on shared runners)
+        run: bash scripts/ci-bbgo-tmpdir.sh setup
       - uses: actions/setup-go@v7
         with:
           go-version: '1.26'
@@ -24,3 +26,6 @@ jobs:
         uses: golangci/golangci-lint-action@v9
         with:
           version: 'v2.13'
+      - name: Cleanup per-run tmpdir
+        if: always()
+        run: bash scripts/ci-bbgo-tmpdir.sh cleanup

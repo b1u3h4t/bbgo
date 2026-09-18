@@ -43,6 +43,9 @@ jobs:
 
     - uses: actions/checkout@v7
 
+    - name: Per-run tmpdir (scoped; safe on shared runners)
+      run: bash scripts/ci-bbgo-tmpdir.sh setup
+
     - uses: actions/cache@v6
       # Self-hosted keeps GOCACHE/mod on disk; GitHub cache restore often fails (tar) and wastes ~1min.
       if: github.event_name == 'pull_request'
@@ -399,3 +402,7 @@ jobs:
       if: always() && github.event_name == 'pull_request'
       run: |
         docker rm -f "${CI_PG_NAME}" >/dev/null 2>&1 || true
+
+    - name: Cleanup per-run tmpdir
+      if: always()
+      run: bash scripts/ci-bbgo-tmpdir.sh cleanup

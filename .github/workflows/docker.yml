@@ -27,6 +27,9 @@ jobs:
       with:
         ref: ${{ github.event.inputs.ref || github.ref }}
 
+    - name: Per-run tmpdir (scoped; safe on shared runners)
+      run: bash scripts/ci-bbgo-tmpdir.sh setup
+
     - name: Docker meta
       id: meta
       uses: docker/metadata-action@v6
@@ -97,3 +100,7 @@ jobs:
         platforms: linux/amd64
         labels: ${{ steps.meta.outputs.labels }}
         tags: ${{ steps.meta.outputs.tags }}
+
+    - name: Cleanup per-run tmpdir
+      if: always()
+      run: bash scripts/ci-bbgo-tmpdir.sh cleanup
