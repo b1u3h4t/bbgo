@@ -150,6 +150,16 @@ type Strategy struct {
 	// position-deviation intensity, buy/sell zone bias, optional BB/gridRange bounds.
 	QuantumAllocator *QuantumAllocator `json:"quantumAllocator"`
 
+	// LongOnly is an optional per-grid switch (default false = allow USDT-M naked shorts).
+	// When true: sells need base inventory (buy first); flat/short books place buys only.
+	// Spot already converts missing-base sells to buys; this opts futures into the same rule.
+	LongOnly bool `json:"longOnly"`
+
+	// ShortOnly is an optional per-grid switch (default false).
+	// When true (downtrend): buys only cover an existing short — open sell first, then buy to flat.
+	// Flat/long books place sells only (no naked long). Mutually exclusive with LongOnly.
+	ShortOnly bool `json:"shortOnly"`
+
 	// KeepOrdersWhenShutdown option is used for keeping the grid orders when shutting down bbgo
 	KeepOrdersWhenShutdown bool `json:"keepOrdersWhenShutdown"`
 
@@ -313,6 +323,10 @@ func (s *Strategy) Validate() error {
 
 	if err := s.validateCoinM(); err != nil {
 		return err
+	}
+
+	if s.LongOnly && s.ShortOnly {
+		return fmt.Errorf("longOnly and shortOnly cannot both be true")
 	}
 
 	return nil
@@ -1066,11 +1080,11 @@ func (s *Strategy) checkRequiredInvestmentByQuantity(
 			if requiredBase.Add(quantity).Compare(baseBalance) <= 0 {
 				requiredBase = requiredBase.Add(quantity)
 			} else if i > 0 { // we do not want to sell at i == 0
-				if s.isUSDTMFutures() {
+				if s.isUSDTMFutures() && !s.LongOnly {
 					// USDT-M: open short with quote margin; do not convert to buy
 					requiredQuote = requiredQuote.Add(quantity.Mul(price))
 				} else {
-					// Spot: convert sell to buy quote at the next lower pin
+					// Spot / LongOnly: convert sell to buy quote at the next lower pin
 					nextLowerPin := pins[i-1]
 					nextLowerPrice := fixedpoint.Value(nextLowerPin)
 					requiredQuote = requiredQuote.Add(quantity.Mul(nextLowerPrice))
@@ -1079,6 +1093,10 @@ func (s *Strategy) checkRequiredInvestmentByQuantity(
 		} else {
 			// for orders that buy
 			if i+1 == si {
+				continue
+			}
+			// ShortOnly: buys only cover shorts — skip buy budget when flat/long.
+			if s.ShortOnly && (s.Position == nil || s.Position.GetBase().Sign() >= 0) {
 				continue
 			}
 			requiredQuote = requiredQuote.Add(quantity.Mul(price))
@@ -1529,8 +1547,21 @@ func (s *Strategy) isProfitableCloseAt(price fixedpoint.Value) bool {
 }
 
 // shouldPlaceGridOrder is false when the order would close/reduce the position
-// at a loss after fees. Opening / flat sides always pass — "平仓一定要盈利".
+// at a loss after fees, or when LongOnly/ShortOnly would open the wrong side naked.
+// Opening / flat sides otherwise pass — "平仓一定要盈利".
 func (s *Strategy) shouldPlaceGridOrder(side types.SideType, price fixedpoint.Value) bool {
+	if s.LongOnly && side == types.SideTypeSell {
+		// Sell only with long inventory — never naked short.
+		if s.Position == nil || s.Position.GetBase().Sign() <= 0 {
+			return false
+		}
+	}
+	if s.ShortOnly && side == types.SideTypeBuy {
+		// Buy only to cover short — never naked long.
+		if s.Position == nil || s.Position.GetBase().Sign() >= 0 {
+			return false
+		}
+	}
 	if !s.isClosingOrderSide(side) {
 		return true
 	}
@@ -1979,7 +2010,7 @@ func (s *Strategy) generateGridOrders(totalQuote, totalBase, lastPrice fixedpoin
 			if usedBase.Add(quantity).Compare(totalBase) <= 0 {
 				submitOrders = append(submitOrders, s.newGridLimitOrder(types.SideTypeSell, sellPrice, quantity))
 				usedBase = usedBase.Add(quantity)
-			} else if s.isUSDTMFutures() {
+			} else if s.isUSDTMFutures() && !s.LongOnly {
 				// USDT-M futures: open short with quote margin; never convert to a
 				// marketable buy above lastPrice (spot fallback would do that).
 				quoteQuantity := quantity.Mul(sellPrice)
@@ -1997,7 +2028,8 @@ func (s *Strategy) generateGridOrders(totalQuote, totalBase, lastPrice fixedpoin
 				submitOrders = append(submitOrders, s.newGridLimitOrder(types.SideTypeSell, sellPrice, quantity))
 				usedQuote = usedQuote.Add(roundUpQuoteQuantity)
 			} else {
-				// Spot: if we don't have enough base asset, place a buy at the next price.
+				// Spot or LongOnly USDT-M: no base to sell — place a buy at the next
+				// lower pin instead of opening a naked short.
 				nextPin := pins[i-1]
 				nextPrice := fixedpoint.Value(nextPin)
 				submitOrders = append(submitOrders, s.newGridLimitOrder(types.SideTypeBuy, nextPrice, quantity))
@@ -2017,6 +2049,11 @@ func (s *Strategy) generateGridOrders(totalQuote, totalBase, lastPrice fixedpoin
 
 			// should never place a buy order at the upper price
 			if i == len(pins)-1 {
+				continue
+			}
+
+			// ShortOnly: buys only flatten shorts — skip when flat/long (no naked long).
+			if s.ShortOnly && (s.Position == nil || s.Position.GetBase().Sign() >= 0) {
 				continue
 			}
 

@@ -208,6 +208,83 @@ func TestStrategy_generateGridOrders_USDTM_noBase(t *testing.T) {
 	}
 }
 
+func TestStrategy_generateGridOrders_USDTM_longOnly_noNakedShort(t *testing.T) {
+	s := newUSDTMTestStrategy()
+	s.LongOnly = true
+	s.grid = grid2types.NewGrid(s.LowerPrice, s.UpperPrice, fixedpoint.NewFromInt(s.GridNum), s.Market.TickSize)
+	s.grid.CalculateArithmeticPins()
+
+	lastPrice := number(86)
+	orders, err := s.generateGridOrders(number(100_000), number(0), lastPrice)
+	assert.NoError(t, err)
+	assert.NotEmpty(t, orders)
+	for _, o := range orders {
+		assert.Equal(t, types.SideTypeBuy, o.Side, "longOnly USDT-M without base must not naked-sell")
+	}
+
+	// With base inventory, sells above mid are allowed (reduce/close long).
+	orders2, err := s.generateGridOrders(number(100_000), number(10), lastPrice)
+	assert.NoError(t, err)
+	var hasSell bool
+	for _, o := range orders2 {
+		if o.Side == types.SideTypeSell {
+			hasSell = true
+			break
+		}
+	}
+	assert.True(t, hasSell, "longOnly with base may place sells")
+
+	assert.False(t, s.shouldPlaceGridOrder(types.SideTypeSell, number(88)),
+		"flat longOnly must reject sell")
+	s.Position = types.NewPositionFromMarket(s.Market)
+	_ = s.Position.ModifyBase(number(5))
+	_ = s.Position.ModifyAverageCost(number(80))
+	assert.True(t, s.shouldPlaceGridOrder(types.SideTypeSell, number(88)),
+		"long inventory may sell above cost")
+}
+
+func TestStrategy_generateGridOrders_USDTM_shortOnly_noNakedLong(t *testing.T) {
+	s := newUSDTMTestStrategy()
+	s.ShortOnly = true
+	s.grid = grid2types.NewGrid(s.LowerPrice, s.UpperPrice, fixedpoint.NewFromInt(s.GridNum), s.Market.TickSize)
+	s.grid.CalculateArithmeticPins()
+
+	lastPrice := number(86)
+	orders, err := s.generateGridOrders(number(100_000), number(0), lastPrice)
+	assert.NoError(t, err)
+	assert.NotEmpty(t, orders)
+	for _, o := range orders {
+		assert.Equal(t, types.SideTypeSell, o.Side, "shortOnly flat must only open sells")
+	}
+
+	assert.False(t, s.shouldPlaceGridOrder(types.SideTypeBuy, number(84)),
+		"flat shortOnly must reject buy")
+
+	s.Position = types.NewPositionFromMarket(s.Market)
+	_ = s.Position.ModifyBase(number(-5))
+	_ = s.Position.ModifyAverageCost(number(90))
+	assert.True(t, s.shouldPlaceGridOrder(types.SideTypeBuy, number(84)),
+		"short inventory may buy below cost to cover")
+
+	orders2, err := s.generateGridOrders(number(100_000), number(0), lastPrice)
+	assert.NoError(t, err)
+	var hasBuy bool
+	for _, o := range orders2 {
+		if o.Side == types.SideTypeBuy {
+			hasBuy = true
+			break
+		}
+	}
+	assert.True(t, hasBuy, "shortOnly with short position may place cover buys")
+}
+
+func TestStrategy_Validate_longOnly_shortOnly_mutex(t *testing.T) {
+	s := newUSDTMTestStrategy()
+	s.LongOnly = true
+	s.ShortOnly = true
+	assert.Error(t, s.Validate())
+}
+
 func TestStrategy_validateCoinM(t *testing.T) {
 	s := newCoinMTestStrategy()
 	assert.NoError(t, s.validateCoinM())
