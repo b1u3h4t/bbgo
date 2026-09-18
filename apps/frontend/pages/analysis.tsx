@@ -596,11 +596,23 @@ export default function AnalysisPage() {
             </Button>
             {market?.stage && (
               <Chip
-                label={`BTC阶段: ${market.stage}`}
+                label={`BTC止跌: ${market.stage}`}
                 color={
                   market.stage.includes('偏强')
                     ? 'success'
                     : market.stage.includes('观望')
+                    ? 'warning'
+                    : 'default'
+                }
+              />
+            )}
+            {market?.stageTop && (
+              <Chip
+                label={`BTC止涨: ${market.stageTop}`}
+                color={
+                  market.stageTop.includes('偏强')
+                    ? 'error'
+                    : market.stageTop.includes('观望')
                     ? 'warning'
                     : 'default'
                 }
@@ -652,7 +664,7 @@ export default function AnalysisPage() {
                   </Grid>
                   <Grid item xs={12} md={5}>
                     <Typography variant="subtitle2" gutterBottom>
-                      打分表
+                      止跌打分表
                     </Typography>
                     <ScrollTable>
                     <Table size="small">
@@ -693,9 +705,55 @@ export default function AnalysisPage() {
                     </Table>
           </ScrollTable>
                   </Grid>
+                  <Grid item xs={12} md={5}>
+                    <Typography variant="subtitle2" gutterBottom>
+                      止涨打分表
+                    </Typography>
+                    <ScrollTable>
+                    <Table size="small">
+                      <TableHead>
+                        <TableRow>
+                          <TableCell>条件</TableCell>
+                          <TableCell align="right">分</TableCell>
+                          <TableCell>Notes 标记</TableCell>
+                        </TableRow>
+                      </TableHead>
+                      <TableBody>
+                        {(market.rules.scoringTop || []).map((r: any, i: number) => (
+                          <TableRow key={`top-${i}`}>
+                            <TableCell>
+                              <Typography variant="caption">{r.when}</Typography>
+                            </TableCell>
+                            <TableCell
+                              align="right"
+                              sx={{
+                                color: String(r.delta).startsWith('+')
+                                  ? '#c62828'
+                                  : String(r.delta).startsWith('-')
+                                  ? '#2e7d32'
+                                  : undefined,
+                                fontWeight: 600,
+                              }}
+                            >
+                              {r.delta}
+                            </TableCell>
+                            <TableCell>
+                              <Typography variant="caption" color="text.secondary">
+                                {r.note}
+                              </Typography>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+          </ScrollTable>
+                  </Grid>
                   <Grid item xs={12} md={2}>
                     <Typography variant="subtitle2" gutterBottom>
                       结论映射
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 0.5 }}>
+                      止跌 Score
                     </Typography>
                     {(market.rules.verdict || []).map((v: any, i: number) => (
                       <Box key={i} sx={{ mb: 1 }}>
@@ -713,8 +771,29 @@ export default function AnalysisPage() {
                         </Typography>
                       </Box>
                     ))}
+                    <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1, mb: 0.5 }}>
+                      止涨 TopScore
+                    </Typography>
+                    {(market.rules.verdictTop || []).map((v: any, i: number) => (
+                      <Box key={`tv-${i}`} sx={{ mb: 1 }}>
+                        <Chip
+                          size="small"
+                          color="error"
+                          variant="outlined"
+                          label={
+                            v.minScore != null
+                              ? `top≥${v.minScore}`
+                              : '其余'
+                          }
+                          sx={{ mr: 0.5 }}
+                        />
+                        <Typography variant="caption" display="block">
+                          {v.label}
+                        </Typography>
+                      </Box>
+                    ))}
                     <Typography variant="caption" color="text.secondary">
-                      人工核验：用 Notes 逐项对上打分表，加减应等于 Score。
+                      人工核验：Notes→Score，TopNotes→TopScore。
                     </Typography>
                   </Grid>
                 </Grid>
@@ -786,14 +865,19 @@ export default function AnalysisPage() {
                 <TableCell>Symbol</TableCell>
                 <TableCell align="right">Last</TableCell>
                 <TableCell align="right">Bounce%</TableCell>
+                <TableCell align="right">Drop%</TableCell>
                 <TableCell align="right">2h%</TableCell>
                 <TableCell align="right">4h%</TableCell>
                 <TableCell align="right">RSI</TableCell>
                 <TableCell align="right">绿柱2h</TableCell>
                 <TableCell align="center">HL</TableCell>
+                <TableCell align="center">LH</TableCell>
                 <TableCell align="center">Mid↑</TableCell>
-                <TableCell align="right">Score</TableCell>
-                <TableCell>Verdict</TableCell>
+                <TableCell align="center">Mid↓</TableCell>
+                <TableCell align="right">止跌</TableCell>
+                <TableCell>止跌结论</TableCell>
+                <TableCell align="right">止涨</TableCell>
+                <TableCell>止涨结论</TableCell>
                 <TableCell>Notes</TableCell>
               </TableRow>
             </TableHead>
@@ -822,6 +906,13 @@ export default function AnalysisPage() {
                   </TableCell>
                   <TableCell
                     align="right"
+                    sx={{ color: pnlColor(-(row.dropPct || 0)) }}
+                  >
+                    {row.dropPct ?? '—'}
+                    {row.dropPct != null ? '%' : ''}
+                  </TableCell>
+                  <TableCell
+                    align="right"
                     sx={{ color: pnlColor(row.chg2hPct) }}
                   >
                     {row.chg2hPct}%
@@ -838,18 +929,55 @@ export default function AnalysisPage() {
                     {row.higherLows ? 'Y' : '—'}
                   </TableCell>
                   <TableCell align="center">
+                    {row.lowerHighs ? 'Y' : '—'}
+                  </TableCell>
+                  <TableCell align="center">
                     {row.aboveMid ? 'Y' : '—'}
+                  </TableCell>
+                  <TableCell align="center">
+                    {row.belowMid ? 'Y' : '—'}
                   </TableCell>
                   <TableCell align="right" sx={{ fontWeight: 700 }}>
                     {row.score}
                   </TableCell>
                   <TableCell>
-                    <Chip size="small" label={row.verdict} />
+                    <Chip
+                      size="small"
+                      color={
+                        String(row.verdict || '').includes('偏强')
+                          ? 'success'
+                          : String(row.verdict || '').includes('观望')
+                          ? 'warning'
+                          : 'default'
+                      }
+                      label={row.verdict}
+                    />
+                  </TableCell>
+                  <TableCell align="right" sx={{ fontWeight: 700 }}>
+                    {row.topScore ?? '—'}
+                  </TableCell>
+                  <TableCell>
+                    <Chip
+                      size="small"
+                      color={
+                        String(row.topVerdict || '').includes('偏强')
+                          ? 'error'
+                          : String(row.topVerdict || '').includes('观望')
+                          ? 'warning'
+                          : 'default'
+                      }
+                      label={row.topVerdict || '—'}
+                    />
                   </TableCell>
                   <TableCell>
                     <Typography variant="caption">
-                      {(row.notes || []).join(', ')}
+                      跌: {(row.notes || []).join(', ')}
                     </Typography>
+                    {(row.topNotes || []).length > 0 && (
+                      <Typography variant="caption" display="block" color="text.secondary">
+                        涨: {(row.topNotes || []).join(', ')}
+                      </Typography>
+                    )}
                     {row.chunkLows?.length > 0 && (
                       <Typography
                         variant="caption"
@@ -857,6 +985,15 @@ export default function AnalysisPage() {
                         color="text.secondary"
                       >
                         chunkLows: {row.chunkLows.join(' → ')}
+                      </Typography>
+                    )}
+                    {row.chunkHighs?.length > 0 && (
+                      <Typography
+                        variant="caption"
+                        display="block"
+                        color="text.secondary"
+                      >
+                        chunkHighs: {row.chunkHighs.join(' → ')}
                       </Typography>
                     )}
                   </TableCell>

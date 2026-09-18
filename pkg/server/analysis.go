@@ -309,16 +309,23 @@ type marketSymbolAnalysis struct {
 	DayLow      float64   `json:"dayLow"`
 	DayHigh     float64   `json:"dayHigh"`
 	BouncePct   float64   `json:"bouncePct"`
+	DropPct     float64   `json:"dropPct"`
 	Chg2hPct    float64   `json:"chg2hPct"`
 	Chg4hPct    float64   `json:"chg4hPct"`
 	RSI15m      float64   `json:"rsi15m"`
 	GreenBars2h int       `json:"greenBars2h"`
 	HigherLows  bool      `json:"higherLows"`
+	LowerHighs  bool      `json:"lowerHighs"`
 	Score       int       `json:"score"`
 	Verdict     string    `json:"verdict"`
 	Notes       []string  `json:"notes"`
+	TopScore    int       `json:"topScore"`
+	TopVerdict  string    `json:"topVerdict"`
+	TopNotes    []string  `json:"topNotes"`
 	ChunkLows   []float64 `json:"chunkLows"`
+	ChunkHighs  []float64 `json:"chunkHighs"`
 	AboveMid    bool      `json:"aboveMid"`
+	BelowMid    bool      `json:"belowMid"`
 }
 
 func calcRSI(closes []float64, n int) float64 {
@@ -342,9 +349,15 @@ func calcRSI(closes []float64, n int) float64 {
 }
 
 func analyzeSymbolKlines(klines []types.KLine) marketSymbolAnalysis {
-	a := marketSymbolAnalysis{Notes: []string{}, ChunkLows: []float64{}}
+	a := marketSymbolAnalysis{
+		Notes:      []string{},
+		TopNotes:   []string{},
+		ChunkLows:  []float64{},
+		ChunkHighs: []float64{},
+	}
 	if len(klines) == 0 {
 		a.Verdict = "no data"
+		a.TopVerdict = "no data"
 		return a
 	}
 	a.Symbol = klines[0].Symbol
@@ -371,6 +384,9 @@ func analyzeSymbolKlines(klines []types.KLine) marketSymbolAnalysis {
 	}
 	a.DayLow, a.DayHigh = dayLow, dayHigh
 	a.BouncePct = (lastClose/dayLow - 1) * 100
+	if dayHigh > 0 {
+		a.DropPct = (1 - lastClose/dayHigh) * 100
+	}
 
 	i8 := n - 8
 	if i8 < 0 {
@@ -398,21 +414,32 @@ func analyzeSymbolKlines(klines []types.KLine) marketSymbolAnalysis {
 	}
 	for i := start; i+8 <= n; i += 8 {
 		lo := klines[i].Low.Float64()
+		hi := klines[i].High.Float64()
 		for j := i; j < i+8; j++ {
 			if v := klines[j].Low.Float64(); v < lo {
 				lo = v
 			}
+			if v := klines[j].High.Float64(); v > hi {
+				hi = v
+			}
 		}
 		a.ChunkLows = append(a.ChunkLows, roundFloat(lo, 8))
+		a.ChunkHighs = append(a.ChunkHighs, roundFloat(hi, 8))
 	}
 	if len(a.ChunkLows) >= 3 {
 		a.HigherLows = a.ChunkLows[len(a.ChunkLows)-1] > a.ChunkLows[len(a.ChunkLows)-2] &&
 			a.ChunkLows[len(a.ChunkLows)-2] > a.ChunkLows[len(a.ChunkLows)-3]
 	}
+	if len(a.ChunkHighs) >= 3 {
+		a.LowerHighs = a.ChunkHighs[len(a.ChunkHighs)-1] < a.ChunkHighs[len(a.ChunkHighs)-2] &&
+			a.ChunkHighs[len(a.ChunkHighs)-2] < a.ChunkHighs[len(a.ChunkHighs)-3]
+	}
 
 	mid := (dayHigh + dayLow) / 2
 	a.AboveMid = lastClose > mid
+	a.BelowMid = lastClose < mid
 
+	// --- 止跌 (bounce / bottoming) ---
 	score := 0
 	if lastClose > dayLow*1.005 {
 		score++
@@ -466,10 +493,67 @@ func analyzeSymbolKlines(klines []types.KLine) marketSymbolAnalysis {
 	default:
 		a.Verdict = "尚未止跌"
 	}
+
+	// --- 止涨 (fade / topping)，与止跌对称 ---
+	top := 0
+	if dayHigh > 0 && lastClose < dayHigh*0.995 {
+		top++
+		a.TopNotes = append(a.TopNotes, "off day high")
+	} else {
+		a.TopNotes = append(a.TopNotes, "near day high")
+	}
+	if a.Chg2hPct < -0.3 {
+		top++
+		a.TopNotes = append(a.TopNotes, "2h down")
+	} else if a.Chg2hPct > 0.3 {
+		top--
+		a.TopNotes = append(a.TopNotes, "2h up")
+	} else {
+		a.TopNotes = append(a.TopNotes, "2h flat")
+	}
+	if a.LowerHighs {
+		top += 2
+		a.TopNotes = append(a.TopNotes, "lower highs")
+	} else if len(a.ChunkHighs) >= 2 && a.ChunkHighs[len(a.ChunkHighs)-1] > a.ChunkHighs[len(a.ChunkHighs)-2] {
+		top--
+		a.TopNotes = append(a.TopNotes, "higher highs")
+	}
+	if a.RSI15m > 70 {
+		top++
+		a.TopNotes = append(a.TopNotes, "RSI overbought")
+	} else if a.RSI15m < 55 && a.DropPct > 1 {
+		top++
+		a.TopNotes = append(a.TopNotes, "RSI leaving overbought")
+	}
+	if green <= 3 {
+		top++
+		a.TopNotes = append(a.TopNotes, "mostly red 2h")
+	} else if green >= 5 {
+		top--
+		a.TopNotes = append(a.TopNotes, "few red bars")
+	}
+	if a.BelowMid {
+		top++
+		a.TopNotes = append(a.TopNotes, "below day mid")
+	} else {
+		a.TopNotes = append(a.TopNotes, "above day mid")
+	}
+
+	a.TopScore = top
+	switch {
+	case top >= 4:
+		a.TopVerdict = "止涨迹象偏强"
+	case top >= 2:
+		a.TopVerdict = "弱止涨/观望"
+	default:
+		a.TopVerdict = "尚未止涨"
+	}
+
 	a.Last = roundFloat(a.Last, 8)
 	a.DayLow = roundFloat(a.DayLow, 8)
 	a.DayHigh = roundFloat(a.DayHigh, 8)
 	a.BouncePct = roundFloat(a.BouncePct, 2)
+	a.DropPct = roundFloat(a.DropPct, 2)
 	a.Chg2hPct = roundFloat(a.Chg2hPct, 2)
 	a.Chg4hPct = roundFloat(a.Chg4hPct, 2)
 	a.RSI15m = roundFloat(a.RSI15m, 1)
@@ -500,6 +584,7 @@ func (s *Server) analysisMarket(c *gin.Context) {
 	}
 
 	stage := "尚未止跌"
+	stageTop := "尚未止涨"
 	if len(out) > 0 {
 		switch {
 		case out[0].Score >= 4:
@@ -507,26 +592,35 @@ func (s *Server) analysisMarket(c *gin.Context) {
 		case out[0].Score >= 2:
 			stage = "弱止跌/观望"
 		}
+		switch {
+		case out[0].TopScore >= 4:
+			stageTop = "止涨迹象偏强"
+		case out[0].TopScore >= 2:
+			stageTop = "弱止涨/观望"
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"session":  session.Name,
-		"interval": "15m",
-		"asOf":     time.Now().UTC().Format(time.RFC3339),
-		"stage":    stage,
-		"stageNote": "顶部 BTC阶段 取列表首个 symbol（默认 BTCUSDT）的 score 映射",
-		"symbols":  out,
+		"session":   session.Name,
+		"interval":  "15m",
+		"asOf":      time.Now().UTC().Format(time.RFC3339),
+		"stage":     stage,
+		"stageTop":  stageTop,
+		"stageNote": "顶部 BTC阶段：止跌用 score，止涨用 topScore（列表首个 symbol，默认 BTCUSDT）",
+		"symbols":   out,
 		"rules": gin.H{
-			"purpose": "启发式止跌打分（运维盘感落地），非回测策略；每次刷新实时拉 K 重算",
+			"purpose": "启发式止跌 + 止涨打分（运维盘感落地），非回测策略；每次刷新实时拉 K 重算。二者互为镜像，可同时偏弱（震荡）。",
 			"data": []string{
 				"K线: 15m × 最多96根（约滚动24h），非自然日",
 				"日高低: 上述窗口内 high/low",
-				"Bounce% = (last/dayLow - 1)×100",
+				"Bounce% = (last/dayLow - 1)×100（止跌用）",
+				"Drop% = (1 - last/dayHigh)×100（止涨用）",
 				"2h%/4h%: 相对最近8/16根开盘涨跌（约2h/4h）；4h%仅展示不进分",
 				"RSI: 近14根收盘简易平均涨跌版（非Wilder平滑，与TV略有偏差）",
 				"绿柱: 近8根 close≥open 根数",
-				"Higher lows: 近24根按每8根切3段取低点，要求 L3>L2>L1（+2主信号）",
-				"Above mid: last > (dayHigh+dayLow)/2",
+				"Higher lows: 近24根按每8根切3段取低点，要求 L3>L2>L1（止跌 +2）",
+				"Lower highs: 近24根按每8根切3段取高点，要求 H3<H2<H1（止涨 +2）",
+				"Above/Below mid: last 相对 (dayHigh+dayLow)/2",
 			},
 			"scoring": []gin.H{
 				{"when": "last > dayLow×1.005", "delta": "+1", "note": "off day low"},
@@ -543,12 +637,32 @@ func (s *Server) analysisMarket(c *gin.Context) {
 				{"when": "站上日中轴", "delta": "+1", "note": "above day mid"},
 				{"when": "否则在中轴下", "delta": "0", "note": "below day mid"},
 			},
+			"scoringTop": []gin.H{
+				{"when": "last < dayHigh×0.995", "delta": "+1", "note": "off day high"},
+				{"when": "否则贴顶", "delta": "0", "note": "near day high"},
+				{"when": "2h% < -0.3%", "delta": "+1", "note": "2h down"},
+				{"when": "2h% > +0.3%", "delta": "-1", "note": "2h up"},
+				{"when": "|2h%|≤0.3%", "delta": "0", "note": "2h flat"},
+				{"when": "连续3段降低高点", "delta": "+2", "note": "lower highs"},
+				{"when": "最近两段高点抬升", "delta": "-1", "note": "higher highs"},
+				{"when": "RSI > 70", "delta": "+1", "note": "RSI overbought"},
+				{"when": "RSI < 55 且 Drop% > 1%", "delta": "+1", "note": "RSI leaving overbought"},
+				{"when": "2h绿柱 ≤ 3", "delta": "+1", "note": "mostly red 2h"},
+				{"when": "2h绿柱 ≥ 5", "delta": "-1", "note": "few red bars"},
+				{"when": "站下日中轴", "delta": "+1", "note": "below day mid"},
+				{"when": "否则在中轴上", "delta": "0", "note": "above day mid"},
+			},
 			"verdict": []gin.H{
 				{"minScore": 4, "label": "止跌迹象偏强"},
 				{"minScore": 2, "label": "弱止跌/观望"},
 				{"minScore": nil, "label": "尚未止跌（score≤1）"},
 			},
-			"validation": "未做历史回测；对照 Notes/Score/特征列人工核验即可",
+			"verdictTop": []gin.H{
+				{"minScore": 4, "label": "止涨迹象偏强"},
+				{"minScore": 2, "label": "弱止涨/观望"},
+				{"minScore": nil, "label": "尚未止涨（topScore≤1）"},
+			},
+			"validation": "未做历史回测；对照 Notes/TopNotes 与 Score/TopScore 人工核验即可",
 		},
 	})
 }
