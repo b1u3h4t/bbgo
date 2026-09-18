@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "yarn run next dev",
-    "build": "yarn run next build",
+    "build": "yarn run next build && yarn run next export",
     "start": "yarn run next start",
     "export": "yarn run next build && yarn run next export",
     "prettier": "prettier --write ."

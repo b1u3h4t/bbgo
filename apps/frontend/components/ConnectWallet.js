@@ -82,7 +82,10 @@ export default function ConnectWallet() {
             onClick={handleToggle}
           >
             <PersonIcon />
-            <ListItemText primary="Profile" />
+            <ListItemText
+              primary="Profile"
+              sx={{ display: { xs: 'none', sm: 'block' }, my: 0 }}
+            />
           </Button>
           <Popper
             open={open}

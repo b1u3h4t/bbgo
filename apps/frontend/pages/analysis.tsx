@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import dynamic from 'next/dynamic';
 import DashboardLayout from '../layouts/DashboardLayout';
 import {
@@ -19,6 +19,7 @@ import {
   Table,
   TableBody,
   TableCell,
+  TableContainer,
   TableHead,
   TableRow,
   LinearProgress,
@@ -30,7 +31,9 @@ import {
   ListItemText,
   ToggleButton,
   ToggleButtonGroup,
+  useMediaQuery,
 } from '@mui/material';
+import { useTheme } from '@mui/material/styles';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import {
   queryAnalysisAvgDown,
@@ -43,6 +46,22 @@ import {
 import { buildOrderBookPinLevels } from '../components/pinLevels';
 
 // TradingView Lightweight Charts needs browser APIs
+/** Horizontal swipe wrapper for wide tables on ~400px phones (e.g. Xiaomi K80 Pro). */
+function ScrollTable({ children }: { children: ReactNode }) {
+  return (
+    <TableContainer
+      className="bbgo-table-scroll"
+      sx={{
+        overflowX: 'auto',
+        maxWidth: '100%',
+        WebkitOverflowScrolling: 'touch',
+      }}
+    >
+      {children}
+    </TableContainer>
+  );
+}
+
 const PinKlineChart = dynamic(() => import('../components/PinKlineChart'), {
   ssr: false,
   loading: () => (
@@ -185,6 +204,7 @@ function PositionsPanel({
             无持仓
           </Typography>
         ) : (
+          <ScrollTable>
           <Table size="small">
             <TableHead>
               <TableRow>
@@ -275,6 +295,7 @@ function PositionsPanel({
               })}
             </TableBody>
           </Table>
+          </ScrollTable>
         )}
       </CardContent>
     </Card>
@@ -502,14 +523,31 @@ export default function AnalysisPage() {
   }, [loadMargin, loadMarket, loadPnl]);
 
   const acc = margin?.account;
+  const theme = useTheme();
+  const isMobile = useMediaQuery(theme.breakpoints.down('md'), { noSsr: true });
+  const chartH = isMobile ? 260 : 360;
+  const chartHLg = isMobile ? 280 : 380;
+  const chartHSm = isMobile ? 240 : 320;
 
   return (
     <DashboardLayout>
-      <Box sx={{ p: 3, maxWidth: 1400, mx: 'auto' }}>
-        <Typography variant="h5" gutterBottom>
+      <Box
+        sx={{
+          p: { xs: 1.5, sm: 2, md: 3 },
+          maxWidth: 1400,
+          mx: 'auto',
+          width: '100%',
+          overflowX: 'hidden',
+        }}
+      >
+        <Typography variant={isMobile ? 'h6' : 'h5'} gutterBottom>
           Analysis
         </Typography>
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+        <Typography
+          variant="body2"
+          color="text.secondary"
+          sx={{ mb: 2, display: { xs: 'none', sm: 'block' } }}
+        >
           行情结构、保证金利用率、ATR 网格试算、区间/每日已实现盈亏（CST，自 2026-09-03 部署起）
         </Typography>
 
@@ -531,7 +569,10 @@ export default function AnalysisPage() {
             }
             if (v === 4) loadAvgDown();
           }}
-          sx={{ mb: 1 }}
+          variant="scrollable"
+          scrollButtons="auto"
+          allowScrollButtonsMobile
+          sx={{ mb: 1, borderBottom: 1, borderColor: 'divider' }}
         >
           <Tab label="行情分析" />
           <Tab label="保证金" />
@@ -541,8 +582,16 @@ export default function AnalysisPage() {
         </Tabs>
 
         <TabPanel value={tab} index={0}>
-          <Box sx={{ display: 'flex', gap: 1, mb: 2, alignItems: 'center' }}>
-            <Button variant="contained" onClick={loadMarket}>
+          <Box
+            sx={{
+              display: 'flex',
+              gap: 1,
+              mb: 2,
+              alignItems: 'center',
+              flexWrap: 'wrap',
+            }}
+          >
+            <Button variant="contained" onClick={loadMarket} size={isMobile ? 'small' : 'medium'}>
               刷新
             </Button>
             {market?.stage && (
@@ -564,7 +613,7 @@ export default function AnalysisPage() {
             )}
           </Box>
 
-          <Accordion defaultExpanded sx={{ mb: 2 }}>
+          <Accordion defaultExpanded={false} sx={{ mb: 2 }}>
             <AccordionSummary expandIcon={<ExpandMoreIcon />}>
               <Typography variant="subtitle2">
                 判断依据与打分规则（与后端 /api/analysis/market 同步）
@@ -605,6 +654,7 @@ export default function AnalysisPage() {
                     <Typography variant="subtitle2" gutterBottom>
                       打分表
                     </Typography>
+                    <ScrollTable>
                     <Table size="small">
                       <TableHead>
                         <TableRow>
@@ -641,6 +691,7 @@ export default function AnalysisPage() {
                         ))}
                       </TableBody>
                     </Table>
+          </ScrollTable>
                   </Grid>
                   <Grid item xs={12} md={2}>
                     <Typography variant="subtitle2" gutterBottom>
@@ -719,7 +770,7 @@ export default function AnalysisPage() {
                     marketChart.position ||
                     findPosition(margin?.positions, marketChart.symbol)
                   }
-                  height={360}
+                  height={chartH}
                 />
               </CardContent>
             </Card>
@@ -728,6 +779,7 @@ export default function AnalysisPage() {
           <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>
             点击 symbol 打开 TradingView Lightweight Charts（多周期；数据优先 MySQL）
           </Typography>
+          <ScrollTable>
           <Table size="small">
             <TableHead>
               <TableRow>
@@ -812,6 +864,7 @@ export default function AnalysisPage() {
               ))}
             </TableBody>
           </Table>
+          </ScrollTable>
         </TabPanel>
 
         <TabPanel value={tab} index={1}>
@@ -874,6 +927,7 @@ export default function AnalysisPage() {
           <Typography variant="subtitle1" gutterBottom>
             Open Orders
           </Typography>
+          <ScrollTable>
           <Table size="small">
             <TableHead>
               <TableRow>
@@ -898,6 +952,7 @@ export default function AnalysisPage() {
               ))}
             </TableBody>
           </Table>
+          </ScrollTable>
         </TabPanel>
 
         <TabPanel value={tab} index={2}>
@@ -1011,7 +1066,7 @@ export default function AnalysisPage() {
                           grid.symbol,
                         )
                       }
-                      height={380}
+                      height={chartHLg}
                     />
                   </CardContent>
                 </Card>
@@ -1194,6 +1249,7 @@ export default function AnalysisPage() {
                 <Typography variant="subtitle2" sx={{ mb: 1 }}>
                   每日盈亏（CST）
                 </Typography>
+                <ScrollTable>
                 <Table size="small">
                   <TableHead>
                     <TableRow>
@@ -1232,6 +1288,7 @@ export default function AnalysisPage() {
                     ))}
                   </TableBody>
                 </Table>
+          </ScrollTable>
               </CardContent>
             </Card>
           )}
@@ -1281,11 +1338,12 @@ export default function AnalysisPage() {
                       pnlChart.symbol,
                     )
                   }
-                  height={320}
+                  height={chartHSm}
                 />
               </CardContent>
             </Card>
           )}
+          <ScrollTable>
           <Table size="small">
             <TableHead>
               <TableRow>
@@ -1330,6 +1388,7 @@ export default function AnalysisPage() {
                 ))}
             </TableBody>
           </Table>
+          </ScrollTable>
         </TabPanel>
 
         <TabPanel value={tab} index={4}>
@@ -1384,6 +1443,7 @@ export default function AnalysisPage() {
           <Typography variant="subtitle2" gutterBottom>
             候选多单（浮亏优先）
           </Typography>
+          <ScrollTable>
           <Table size="small" sx={{ mb: 3 }}>
             <TableHead>
               <TableRow>
@@ -1439,6 +1499,7 @@ export default function AnalysisPage() {
                 ))}
             </TableBody>
           </Table>
+          </ScrollTable>
 
           <Grid container spacing={2} sx={{ mb: 2 }}>
             <Grid item xs={12} md={3}>

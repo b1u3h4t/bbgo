@@ -11,102 +11,102 @@ import TrendingUpIcon from '@mui/icons-material/TrendingUp';
 import AssessmentIcon from '@mui/icons-material/Assessment';
 import React from 'react';
 import { makeStyles } from '@mui/styles';
+import useMediaQuery from '@mui/material/useMediaQuery';
+import { useTheme } from '@mui/material/styles';
 
-const drawerWidth = 240;
+export const DRAWER_WIDTH = 240;
+export const DRAWER_WIDTH_MOBILE = 'min(86vw, 300px)';
 
 const useStyles = makeStyles((theme) => ({
-  root: {
-    flexGrow: 1,
-    display: 'flex',
-  },
-  toolbar: {
-    paddingRight: 24, // keep right padding when drawer closed
-  },
-  toolbarIcon: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'flex-end',
-    padding: '0 8px',
-    ...theme.mixins.toolbar,
-  },
-  appBarSpacer: theme.mixins.toolbar,
   drawerPaper: {
-    [theme.breakpoints.up('sm')]: {
-      width: drawerWidth,
-      flexShrink: 0,
-    },
-    position: 'relative',
+    width: DRAWER_WIDTH,
+    boxSizing: 'border-box',
     whiteSpace: 'nowrap',
-    transition: theme.transitions.create('width', {
-      easing: theme.transitions.easing.sharp,
-      duration: theme.transitions.duration.enteringScreen,
-    }),
+  },
+  drawerPaperMobile: {
+    width: DRAWER_WIDTH_MOBILE,
+    boxSizing: 'border-box',
+    whiteSpace: 'nowrap',
   },
   drawer: {
-    width: drawerWidth,
+    width: DRAWER_WIDTH,
+    flexShrink: 0,
+  },
+  appBarSpacer: theme.mixins.toolbar,
+  drawerBody: {
+    overflow: 'auto',
+    paddingBottom: 'env(safe-area-inset-bottom, 0px)',
   },
 }));
 
-export default function SideBar() {
+const navMain = [{ href: '/', label: 'Dashboard', icon: <DashboardIcon /> }];
+
+const navSecondary = [
+  { href: '/orders', label: 'Orders', icon: <ListIcon /> },
+  { href: '/trades', label: 'Trades', icon: <ListIcon /> },
+  { href: '/strategies', label: 'Strategies', icon: <TrendingUpIcon /> },
+  { href: '/analysis', label: 'Analysis', icon: <AssessmentIcon /> },
+];
+
+export default function SideBar({ mobileOpen = false, onClose }) {
   const classes = useStyles();
+  const theme = useTheme();
+  // md = 900px; K80 Pro portrait CSS width ~400–440px → temporary drawer
+  const isMobile = useMediaQuery(theme.breakpoints.down('md'), { noSsr: true });
+
+  const handleNav = () => {
+    if (isMobile && onClose) onClose();
+  };
+
+  const renderItems = (items) =>
+    items.map((item) => (
+      <Link href={item.href} key={item.href}>
+        <ListItem button onClick={handleNav}>
+          <ListItemIcon>{item.icon}</ListItemIcon>
+          <ListItemText primary={item.label} />
+        </ListItem>
+      </Link>
+    ));
+
+  const content = (
+    <div className={classes.drawerBody}>
+      <div className={classes.appBarSpacer} />
+      <List>{renderItems(navMain)}</List>
+      <Divider />
+      <List>{renderItems(navSecondary)}</List>
+    </div>
+  );
+
+  if (isMobile) {
+    return (
+      <Drawer
+        variant="temporary"
+        open={mobileOpen}
+        onClose={onClose}
+        ModalProps={{ keepMounted: true }}
+        classes={{ paper: classes.drawerPaperMobile }}
+        sx={{
+          zIndex: (t) => t.zIndex.drawer + 2,
+          '& .MuiDrawer-paper': {
+            width: DRAWER_WIDTH_MOBILE,
+            paddingTop: 'env(safe-area-inset-top, 0px)',
+          },
+        }}
+      >
+        {content}
+      </Drawer>
+    );
+  }
 
   return (
     <Drawer
       variant="permanent"
       className={classes.drawer}
-      PaperProps={{
-        className: classes.drawerPaper,
-      }}
-      anchor={'left'}
-      open={true}
+      classes={{ paper: classes.drawerPaper }}
+      anchor="left"
+      open
     >
-      <div className={classes.appBarSpacer} />
-
-      <List>
-        <Link href={'/'}>
-          <ListItem button>
-            <ListItemIcon>
-              <DashboardIcon />
-            </ListItemIcon>
-            <ListItemText primary="Dashboard" />
-          </ListItem>
-        </Link>
-      </List>
-      <Divider />
-      <List>
-        <Link href={'/orders'}>
-          <ListItem button>
-            <ListItemIcon>
-              <ListIcon />
-            </ListItemIcon>
-            <ListItemText primary="Orders" />
-          </ListItem>
-        </Link>
-        <Link href={'/trades'}>
-          <ListItem button>
-            <ListItemIcon>
-              <ListIcon />
-            </ListItemIcon>
-            <ListItemText primary="Trades" />
-          </ListItem>
-        </Link>
-        <Link href={'/strategies'}>
-          <ListItem button>
-            <ListItemIcon>
-              <TrendingUpIcon />
-            </ListItemIcon>
-            <ListItemText primary="Strategies" />
-          </ListItem>
-        </Link>
-        <Link href={'/analysis'}>
-          <ListItem button>
-            <ListItemIcon>
-              <AssessmentIcon />
-            </ListItemIcon>
-            <ListItemText primary="Analysis" />
-          </ListItem>
-        </Link>
-      </List>
+      {content}
     </Drawer>
   );
 }

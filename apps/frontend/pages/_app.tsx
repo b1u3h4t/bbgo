@@ -25,8 +25,11 @@ export default function MyApp(props) {
         <title>BBGO</title>
         <meta
           name="viewport"
-          content="minimum-scale=1, initial-scale=1, width=device-width"
+          content="width=device-width, initial-scale=1, minimum-scale=1, viewport-fit=cover"
         />
+        <meta name="theme-color" content="#eb9534" />
+        <meta name="mobile-web-app-capable" content="yes" />
+        <meta name="format-detection" content="telephone=no" />
       </Head>
       <ThemeProvider theme={theme}>
         {/* CssBaseline kickstart an elegant, consistent, and simple baseline to build upon. */}
