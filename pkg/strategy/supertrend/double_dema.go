@@ -16,13 +16,19 @@ type DoubleDema struct {
 	slowDEMA       *indicator.DEMA
 }
 
-// getDemaSignal get current DEMA signal
+// getDemaSignal returns the DEMA regime used to filter Supertrend noise.
+// Up = close above both DEMAs; Down = close below both. DirectionNone means mixed/chop.
+// (Previously this required an intra-bar crossover, which almost never aligned with
+// Supertrend and produced empty backtests on already-trending markets.)
 func (dd *DoubleDema) getDemaSignal(openPrice float64, closePrice float64) types.Direction {
+	_ = openPrice
 	var demaSignal types.Direction = types.DirectionNone
+	fast := dd.fastDEMA.Last(0)
+	slow := dd.slowDEMA.Last(0)
 
-	if closePrice > dd.fastDEMA.Last(0) && closePrice > dd.slowDEMA.Last(0) && !(openPrice > dd.fastDEMA.Last(0) && openPrice > dd.slowDEMA.Last(0)) {
+	if closePrice > fast && closePrice > slow {
 		demaSignal = types.DirectionUp
-	} else if closePrice < dd.fastDEMA.Last(0) && closePrice < dd.slowDEMA.Last(0) && !(openPrice < dd.fastDEMA.Last(0) && openPrice < dd.slowDEMA.Last(0)) {
+	} else if closePrice < fast && closePrice < slow {
 		demaSignal = types.DirectionDown
 	}
 

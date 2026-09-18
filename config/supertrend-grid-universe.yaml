@@ -1,0 +1,62 @@
+---
+# SuperTrend backtest aligned to earliest live grid2 deploy (AVAX 2026-09-03).
+# Universe = current UM grid symbols. Prefer 4h ST_LONG; TT breakout is optional confirm.
+#
+#   bbgo backtest --config config/supertrend-grid-universe.yaml --force -v
+#
+persistence:
+  redis:
+    host: 127.0.0.1
+    port: 6379
+    db: 0
+
+sessions:
+  binance:
+    exchange: binance
+    envVarPrefix: BINANCE
+    futures: true
+
+backtest:
+  startTime: "2026-09-03"
+  endTime: "2026-09-17"
+  symbols:
+    - AVAXUSDT
+    - HYPEUSDT
+    - XRPUSDT
+    - NEARUSDT
+    - DOTUSDT
+    - DOGEUSDT
+    - WLDUSDT
+    - ENAUSDT
+  sessions:
+    - binance
+  feeMode: native
+  accounts:
+    binance:
+      makerFeeRate: 0.02%
+      takerFeeRate: 0.05%
+      balances:
+        USDT: 10000.0
+
+exchangeStrategies:
+  # One symbol per run for clean attribution; duplicate block / swap symbol as needed.
+  - on: binance
+    supertrend:
+      symbol: NEARUSDT
+      interval: 4h
+      window: 10
+      supertrendMultiplier: 3
+      leverage: 1.0
+      fastDEMAWindow: 12
+      slowDEMAWindow: 26
+      stopByReversedSupertrend: true
+      stopByReversedDema: false
+      takeProfitAtrMultiplier: 0
+      drawGraph: false
+      exits:
+        - trailingStop:
+            callbackRate: 3%
+            minProfit: 5%
+            interval: 1h
+            side: both
+            closePosition: 100%

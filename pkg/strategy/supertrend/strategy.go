@@ -475,7 +475,9 @@ func (s *Strategy) Run(ctx context.Context, orderExecutor bbgo.OrderExecutor, se
 		openPrice64 := openPrice.Float64()
 
 		// Supertrend signal
-		stSignal := s.Supertrend.GetSignal()
+		// Use continuous trend direction (not flip-only tradeSignal). GetSignal() is
+		// DirectionNone on most bars, which produced empty backtests when combined with DEMA.
+		stSignal := s.Supertrend.Direction()
 
 		// DEMA signal
 		demaSignal := s.doubleDema.getDemaSignal(openPrice64, closePrice64)
