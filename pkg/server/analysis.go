@@ -24,9 +24,75 @@ func (s *Server) registerAnalysisRoutes(r *gin.Engine) {
 	r.GET("/api/analysis/market", s.analysisMarket)
 	r.GET("/api/analysis/grid-calc", s.analysisGridCalc)
 	r.GET("/api/analysis/pnl/today", s.analysisTodayPnL)
+	r.GET("/api/analysis/pnl", s.analysisTodayPnL) // ?period=today|7d|30d (+ daily series)
 	r.GET("/api/analysis/klines", s.analysisKlines)
 	r.GET("/api/analysis/avg-down", s.analysisAvgDown)
 	s.startAnalysisKlineSync()
+}
+
+// analysisPnLDeployStart is CST midnight of the grid deployment day (2026-09-03).
+// Range queries never look further back than this.
+func analysisPnLDeployStart(loc *time.Location) time.Time {
+	return time.Date(2026, 9, 3, 0, 0, 0, 0, loc)
+}
+
+func analysisPnLRange(period string, now time.Time, loc *time.Location) (start, end time.Time, label string) {
+	end = now
+	day0 := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	deploy := analysisPnLDeployStart(loc)
+	switch strings.ToLower(strings.TrimSpace(period)) {
+	case "7d", "7day", "week":
+		start = day0.AddDate(0, 0, -6) // include today → 7 calendar days
+		label = "7d"
+	case "30d", "30day", "month":
+		start = day0.AddDate(0, 0, -29)
+		label = "30d"
+	default:
+		start = day0
+		label = "today"
+	}
+	if start.Before(deploy) {
+		start = deploy
+	}
+	return start, end, label
+}
+
+// queryFuturesIncomeChunked pulls income in ≤7-day windows (Binance-safe) and concatenates.
+func queryFuturesIncomeChunked(
+	ctx context.Context,
+	ex *binance.Exchange,
+	incomeType binanceapi.FuturesIncomeType,
+	start, end time.Time,
+) ([]binanceapi.FuturesIncome, error) {
+	const maxSpan = 7 * 24 * time.Hour
+	var all []binanceapi.FuturesIncome
+	seen := make(map[int64]struct{})
+	cur := start
+	for cur.Before(end) {
+		chunkEnd := cur.Add(maxSpan)
+		if chunkEnd.After(end) {
+			chunkEnd = end
+		}
+		s, e := cur, chunkEnd
+		rows, err := ex.QueryFuturesIncomeHistory(ctx, "", incomeType, &s, &e)
+		if err != nil {
+			return all, err
+		}
+		for _, r := range rows {
+			if r.TranId != 0 {
+				if _, ok := seen[r.TranId]; ok {
+					continue
+				}
+				seen[r.TranId] = struct{}{}
+			}
+			all = append(all, r)
+		}
+		if !chunkEnd.After(cur) {
+			break
+		}
+		cur = chunkEnd
+	}
+	return all, nil
 }
 
 func (s *Server) sessionOrAbort(c *gin.Context) (*bbgo.ExchangeSession, bool) {
@@ -821,13 +887,15 @@ func (s *Server) analysisTodayPnL(c *gin.Context) {
 
 	ex, ok := session.Exchange.(*binance.Exchange)
 	if !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "today PnL requires binance futures session"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "PnL requires binance futures session"})
 		return
 	}
 
 	loc := time.FixedZone("CST", 8*3600)
 	now := time.Now().In(loc)
-	day0 := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	period := c.DefaultQuery("period", "today")
+	rangeStart, rangeEnd, periodLabel := analysisPnLRange(period, now, loc)
+	deployStart := analysisPnLDeployStart(loc)
 
 	// BNB fee discount: COMMISSION income.asset is often BNB — convert to USDT.
 	bnbPrice := 0.0
@@ -839,6 +907,7 @@ func (s *Server) analysisTodayPnL(c *gin.Context) {
 		Realized, CommissionUSDT, CommissionBNB, Funding float64
 	}
 	bySym := map[string]*agg{}
+	byDay := map[string]*agg{} // CST date YYYY-MM-DD
 	var totRealized, totCommUSDT, totCommBNB, totFunding float64
 
 	toUSDT := func(income float64, asset string) (usdt float64, bnb float64) {
@@ -858,9 +927,22 @@ func (s *Server) analysisTodayPnL(c *gin.Context) {
 		}
 	}
 
+	addAgg := func(a *agg, incomeType binanceapi.FuturesIncomeType, inc float64, asset string) {
+		switch incomeType {
+		case binanceapi.FuturesIncomeRealizedPnL:
+			a.Realized += inc
+		case binanceapi.FuturesIncomeCommission:
+			usdt, bnb := toUSDT(inc, asset)
+			a.CommissionUSDT += usdt
+			a.CommissionBNB += bnb
+		case binanceapi.FuturesIncomeFundingFee:
+			a.Funding += inc
+		}
+	}
+
 	incomeCounts := map[string]int{}
 	fetch := func(incomeType binanceapi.FuturesIncomeType) error {
-		rows, err := ex.QueryFuturesIncomeHistory(ctx, "", incomeType, &day0, &now)
+		rows, err := queryFuturesIncomeChunked(ctx, ex, incomeType, rangeStart, rangeEnd)
 		if err != nil {
 			return fmt.Errorf("income %s: %w", incomeType, err)
 		}
@@ -874,18 +956,20 @@ func (s *Server) analysisTodayPnL(c *gin.Context) {
 			if bySym[sym] == nil {
 				bySym[sym] = &agg{}
 			}
+			dayKey := r.Time.Time().In(loc).Format("2006-01-02")
+			if byDay[dayKey] == nil {
+				byDay[dayKey] = &agg{}
+			}
+			addAgg(bySym[sym], r.IncomeType, inc, r.Asset)
+			addAgg(byDay[dayKey], r.IncomeType, inc, r.Asset)
 			switch r.IncomeType {
 			case binanceapi.FuturesIncomeRealizedPnL:
-				bySym[sym].Realized += inc
 				totRealized += inc
 			case binanceapi.FuturesIncomeCommission:
 				usdt, bnb := toUSDT(inc, r.Asset)
-				bySym[sym].CommissionUSDT += usdt
-				bySym[sym].CommissionBNB += bnb
 				totCommUSDT += usdt
 				totCommBNB += bnb
 			case binanceapi.FuturesIncomeFundingFee:
-				bySym[sym].Funding += inc
 				totFunding += inc
 			}
 		}
@@ -920,6 +1004,27 @@ func (s *Server) analysisTodayPnL(c *gin.Context) {
 		return ni > nj
 	})
 
+	// Fill every CST calendar day in range (including zero days) for a continuous series.
+	daily := make([]gin.H, 0)
+	for d := time.Date(rangeStart.Year(), rangeStart.Month(), rangeStart.Day(), 0, 0, 0, 0, loc); !d.After(rangeEnd); d = d.AddDate(0, 0, 1) {
+		key := d.Format("2006-01-02")
+		a := byDay[key]
+		if a == nil {
+			a = &agg{}
+		}
+		daily = append(daily, gin.H{
+			"date":       key,
+			"realized":   roundFloat(a.Realized, 4),
+			"commission": roundFloat(a.CommissionUSDT, 4),
+			"funding":    roundFloat(a.Funding, 4),
+			"net":        roundFloat(a.Realized+a.CommissionUSDT+a.Funding, 4),
+		})
+	}
+	// Newest first for the UI table.
+	for i, j := 0, len(daily)-1; i < j; i, j = i+1, j-1 {
+		daily[i], daily[j] = daily[j], daily[i]
+	}
+
 	positions := collectPositions(ctx, session)
 	uPnLSum := 0.0
 	for _, p := range positions {
@@ -928,14 +1033,17 @@ func (s *Server) analysisTodayPnL(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"session": session.Name,
+		"period":  periodLabel,
 		"range": gin.H{
-			"tz":    "CST",
-			"start": day0.Format(time.RFC3339),
-			"end":   now.Format(time.RFC3339),
+			"tz":          "CST",
+			"start":       rangeStart.Format(time.RFC3339),
+			"end":         rangeEnd.Format(time.RFC3339),
+			"deployStart": deployStart.Format(time.RFC3339),
+			"clamped":     rangeStart.Equal(deployStart) && periodLabel != "today",
 		},
 		"feeNote": gin.H{
 			"bnbPriceUSDT": roundFloat(bnbPrice, 4),
-			"detail":       "COMMISSION paid in BNB is converted to USDT via BNBUSDT last price. Net aligns with Binance /fapi/v1/income (REALIZED_PNL+COMMISSION+FUNDING_FEE) for CST today. Unrealized is current open-position float (not today's delta).",
+			"detail":       "COMMISSION paid in BNB is converted to USDT via BNBUSDT last price. Net aligns with Binance /fapi/v1/income (REALIZED_PNL+COMMISSION+FUNDING_FEE). Ranges are CST; history starts 2026-09-03 (deploy). Unrealized is current open-position float (not period delta).",
 		},
 		"incomeCounts": incomeCounts,
 		"totals": gin.H{
@@ -946,6 +1054,7 @@ func (s *Server) analysisTodayPnL(c *gin.Context) {
 			"net":           roundFloat(totRealized+totCommUSDT+totFunding, 4),
 			"unrealized":    roundFloat(uPnLSum, 4),
 		},
+		"daily":     daily,
 		"positions": positions,
 		"symbols":   symbols,
 	})

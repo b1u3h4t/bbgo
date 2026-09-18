@@ -313,6 +313,7 @@ export default function AnalysisPage() {
   const [gridInterval, setGridInterval] = useState('1h');
   const [pnlInterval, setPnlInterval] = useState('1h');
   const [marketInterval, setMarketInterval] = useState('15m');
+  const [pnlPeriod, setPnlPeriod] = useState<'today' | '7d' | '30d'>('today');
 
   const [symbol, setSymbol] = useState('AVAXUSDT');
   const [atrMult, setAtrMult] = useState('1');
@@ -345,17 +346,17 @@ export default function AnalysisPage() {
     }
   }, []);
 
-  const loadPnl = useCallback(async () => {
+  const loadPnl = useCallback(async (period: 'today' | '7d' | '30d' = pnlPeriod) => {
     setLoading(true);
     setError('');
     try {
-      setPnl(await queryAnalysisTodayPnL());
+      setPnl(await queryAnalysisTodayPnL('binance', period));
     } catch (e: any) {
-      setError(e?.message || 'failed to load today pnl');
+      setError(e?.message || 'failed to load pnl');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [pnlPeriod]);
 
   const loadGrid = useCallback(async () => {
     setLoading(true);
@@ -509,7 +510,7 @@ export default function AnalysisPage() {
           Analysis
         </Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-          行情结构、保证金利用率、ATR 网格试算、今日已实现盈亏（与运维聊天中的分析同口径）
+          行情结构、保证金利用率、ATR 网格试算、区间/每日已实现盈亏（CST，自 2026-09-03 部署起）
         </Typography>
 
         {loading && <LinearProgress sx={{ mb: 2 }} />}
@@ -535,7 +536,7 @@ export default function AnalysisPage() {
           <Tab label="行情分析" />
           <Tab label="保证金" />
           <Tab label="网格计算" />
-          <Tab label="今日盈亏" />
+          <Tab label="盈亏" />
           <Tab label="慎重补仓" />
         </Tabs>
 
@@ -1081,11 +1082,25 @@ export default function AnalysisPage() {
         </TabPanel>
 
         <TabPanel value={tab} index={3}>
-          <Box sx={{ display: 'flex', gap: 1, mb: 2 }}>
+          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, mb: 2, alignItems: 'center' }}>
+            <ToggleButtonGroup
+              exclusive
+              size="small"
+              value={pnlPeriod}
+              onChange={(_, v) => {
+                if (!v) return;
+                setPnlPeriod(v);
+                loadPnl(v);
+              }}
+            >
+              <ToggleButton value="today">今日</ToggleButton>
+              <ToggleButton value="7d">近7天</ToggleButton>
+              <ToggleButton value="30d">近30天</ToggleButton>
+            </ToggleButtonGroup>
             <Button
               variant="contained"
               onClick={() => {
-                loadPnl();
+                loadPnl(pnlPeriod);
                 loadMargin();
               }}
             >
@@ -1094,6 +1109,9 @@ export default function AnalysisPage() {
             {pnl?.range && (
               <Typography variant="caption" color="text.secondary">
                 {pnl.range.start} → {pnl.range.end} ({pnl.range.tz})
+                {pnl.range.deployStart
+                  ? ` · 自部署 ${String(pnl.range.deployStart).slice(0, 10)}`
+                  : ''}
               </Typography>
             )}
           </Box>
@@ -1108,10 +1126,38 @@ export default function AnalysisPage() {
           {pnl?.totals && (
             <Grid container spacing={2} sx={{ mb: 2 }}>
               {[
-                ['今日已实现', pnl.totals.realized],
-                ['今日手续费', pnl.totals.commission],
-                ['今日资金费', pnl.totals.funding],
-                ['今日净流水', pnl.totals.net],
+                [
+                  pnlPeriod === 'today'
+                    ? '今日已实现'
+                    : pnlPeriod === '7d'
+                      ? '7日已实现'
+                      : '30日已实现',
+                  pnl.totals.realized,
+                ],
+                [
+                  pnlPeriod === 'today'
+                    ? '今日手续费'
+                    : pnlPeriod === '7d'
+                      ? '7日手续费'
+                      : '30日手续费',
+                  pnl.totals.commission,
+                ],
+                [
+                  pnlPeriod === 'today'
+                    ? '今日资金费'
+                    : pnlPeriod === '7d'
+                      ? '7日资金费'
+                      : '30日资金费',
+                  pnl.totals.funding,
+                ],
+                [
+                  pnlPeriod === 'today'
+                    ? '今日净流水'
+                    : pnlPeriod === '7d'
+                      ? '7日净流水'
+                      : '30日净流水',
+                  pnl.totals.net,
+                ],
                 ['当前浮动盈亏', pnl.totals.unrealized],
               ].map(([k, v]) => (
                 <Grid item xs={6} sm={4} md={2} key={String(k)}>
@@ -1132,15 +1178,62 @@ export default function AnalysisPage() {
               {pnl.feeNote && (
                 <Grid item xs={12}>
                   <Typography variant="caption" color="text.secondary">
-                    今日净流水对齐币安合约收入流水（REALIZED_PNL + COMMISSION +
-                    FUNDING，CST 0:00 起）；手续费按 BNB≈
+                    净流水对齐币安合约收入（REALIZED_PNL + COMMISSION +
+                    FUNDING，CST）；区间最早从 2026-09-03 部署日起算。手续费按 BNB≈
                     {pnl.feeNote.bnbPriceUSDT} 折合 USDT（原生{' '}
                     {pnl.totals.commissionBNB} BNB）。当前浮动盈亏是持仓累计浮盈亏，
-                    不是「今日」增量。点击下方 symbol 可看 K 线+网格 pins。
+                    不是区间增量。点击下方 symbol 可看 K 线+网格 pins。
                   </Typography>
                 </Grid>
               )}
             </Grid>
+          )}
+          {(pnl?.daily || []).length > 0 && (
+            <Card variant="outlined" sx={{ mb: 2 }}>
+              <CardContent>
+                <Typography variant="subtitle2" sx={{ mb: 1 }}>
+                  每日盈亏（CST）
+                </Typography>
+                <Table size="small">
+                  <TableHead>
+                    <TableRow>
+                      <TableCell>日期</TableCell>
+                      <TableCell align="right">Realized</TableCell>
+                      <TableCell align="right">Commission</TableCell>
+                      <TableCell align="right">Funding</TableCell>
+                      <TableCell align="right">Net</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {pnl.daily.map((row: any) => (
+                      <TableRow key={row.date}>
+                        <TableCell>{row.date}</TableCell>
+                        <TableCell
+                          align="right"
+                          sx={{ color: pnlColor(Number(row.realized)) }}
+                        >
+                          {row.realized}
+                        </TableCell>
+                        <TableCell align="right">{row.commission}</TableCell>
+                        <TableCell
+                          align="right"
+                          sx={{ color: pnlColor(Number(row.funding)) }}
+                        >
+                          {row.funding}
+                        </TableCell>
+                        <TableCell
+                          align="right"
+                          sx={{ color: pnlColor(Number(row.net)), fontWeight: 600 }}
+                        >
+                          {Number(row.net) > 0 ? '+' : ''}
+                          {row.net}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </CardContent>
+            </Card>
           )}
           {pnlChart && (
             <Card variant="outlined" sx={{ mb: 2 }}>
