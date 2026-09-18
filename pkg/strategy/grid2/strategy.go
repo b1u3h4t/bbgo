@@ -965,6 +965,24 @@ func (s *Strategy) processFilledOrder(o types.Order) {
 		s.logger.Infof("new quantity %s @ price %s is less than min base quantity %s, please check it. it may due to trading fee or the min base quantity setting changes", newQuantity.String(), newPrice.String(), s.Market.MinQuantity.String())
 	}
 
+	if !s.shouldPlaceGridOrder(newSide, newPrice) {
+		base, avg := s.Position.GetBaseAndAverageCost()
+		s.logger.Infof(
+			"skip GRID REVERSE ORDER %s @ %s: would close at a loss after fee (base=%s avgCost=%s gross=%s fee=%s net=%s feeRate=%s); flat must be profitable",
+			newSide, newPrice.String(), base.String(), avg.String(),
+			s.Position.UnrealizedProfit(newPrice).String(),
+			s.estimatedCloseFee(newPrice).String(),
+			s.netCloseProfitAt(newPrice).String(),
+			s.closingFeeRate().Percentage(),
+		)
+		if profit != nil {
+			s.consumeOrderProfitAccumulators(o.OrderID)
+		} else {
+			s.discardOrderProfitAccumulators(o.OrderID)
+		}
+		return
+	}
+
 	orderForm := s.newGridLimitOrder(newSide, newPrice, newQuantity)
 
 	s.logger.Infof("SUBMIT GRID REVERSE ORDER: %s", orderForm.String())
@@ -1430,16 +1448,115 @@ func (s *Strategy) newStopLossPriceHandler(ctx context.Context, session *bbgo.Ex
 
 // canTakeProfitClose reports whether take-profit may cancel the grid / flatten.
 // Flat or dust positions are allowed (grid-only exit). Open positions must have
-// positive unrealized PnL at mark — never flatten a losing book on TP.
+// positive net unrealized PnL after estimated closing fees.
 func (s *Strategy) canTakeProfitClose(mark fixedpoint.Value) bool {
+	return s.isProfitableCloseAt(mark)
+}
+
+// isClosingOrderSide reports whether this side reduces the current position
+// (sell covers long, buy covers short). Flat → false.
+func (s *Strategy) isClosingOrderSide(side types.SideType) bool {
+	if s.Position == nil {
+		return false
+	}
+	base := s.Position.GetBase()
+	switch {
+	case base.Sign() > 0:
+		return side == types.SideTypeSell
+	case base.Sign() < 0:
+		return side == types.SideTypeBuy
+	default:
+		return false
+	}
+}
+
+// closingFeeRate is the fee rate used when judging close profitability.
+// Prefer strategy FeeRate, then session maker (grid posts maker), else 0.075%.
+func (s *Strategy) closingFeeRate() fixedpoint.Value {
+	if s.FeeRate.Sign() > 0 {
+		return s.FeeRate
+	}
+	if s.session != nil {
+		if s.session.MakerFeeRate.Sign() > 0 {
+			return s.session.MakerFeeRate
+		}
+		if s.session.TakerFeeRate.Sign() > 0 {
+			return s.session.TakerFeeRate
+		}
+	}
+	return fixedpoint.NewFromFloat(0.075 * 0.01)
+}
+
+// estimatedCloseFee is the quote (or Coin-M base) fee to flatten at price.
+func (s *Strategy) estimatedCloseFee(price fixedpoint.Value) fixedpoint.Value {
+	if s.Position == nil || price.IsZero() || price.Sign() <= 0 {
+		return fixedpoint.Zero
+	}
+	qty := s.Position.GetBase().Abs()
+	if qty.IsZero() {
+		return fixedpoint.Zero
+	}
+	feeRate := s.closingFeeRate()
+	if feeRate.IsZero() {
+		return fixedpoint.Zero
+	}
+	// Coin-M: fee paid in base ≈ CV * qty / price * rate (matches UnrealizedProfit unit).
+	if s.Market.ContractValue.Sign() > 0 {
+		return s.Market.ContractValue.Mul(qty).Div(price).Mul(feeRate)
+	}
+	return price.Mul(qty).Mul(feeRate)
+}
+
+// netCloseProfitAt returns unrealized PnL at price minus estimated closing fee.
+func (s *Strategy) netCloseProfitAt(price fixedpoint.Value) fixedpoint.Value {
+	if s.Position == nil {
+		return fixedpoint.Zero
+	}
+	return s.Position.UnrealizedProfit(price).Sub(s.estimatedCloseFee(price))
+}
+
+// isProfitableCloseAt reports whether reducing the position at price would
+// realize positive PnL after estimated closing fees (strict). Flat/dust → true.
+func (s *Strategy) isProfitableCloseAt(price fixedpoint.Value) bool {
 	if s.Position == nil {
 		return true
 	}
 	base := s.Position.GetBase()
-	if base.IsZero() || s.Position.IsDust(mark) {
+	if base.IsZero() || s.Position.IsDust(price) {
 		return true
 	}
-	return s.Position.UnrealizedProfit(mark).Sign() > 0
+	return s.netCloseProfitAt(price).Sign() > 0
+}
+
+// shouldPlaceGridOrder is false when the order would close/reduce the position
+// at a loss after fees. Opening / flat sides always pass — "平仓一定要盈利".
+func (s *Strategy) shouldPlaceGridOrder(side types.SideType, price fixedpoint.Value) bool {
+	if !s.isClosingOrderSide(side) {
+		return true
+	}
+	return s.isProfitableCloseAt(price)
+}
+
+// twinPinReverseIsUnprofitableClose reports whether filling the missing reverse
+// for an empty twin (key = sell pin) would close the book at a loss after fees.
+// Short → reverse buy at next-lower pin; long → reverse sell at sell pin.
+func (s *Strategy) twinPinReverseIsUnprofitableClose(sellPin fixedpoint.Value) bool {
+	if s.Position == nil || s.grid == nil {
+		return false
+	}
+	base := s.Position.GetBase()
+	switch {
+	case base.Sign() < 0:
+		lower, ok := s.grid.NextLowerPin(sellPin)
+		if !ok {
+			return false
+		}
+		return !s.isProfitableCloseAt(fixedpoint.Value(lower))
+	case base.Sign() > 0:
+		return !s.isProfitableCloseAt(sellPin)
+	default:
+		return false
+	}
 }
 
 func (s *Strategy) newTakeProfitHandler(ctx context.Context, session *bbgo.ExchangeSession) types.KLineCallback {
@@ -1455,10 +1572,12 @@ func (s *Strategy) newTakeProfitHandler(ctx context.Context, session *bbgo.Excha
 		if !s.canTakeProfitClose(mark) {
 			base, avg := s.Position.GetBaseAndAverageCost()
 			s.logger.Infof(
-				"takeProfitPrice %s hit (high=%s) but position not profitable (base=%s avgCost=%s mark=%s upnl=%s), skip close",
+				"takeProfitPrice %s hit (high=%s) but position not profitable after fee (base=%s avgCost=%s mark=%s gross=%s fee=%s net=%s), skip close",
 				s.TakeProfitPrice.String(), k.High.String(),
 				base.String(), avg.String(), mark.String(),
 				s.Position.UnrealizedProfit(mark).String(),
+				s.estimatedCloseFee(mark).String(),
+				s.netCloseProfitAt(mark).String(),
 			)
 			return
 		}

@@ -173,6 +173,17 @@ func (s *Strategy) recover(ctx context.Context) error {
 		return nil
 	}
 
+	// Drop closing orders that would lock in a loss (e.g. WLD short: buy above avgCost).
+	if err := s.cancelUnprofitableClosingOrders(ctx, openOrders); err != nil {
+		s.logger.WithError(err).Warn("[Recover] cancel unprofitable closing orders failed")
+	} else {
+		// Re-query after cancel so twin sync does not resurrect canceled IDs.
+		openOrders, err = retry.QueryOpenOrdersUntilSuccessfulLite(ctx, s.session.Exchange, s.Symbol)
+		if err != nil {
+			return err
+		}
+	}
+
 	if s.getGrid() == nil {
 		// Intentional CloseGrid sets gridStopped; do not rebuild from history.
 		if s.gridStopped.Load() {
@@ -314,20 +325,36 @@ func (s *Strategy) recover(ctx context.Context) error {
 					}
 				}
 			}
-			s.mu.Unlock()
-			return fmt.Errorf("[Recover] there is still empty grid in twin orderbook")
+
+			// Profit gate: leave pins empty when the only reverse would close at a loss.
+			stillRequired := 0
+			for _, pin := range noTwinOrderPins {
+				twinOrder := activeOrdersInTwinOrderBook.GetTwinOrder(pin)
+				if twinOrder != nil && twinOrder.Exist() {
+					continue
+				}
+				if s.twinPinReverseIsUnprofitableClose(pin) {
+					base, avg := s.Position.GetBaseAndAverageCost()
+					s.logger.Infof(
+						"[Recover] leave pin %s empty: reverse would close at a loss after fee (base=%s avgCost=%s feeRate=%s)",
+						pin.String(), base.String(), avg.String(), s.closingFeeRate().Percentage(),
+					)
+					continue
+				}
+				stillRequired++
+			}
+			if stillRequired > 0 {
+				s.mu.Unlock()
+				return fmt.Errorf("[Recover] there is still empty grid in twin orderbook")
+			}
+			s.logger.Info("[Recover] remaining empty twins are profit-gated; continue with recovered fills only")
 		}
 
 		for _, pin := range noTwinOrderPins {
 			twinOrder := activeOrdersInTwinOrderBook.GetTwinOrder(pin)
-			if twinOrder == nil {
-				s.mu.Unlock()
-				return fmt.Errorf("[Recover] should not get nil twin order after recovering empty grid, check it")
-			}
-
-			if !twinOrder.Exist() {
-				s.mu.Unlock()
-				return fmt.Errorf("[Recover] should not get empty twin order after recovering empty grid, check it")
+			if twinOrder == nil || !twinOrder.Exist() {
+				// Profit-gated empty pin — already logged above.
+				continue
 			}
 
 			filledOrder := twinOrder.GetOrder()
@@ -383,6 +410,57 @@ func (s *Strategy) recover(ctx context.Context) error {
 	bbgo.Sync(ctx, s)
 
 	return nil
+}
+
+// cancelUnprofitableClosingOrders cancels open buy/sell that would reduce the
+// position at a loss. Recover must not keep losing covers ("平仓一定要盈利").
+// openOrders may be a pre-fetched snapshot; nil triggers a fresh query.
+func (s *Strategy) cancelUnprofitableClosingOrders(ctx context.Context, openOrders []types.Order) error {
+	if s.Position == nil || s.Position.GetBase().IsZero() {
+		return nil
+	}
+	if s.orderExecutor == nil || s.session == nil {
+		return nil
+	}
+
+	var err error
+	if openOrders == nil {
+		openOrders, err = retry.QueryOpenOrdersUntilSuccessfulLite(ctx, s.session.Exchange, s.Symbol)
+		if err != nil {
+			return err
+		}
+	}
+	if len(openOrders) == 0 {
+		return nil
+	}
+
+	var toCancel []types.Order
+	base, avg := s.Position.GetBaseAndAverageCost()
+	for _, o := range openOrders {
+		if !s.isClosingOrderSide(o.Side) {
+			continue
+		}
+		if s.isProfitableCloseAt(o.Price) {
+			continue
+		}
+		s.logger.Infof(
+			"[Recover] cancel unprofitable closing %s #%d @ %s (base=%s avgCost=%s gross=%s fee=%s net=%s feeRate=%s)",
+			o.Side, o.OrderID, o.Price.String(),
+			base.String(), avg.String(),
+			s.Position.UnrealizedProfit(o.Price).String(),
+			s.estimatedCloseFee(o.Price).String(),
+			s.netCloseProfitAt(o.Price).String(),
+			s.closingFeeRate().Percentage(),
+		)
+		toCancel = append(toCancel, o)
+	}
+	if len(toCancel) == 0 {
+		return nil
+	}
+
+	s.lockWriteOrders()
+	defer s.unlockWriteOrders()
+	return s.orderExecutor.GracefulCancel(ctx, toCancel...)
 }
 
 func (s *Strategy) recoverEmptyGridOnTwinOrderBook(

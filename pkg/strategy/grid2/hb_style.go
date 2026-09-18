@@ -40,6 +40,8 @@ func (a *AutoBollinger) String() string {
 // Orders nearest to lastPrice are preferred when MaxOpenOrders is set.
 // activationBounds only applies when lastPrice is inside the configured grid range;
 // otherwise classic grid behavior is preserved (place the near-side book).
+// Closing-side orders that would reduce the position at a loss are dropped
+// ("平仓一定要盈利") — same gate as recover / reverse placement.
 func (s *Strategy) filterGridSubmitOrders(orders []types.SubmitOrder, lastPrice fixedpoint.Value) []types.SubmitOrder {
 	if len(orders) == 0 {
 		return orders
@@ -88,6 +90,22 @@ func (s *Strategy) filterGridSubmitOrders(orders []types.SubmitOrder, lastPrice 
 			kept = append(kept, rankedOrders[i].order)
 		}
 		s.logger.Infof("maxOpenOrders %d: kept %d nearest of %d orders", s.MaxOpenOrders, len(kept), len(filtered))
+		filtered = kept
+	}
+
+	if s.Position != nil && !s.Position.GetBase().IsZero() {
+		kept := make([]types.SubmitOrder, 0, len(filtered))
+		base, avg := s.Position.GetBaseAndAverageCost()
+		for _, o := range filtered {
+			if s.shouldPlaceGridOrder(o.Side, o.Price) {
+				kept = append(kept, o)
+				continue
+			}
+			s.logger.Infof(
+				"drop %s @ %s: would close at a loss after fee (base=%s avgCost=%s feeRate=%s); flat must be profitable",
+				o.Side, o.Price.String(), base.String(), avg.String(), s.closingFeeRate().Percentage(),
+			)
+		}
 		filtered = kept
 	}
 
@@ -166,10 +184,12 @@ func (s *Strategy) newTakeProfitRatioHandler(ctx context.Context, _ *bbgo.Exchan
 		if !s.canTakeProfitClose(mark) {
 			base, avg := s.Position.GetBaseAndAverageCost()
 			s.logger.Infof(
-				"takeProfitRatio %s hit (high=%s target=%s) but position not profitable (base=%s avgCost=%s mark=%s upnl=%s), skip close",
+				"takeProfitRatio %s hit (high=%s target=%s) but position not profitable after fee (base=%s avgCost=%s mark=%s gross=%s fee=%s net=%s), skip close",
 				s.TakeProfitRatio.Percentage(), k.High.String(), target.String(),
 				base.String(), avg.String(), mark.String(),
 				s.Position.UnrealizedProfit(mark).String(),
+				s.estimatedCloseFee(mark).String(),
+				s.netCloseProfitAt(mark).String(),
 			)
 			return
 		}
