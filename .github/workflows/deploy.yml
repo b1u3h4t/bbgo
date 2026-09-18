@@ -56,7 +56,13 @@ jobs:
           BBGO_SSH_HOST: bbgo
           BBGO_HOME: /home/admin/bbgo
           GITHUB_SHA: ${{ github.sha }}
+          # Self-hosted runners often mount /tmp as small tmpfs; yarn/go can ENOSPC it
+          # and then Actions fails writing _diag pages ("No space left on device").
+          TMPDIR: /home/github-runner/.cache/tmp
+          GOTMPDIR: /home/github-runner/.cache/tmp
         run: |
+          set -euo pipefail
+          mkdir -p "${TMPDIR}"
           chmod +x scripts/deploy-prod.sh scripts/deploy-prod-remote.sh
           ssh -o BatchMode=yes -o ConnectTimeout=10 bbgo 'echo ssh_ok; systemctl is-active bbgo'
           scripts/deploy-prod.sh
