@@ -998,8 +998,9 @@ func (s *Strategy) processFilledOrder(o types.Order) {
 	}
 
 	orderForm := s.newGridLimitOrder(newSide, newPrice, newQuantity)
+	orderForm = s.applyUSDTMReverseOrderFlags(orderForm)
 
-	s.logger.Infof("SUBMIT GRID REVERSE ORDER: %s", orderForm.String())
+	s.logger.Infof("SUBMIT GRID REVERSE ORDER: %s reduceOnly=%v", orderForm.String(), orderForm.ReduceOnly)
 
 	writeCtx := s.getWriteContext()
 	s.lockWriteOrders()
@@ -1010,7 +1011,7 @@ func (s *Strategy) processFilledOrder(o types.Order) {
 		return
 	}
 	if len(createdOrders) == 0 {
-		s.logger.Errorf("GRID REVERSE ORDER SUBMISSION returned empty orders: %s", orderForm.String())
+		s.logger.Errorf("GRID REVERSE ORDER SUBMISSION returned empty orders: %s (often -2019 margin; recover will try reduceOnly repair)", orderForm.String())
 		return
 	}
 
@@ -1488,6 +1489,176 @@ func (s *Strategy) isClosingOrderSide(side types.SideType) bool {
 	}
 }
 
+// applyUSDTMReverseOrderFlags marks reduce-only only for directional grids
+// (LongOnly / ShortOnly). Two-sided grids must stay able to flip position, so
+// reverse sells/buys are plain maker limits (makerOnly) — no ReduceOnly.
+func (s *Strategy) applyUSDTMReverseOrderFlags(order types.SubmitOrder) types.SubmitOrder {
+	if !s.isUSDTMFutures() || s.Position == nil {
+		return order
+	}
+	if !s.LongOnly && !s.ShortOnly {
+		return order
+	}
+	base := s.Position.GetBase()
+	if base.IsZero() {
+		return order
+	}
+	closing := (base.Sign() > 0 && order.Side == types.SideTypeSell) ||
+		(base.Sign() < 0 && order.Side == types.SideTypeBuy)
+	if !closing {
+		return order
+	}
+	order.ReduceOnly = true
+	capQty := base.Abs()
+	if order.Quantity.Compare(capQty) > 0 {
+		order.Quantity = s.Market.TruncateQuantity(capQty)
+	}
+	return order
+}
+
+// repairMissingReverseOrders places reduce-only (or naked when !LongOnly) orders
+// for empty twin pins so the book again has sells above last / buys below last
+// after reverse submits failed (e.g. -2019) or recover skipped duplicated fills.
+func (s *Strategy) repairMissingReverseOrders(ctx context.Context) error {
+	if s.grid == nil || s.orderExecutor == nil || s.session == nil || s.Position == nil {
+		return nil
+	}
+	if s.gridStopped.Load() {
+		return nil
+	}
+
+	openOrders, err := retry.QueryOpenOrdersUntilSuccessfulLite(ctx, s.session.Exchange, s.Symbol)
+	if err != nil {
+		return fmt.Errorf("repair missing reverse: query open orders: %w", err)
+	}
+	occupied := make(map[string]bool, len(openOrders))
+	for _, o := range openOrders {
+		occupied[o.Price.String()] = true
+	}
+
+	lastPrice, err := s.getLastTradePrice(ctx, s.session)
+	if err != nil || lastPrice.IsZero() {
+		return err
+	}
+
+	base := s.Position.GetBase()
+	remaining := base.Abs()
+	pins := s.grid.Pins
+	gridQty := s.QuantityOrAmount.Quantity
+	if gridQty.IsZero() {
+		return nil
+	}
+
+	var toSubmit []types.SubmitOrder
+
+	// Walk sell-keys (pins[1..]) from nearest-above-last upward so inventory
+	// covers the closest sells first.
+	type pinNeed struct {
+		sellPrice fixedpoint.Value
+		buyPrice  fixedpoint.Value
+	}
+	var above []pinNeed
+	var below []pinNeed
+	for i := 1; i < len(pins); i++ {
+		sellPrice := fixedpoint.Value(pins[i])
+		buyPrice := fixedpoint.Value(pins[i-1])
+		if occupied[sellPrice.String()] || occupied[buyPrice.String()] {
+			continue // twin already has a live order
+		}
+		n := pinNeed{sellPrice: sellPrice, buyPrice: buyPrice}
+		if sellPrice.Compare(lastPrice) >= 0 {
+			above = append(above, n)
+		} else {
+			below = append(below, n)
+		}
+	}
+
+	submitOne := func(side types.SideType, price, qty fixedpoint.Value, reduceOnly bool) {
+		if qty.IsZero() || s.Market.IsDustQuantity(qty, price) {
+			return
+		}
+		if !s.shouldPlaceGridOrder(side, price) {
+			return
+		}
+		o := s.newGridLimitOrder(side, price, qty)
+		o.ReduceOnly = reduceOnly
+		if reduceOnly {
+			o = s.applyUSDTMReverseOrderFlags(o)
+			if o.Quantity.IsZero() || s.Market.IsDustQuantity(o.Quantity, price) {
+				return
+			}
+		}
+		toSubmit = append(toSubmit, o)
+	}
+
+	switch {
+	case base.Sign() > 0:
+		if s.LongOnly {
+			// Directional long: inventory-backed reduce-only sells only.
+			for _, n := range above {
+				if remaining.Sign() <= 0 {
+					break
+				}
+				qty := fixedpoint.Min(gridQty, remaining)
+				submitOne(types.SideTypeSell, n.sellPrice, qty, true)
+				remaining = remaining.Sub(qty)
+			}
+		} else {
+			// Two-sided: every empty sell pin above last is a normal maker sell
+			// (may reduce long or open short) — no ReduceOnly.
+			for _, n := range above {
+				submitOne(types.SideTypeSell, n.sellPrice, gridQty, false)
+			}
+		}
+		for _, n := range below {
+			submitOne(types.SideTypeBuy, n.buyPrice, gridQty, false)
+		}
+	case base.Sign() < 0:
+		if s.ShortOnly {
+			for i := len(below) - 1; i >= 0; i-- {
+				n := below[i]
+				if remaining.Sign() <= 0 {
+					break
+				}
+				qty := fixedpoint.Min(gridQty, remaining)
+				submitOne(types.SideTypeBuy, n.buyPrice, qty, true)
+				remaining = remaining.Sub(qty)
+			}
+		} else {
+			for i := len(below) - 1; i >= 0; i-- {
+				n := below[i]
+				submitOne(types.SideTypeBuy, n.buyPrice, gridQty, false)
+			}
+			for _, n := range above {
+				submitOne(types.SideTypeSell, n.sellPrice, gridQty, false)
+			}
+		}
+	default:
+		// Flat: mirror openGrid — sells above last, buys below.
+		for _, n := range above {
+			submitOne(types.SideTypeSell, n.sellPrice, gridQty, false)
+		}
+		for _, n := range below {
+			submitOne(types.SideTypeBuy, n.buyPrice, gridQty, false)
+		}
+	}
+
+	if len(toSubmit) == 0 {
+		return nil
+	}
+
+	s.logger.Infof("repairMissingReverseOrders: submitting %d orders (base=%s last=%s)", len(toSubmit), base.String(), lastPrice.String())
+	writeCtx := s.getWriteContext(ctx)
+	s.lockWriteOrders()
+	defer s.unlockWriteOrders()
+	created, err := s.submitGridOrders(writeCtx, toSubmit)
+	if err != nil {
+		return fmt.Errorf("repair missing reverse submit: %w", err)
+	}
+	s.logger.Infof("repairMissingReverseOrders: created %d/%d", len(created), len(toSubmit))
+	return nil
+}
+
 // closingFeeRate is the fee rate used when judging close profitability.
 // Prefer strategy FeeRate, then session maker (grid posts maker), else 0.075%.
 func (s *Strategy) closingFeeRate() fixedpoint.Value {
@@ -1877,11 +2048,19 @@ func (s *Strategy) openGrid(ctx context.Context, session *bbgo.ExchangeSession) 
 	s.unlockWriteOrders()
 	if err2 != nil {
 		s.EmitGridError(err2)
-		// clear grid so a later open can retry
-		s.mu.Lock()
-		s.grid = nil
-		s.mu.Unlock()
-		return err2
+		if len(createdOrders) == 0 {
+			// clear grid so a later open can retry
+			s.mu.Lock()
+			s.grid = nil
+			s.mu.Unlock()
+			return err2
+		}
+		// Partial book is live (e.g. nearer sells ok, far pin -2019). Keep
+		// grid and repair empty twins instead of wiping.
+		s.logger.WithError(err2).Warnf(
+			"openGrid partial submit (%d/%d created); keeping grid and repairing missing pins",
+			len(createdOrders), len(submitOrders),
+		)
 	}
 
 	// try to always emit grid ready
@@ -1908,7 +2087,13 @@ func (s *Strategy) openGrid(ctx context.Context, session *bbgo.ExchangeSession) 
 		bbgo.Sync(ctx, s)
 	}
 
-	s.logger.Infof("ALL GRID ORDERS SUBMITTED")
+	if err2 == nil {
+		s.logger.Infof("ALL GRID ORDERS SUBMITTED")
+	}
+
+	if errRepair := s.repairMissingReverseOrders(writeCtx); errRepair != nil {
+		s.logger.WithError(errRepair).Warn("repairMissingReverseOrders after openGrid failed")
+	}
 
 	s.updateGridNumOfOrdersMetrics(grid)
 	return nil
@@ -1969,6 +2154,9 @@ func (s *Strategy) generateGridOrders(totalQuote, totalBase, lastPrice fixedpoin
 	if s.isCoinM() {
 		return s.generateCoinMGridOrders(totalBase, lastPrice)
 	}
+	if s.isUSDTMFutures() {
+		return s.generateUSDTMGridOrders(totalQuote, totalBase, lastPrice)
+	}
 
 	var pins = s.grid.Pins
 	var usedBase = fixedpoint.Zero
@@ -2010,26 +2198,8 @@ func (s *Strategy) generateGridOrders(totalQuote, totalBase, lastPrice fixedpoin
 			if usedBase.Add(quantity).Compare(totalBase) <= 0 {
 				submitOrders = append(submitOrders, s.newGridLimitOrder(types.SideTypeSell, sellPrice, quantity))
 				usedBase = usedBase.Add(quantity)
-			} else if s.isUSDTMFutures() && !s.LongOnly {
-				// USDT-M futures: open short with quote margin; never convert to a
-				// marketable buy above lastPrice (spot fallback would do that).
-				quoteQuantity := quantity.Mul(sellPrice)
-				if s.Leverage.Sign() > 0 {
-					quoteQuantity = quoteQuantity.Div(s.leverageOrOne())
-				}
-				roundUpQuoteQuantity := quoteQuantity.Round(s.Market.PricePrecision, fixedpoint.Up)
-				if usedQuote.Add(roundUpQuoteQuantity).Compare(totalQuote) > 0 {
-					return nil, fmt.Errorf(
-						"usdt-m: used quote margin %f + %f > available %f %s for sell @ %s",
-						usedQuote.Float64(), roundUpQuoteQuantity.Float64(),
-						totalQuote.Float64(), s.Market.QuoteCurrency, sellPrice.String(),
-					)
-				}
-				submitOrders = append(submitOrders, s.newGridLimitOrder(types.SideTypeSell, sellPrice, quantity))
-				usedQuote = usedQuote.Add(roundUpQuoteQuantity)
 			} else {
-				// Spot or LongOnly USDT-M: no base to sell — place a buy at the next
-				// lower pin instead of opening a naked short.
+				// Spot: no base to sell — place a buy at the next lower pin.
 				nextPin := pins[i-1]
 				nextPrice := fixedpoint.Value(nextPin)
 				submitOrders = append(submitOrders, s.newGridLimitOrder(types.SideTypeBuy, nextPrice, quantity))
@@ -2079,6 +2249,163 @@ func (s *Strategy) generateGridOrders(totalQuote, totalBase, lastPrice fixedpoin
 		}
 	}
 
+	return submitOrders, nil
+}
+
+// generateUSDTMGridOrders builds the USDT-M twin ladder.
+//
+// Two-sided (!LongOnly): plain maker sells above last + buys below (no ReduceOnly —
+// fills may reduce or flip short). LongOnly: inventory-backed ReduceOnly sells only.
+// Sells are nearest-above-last first so mid pins win when IM is tight.
+func (s *Strategy) generateUSDTMGridOrders(totalQuote, totalBase, lastPrice fixedpoint.Value) ([]types.SubmitOrder, error) {
+	pins := s.grid.Pins
+	if len(pins) < 2 {
+		return nil, fmt.Errorf("usdt-m: grid needs at least 2 pins")
+	}
+
+	quantity := s.QuantityOrAmount.Quantity
+	amountMode := quantity.IsZero()
+
+	inv := totalBase
+	if s.Position != nil && s.Position.GetBase().Sign() > 0 {
+		pos := s.Position.GetBase()
+		if pos.Compare(inv) > 0 {
+			inv = pos
+		}
+	}
+	remainingInv := inv
+	usedQuote := fixedpoint.Zero
+
+	type sellPin struct {
+		idx   int
+		price fixedpoint.Value
+	}
+	var sells []sellPin
+	for i := 1; i < len(pins); i++ {
+		price := fixedpoint.Value(pins[i])
+		placeSell := price.Compare(lastPrice) >= 0
+		if s.BaseGridNum > 0 {
+			placeSell = i >= len(pins)-1-s.BaseGridNum
+		}
+		if !placeSell {
+			continue
+		}
+		sellPrice := price
+		if s.ProfitSpread.Sign() > 0 {
+			sellPrice = sellPrice.Add(s.ProfitSpread)
+		}
+		sells = append(sells, sellPin{idx: i, price: sellPrice})
+	}
+
+	qtyAt := func(price fixedpoint.Value) fixedpoint.Value {
+		if amountMode {
+			return s.QuantityOrAmount.Amount.Div(price)
+		}
+		return quantity
+	}
+
+	var sellOrders []types.SubmitOrder
+	var buys []types.SubmitOrder
+
+	if s.LongOnly {
+		// Directional: only reduce-only sells up to inventory; leftover → twin buy.
+		covered := make(map[int]bool, len(sells))
+		for _, sp := range sells {
+			if remainingInv.Sign() <= 0 {
+				break
+			}
+			q := qtyAt(sp.price)
+			q = fixedpoint.Min(q, remainingInv)
+			q = s.Market.TruncateQuantity(q)
+			if q.IsZero() || s.Market.IsDustQuantity(q, sp.price) {
+				break
+			}
+			o := s.newGridLimitOrder(types.SideTypeSell, sp.price, q)
+			o.ReduceOnly = true
+			sellOrders = append(sellOrders, o)
+			remainingInv = remainingInv.Sub(q)
+			covered[sp.idx] = true
+		}
+		for _, sp := range sells {
+			if covered[sp.idx] {
+				continue
+			}
+			nextPrice := fixedpoint.Value(pins[sp.idx-1])
+			bq := qtyAt(nextPrice)
+			buys = append(buys, s.newGridLimitOrder(types.SideTypeBuy, nextPrice, bq))
+			usedQuote = usedQuote.Add(bq.Mul(nextPrice).Round(s.Market.PricePrecision, fixedpoint.Up))
+		}
+	} else {
+		// Two-sided: full-size maker sells (no ReduceOnly), nearest-first.
+		for _, sp := range sells {
+			q := qtyAt(sp.price)
+			q = s.Market.TruncateQuantity(q)
+			if q.IsZero() || s.Market.IsDustQuantity(q, sp.price) {
+				continue
+			}
+			quoteQuantity := q.Mul(sp.price)
+			if s.Leverage.Sign() > 0 {
+				quoteQuantity = quoteQuantity.Div(s.leverageOrOne())
+			}
+			roundUpQuoteQuantity := quoteQuantity.Round(s.Market.PricePrecision, fixedpoint.Up)
+			if usedQuote.Add(roundUpQuoteQuantity).Compare(totalQuote) > 0 {
+				s.logger.Warnf(
+					"usdt-m: skip sell @ %s qty=%s (quote margin %s + %s > available %s)",
+					sp.price.String(), q.String(), usedQuote.String(), roundUpQuoteQuantity.String(), totalQuote.String(),
+				)
+				continue
+			}
+			sellOrders = append(sellOrders, s.newGridLimitOrder(types.SideTypeSell, sp.price, q))
+			usedQuote = usedQuote.Add(roundUpQuoteQuantity)
+		}
+	}
+
+	lowestSellIdx := len(pins)
+	for _, sp := range sells {
+		if sp.idx < lowestSellIdx {
+			lowestSellIdx = sp.idx
+		}
+	}
+
+	for i := lowestSellIdx - 1; i >= 0; i-- {
+		if i == len(pins)-1 {
+			continue
+		}
+		if s.ProfitSpread.IsZero() && i+1 == lowestSellIdx {
+			continue
+		}
+		if s.ShortOnly && (s.Position == nil || s.Position.GetBase().Sign() >= 0) {
+			continue
+		}
+		price := fixedpoint.Value(pins[i])
+		q := qtyAt(price)
+		quoteQuantity := q.Mul(price)
+		roundUpQuoteQuantity := quoteQuantity.Round(s.Market.PricePrecision, fixedpoint.Up)
+		if usedQuote.Add(roundUpQuoteQuantity).Compare(totalQuote) > 0 {
+			if i > 0 {
+				return nil, fmt.Errorf("used quote %f > total quote %f, this should not happen", usedQuote.Add(quoteQuantity).Float64(), totalQuote.Float64())
+			}
+			restQuote := totalQuote.Sub(usedQuote)
+			q = restQuote.Div(price).Round(s.Market.VolumePrecision, fixedpoint.Down)
+			if s.Market.MinQuantity.Compare(q) > 0 {
+				return nil, fmt.Errorf("the round down quantity (%s) is less than min quantity (%s), we cannot place this order", q, s.Market.MinQuantity)
+			}
+			roundUpQuoteQuantity = q.Mul(price).Round(s.Market.PricePrecision, fixedpoint.Up)
+		}
+		buys = append(buys, s.newGridLimitOrder(types.SideTypeBuy, price, q))
+		usedQuote = usedQuote.Add(roundUpQuoteQuantity)
+	}
+
+	// Prefer the closing side first so IM goes to covering the book:
+	// long → sells first; short → buys first; flat → sells then buys.
+	submitOrders := make([]types.SubmitOrder, 0, len(sellOrders)+len(buys))
+	if s.Position != nil && s.Position.GetBase().Sign() < 0 {
+		submitOrders = append(submitOrders, buys...)
+		submitOrders = append(submitOrders, sellOrders...)
+	} else {
+		submitOrders = append(submitOrders, sellOrders...)
+		submitOrders = append(submitOrders, buys...)
+	}
 	return submitOrders, nil
 }
 

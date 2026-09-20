@@ -31,6 +31,7 @@ import {
   ListItemText,
   ToggleButton,
   ToggleButtonGroup,
+  Tooltip,
   useMediaQuery,
 } from '@mui/material';
 import { useTheme } from '@mui/material/styles';
@@ -42,6 +43,7 @@ import {
   queryAnalysisMargin,
   queryAnalysisMarket,
   queryAnalysisTodayPnL,
+  queryAnalysisTrend,
 } from '../api/bbgo';
 import { buildOrderBookPinLevels } from '../components/pinLevels';
 
@@ -327,6 +329,10 @@ export default function AnalysisPage() {
   const [pnlChart, setPnlChart] = useState<any>(null);
   const [marketChart, setMarketChart] = useState<any>(null);
   const [avgDown, setAvgDown] = useState<any>(null);
+  const [trend, setTrend] = useState<any>(null);
+  const [trendTop, setTrendTop] = useState('25');
+  const [trendMinVol, setTrendMinVol] = useState('50000000');
+  const [trendBars, setTrendBars] = useState('1920');
   const [avgSymbol, setAvgSymbol] = useState('DOGEUSDT');
   const [avgAddIm, setAvgAddIm] = useState('200');
   const [avgPrice, setAvgPrice] = useState('');
@@ -366,6 +372,24 @@ export default function AnalysisPage() {
       setLoading(false);
     }
   }, []);
+
+  const loadTrend = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      setTrend(
+        await queryAnalysisTrend('binance', {
+          top: Number(trendTop) || 25,
+          minQuoteVol: Number(trendMinVol) || 50_000_000,
+          bars: Number(trendBars) || 1920,
+        }),
+      );
+    } catch (e: any) {
+      setError(e?.response?.data?.error || e?.message || 'failed to load trend');
+    } finally {
+      setLoading(false);
+    }
+  }, [trendTop, trendMinVol, trendBars]);
 
   const loadPnl = useCallback(async (period: 'today' | '7d' | '30d' = pnlPeriod) => {
     setLoading(true);
@@ -568,6 +592,7 @@ export default function AnalysisPage() {
               loadMargin();
             }
             if (v === 4) loadAvgDown();
+            if (v === 5) loadTrend();
           }}
           variant="scrollable"
           scrollButtons="auto"
@@ -579,6 +604,7 @@ export default function AnalysisPage() {
           <Tab label="网格计算" />
           <Tab label="盈亏" />
           <Tab label="慎重补仓" />
+          <Tab label="趋势选股" />
         </Tabs>
 
         <TabPanel value={tab} index={0}>
@@ -1763,6 +1789,239 @@ export default function AnalysisPage() {
               </CardContent>
             </Card>
           )}
+        </TabPanel>
+
+        <TabPanel value={tab} index={5}>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            按成交额筛活跃合约，对每标的用本地 15m K 线 walk-forward 回测（EMA+RSI 回踩）；仅期望&gt;0
+            且样本足够才给多空与入场。
+          </Typography>
+          <Box sx={{ display: 'flex', gap: 1, mb: 2, flexWrap: 'wrap', alignItems: 'center' }}>
+            <Button variant="contained" onClick={loadTrend} size={isMobile ? 'small' : 'medium'}>
+              刷新回测选股
+            </Button>
+            <TextField
+              size="small"
+              label="Top N"
+              value={trendTop}
+              onChange={(e) => setTrendTop(e.target.value)}
+              sx={{ width: 90 }}
+            />
+            <TextField
+              size="small"
+              label="Min QuoteVol"
+              value={trendMinVol}
+              onChange={(e) => setTrendMinVol(e.target.value)}
+              sx={{ width: 160 }}
+            />
+            <TextField
+              size="small"
+              label="Bars(15m)"
+              value={trendBars}
+              onChange={(e) => setTrendBars(e.target.value)}
+              sx={{ width: 110 }}
+            />
+            {trend?.asOf && (
+              <Typography variant="caption" color="text.secondary">
+                {trend.asOf} · {trend.bars} bars
+              </Typography>
+            )}
+            {trend?.summary && (
+              <>
+                <Chip size="small" color="success" label={`现价多 ${trend.summary.longNow}`} />
+                <Chip size="small" color="error" label={`现价空 ${trend.summary.shortNow}`} />
+                <Chip size="small" color="warning" label={`等回踩/反抽 ${trend.summary.waitPullback}`} />
+              </>
+            )}
+          </Box>
+          <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1.5 }}>
+            WR=胜率 · Exp=平均每笔净盈亏%（扣费后）· n=样本笔数 · PF=盈亏比。入场价锚定信号收盘价（不跟
+            last 漂移）；到价→long/short，未到→wait，无信号不写假入场。
+          </Typography>
+
+          <Accordion defaultExpanded={false} sx={{ mb: 2 }}>
+            <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+              <Typography variant="subtitle2">回测规则</Typography>
+            </AccordionSummary>
+            <AccordionDetails>
+              {trend?.rules ? (
+                <>
+                  <Typography variant="body2" sx={{ mb: 1 }}>
+                    {trend.rules.purpose}
+                  </Typography>
+                  <Typography variant="caption" display="block" color="text.secondary" sx={{ mb: 1 }}>
+                    成交额: {trend.rules.volume}
+                  </Typography>
+                  {(trend.rules.metrics || []).length > 0 && (
+                    <>
+                      <Typography variant="subtitle2" sx={{ mt: 1, mb: 0.5 }}>
+                        WR / Exp / n / PF
+                      </Typography>
+                      <List dense>
+                        {(trend.rules.metrics || []).map((t: string) => (
+                          <ListItem key={t} sx={{ py: 0 }}>
+                            <ListItemText primary={t} primaryTypographyProps={{ variant: 'body2' }} />
+                          </ListItem>
+                        ))}
+                      </List>
+                    </>
+                  )}
+                  <List dense>
+                    {(trend.rules.strategy || []).map((t: string) => (
+                      <ListItem key={t} sx={{ py: 0 }}>
+                        <ListItemText primary={t} primaryTypographyProps={{ variant: 'body2' }} />
+                      </ListItem>
+                    ))}
+                  </List>
+                  <List dense>
+                    {(trend.rules.bias || []).map((t: string) => (
+                      <ListItem key={t} sx={{ py: 0 }}>
+                        <ListItemText primary={t} primaryTypographyProps={{ variant: 'body2' }} />
+                      </ListItem>
+                    ))}
+                  </List>
+                  <List dense>
+                    {(trend.rules.entries || []).map((t: string) => (
+                      <ListItem key={t} sx={{ py: 0 }}>
+                        <ListItemText primary={t} primaryTypographyProps={{ variant: 'body2' }} />
+                      </ListItem>
+                    ))}
+                  </List>
+                </>
+              ) : (
+                <Typography variant="body2">刷新后显示规则</Typography>
+              )}
+            </AccordionDetails>
+          </Accordion>
+
+          <ScrollTable>
+            <Table size="small">
+              <TableHead>
+                <TableRow>
+                  <TableCell>#</TableCell>
+                  <TableCell>Symbol</TableCell>
+                  <TableCell align="right">Last</TableCell>
+                  <TableCell align="right">24h额</TableCell>
+                  <TableCell>偏向</TableCell>
+                  <TableCell>动作</TableCell>
+                  <TableCell align="right">
+                    <Tooltip
+                      title="多头回测：WR=胜率；Exp=平均每笔净盈亏%（扣 8bps）；下行 n=笔数，PF=总盈/总亏"
+                      arrow
+                    >
+                      <Box component="span" sx={{ borderBottom: '1px dashed', cursor: 'help' }}>
+                        多 WR/Exp/n
+                      </Box>
+                    </Tooltip>
+                  </TableCell>
+                  <TableCell align="right">
+                    <Tooltip
+                      title="空头回测：WR=胜率；Exp=平均每笔净盈亏%（扣 8bps）；下行 n=笔数，PF=总盈/总亏"
+                      arrow
+                    >
+                      <Box component="span" sx={{ borderBottom: '1px dashed', cursor: 'help' }}>
+                        空 WR/Exp/n
+                      </Box>
+                    </Tooltip>
+                  </TableCell>
+                  <TableCell align="right">多入场</TableCell>
+                  <TableCell align="right">空入场</TableCell>
+                  <TableCell align="right">多止损/盈</TableCell>
+                  <TableCell align="right">空止损/盈</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {(trend?.symbols || []).map((row: any) => (
+                  <TableRow key={row.symbol} hover>
+                    <TableCell>{row.volumeRank}</TableCell>
+                    <TableCell>
+                      {row.symbol}
+                      <Typography variant="caption" display="block" color="text.secondary">
+                        {row.bars}b · {row.klineSource}
+                        {row.signalClose
+                          ? ` · 信号${fmtNum(row.signalClose, 6)} (${row.signalAgo}根前)`
+                          : ''}
+                      </Typography>
+                    </TableCell>
+                    <TableCell align="right">{fmtNum(row.last, 6)}</TableCell>
+                    <TableCell align="right">
+                      {row.quoteVolume24h
+                        ? `${(Number(row.quoteVolume24h) / 1e6).toFixed(0)}M`
+                        : '—'}
+                    </TableCell>
+                    <TableCell>
+                      <Chip
+                        size="small"
+                        label={row.bias}
+                        color={
+                          row.bias === 'long'
+                            ? 'success'
+                            : row.bias === 'short'
+                            ? 'error'
+                            : row.bias?.includes('wait') || row.bias === 'range'
+                            ? 'warning'
+                            : 'default'
+                        }
+                      />
+                    </TableCell>
+                    <TableCell sx={{ maxWidth: 240 }}>
+                      <Typography variant="caption">{row.action}</Typography>
+                    </TableCell>
+                    <TableCell align="right">
+                      <Typography variant="caption" display="block" color={pnlColor(row.longBT?.expectancy)}>
+                        {row.longBT?.winRate ?? '—'}% / {fmtSigned(row.longBT?.expectancy, 2)}%
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        n={row.longBT?.trades ?? 0} PF={row.longBT?.profitFactor ?? '—'}
+                      </Typography>
+                    </TableCell>
+                    <TableCell align="right">
+                      <Typography variant="caption" display="block" color={pnlColor(row.shortBT?.expectancy)}>
+                        {row.shortBT?.winRate ?? '—'}% / {fmtSigned(row.shortBT?.expectancy, 2)}%
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        n={row.shortBT?.trades ?? 0} PF={row.shortBT?.profitFactor ?? '—'}
+                      </Typography>
+                    </TableCell>
+                    <TableCell align="right">
+                      {row.longEntry ? fmtNum(row.longEntry, 6) : '—'}
+                    </TableCell>
+                    <TableCell align="right">
+                      {row.shortEntry ? fmtNum(row.shortEntry, 6) : '—'}
+                    </TableCell>
+                    <TableCell align="right">
+                      {row.longStop ? (
+                        <>
+                          <Typography variant="caption" display="block">
+                            {fmtNum(row.longStop, 6)}
+                          </Typography>
+                          <Typography variant="caption" display="block" color="success.main">
+                            {fmtNum(row.longTP, 6)}
+                          </Typography>
+                        </>
+                      ) : (
+                        '—'
+                      )}
+                    </TableCell>
+                    <TableCell align="right">
+                      {row.shortStop ? (
+                        <>
+                          <Typography variant="caption" display="block">
+                            {fmtNum(row.shortStop, 6)}
+                          </Typography>
+                          <Typography variant="caption" display="block" color="error.main">
+                            {fmtNum(row.shortTP, 6)}
+                          </Typography>
+                        </>
+                      ) : (
+                        '—'
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </ScrollTable>
         </TabPanel>
       </Box>
     </DashboardLayout>

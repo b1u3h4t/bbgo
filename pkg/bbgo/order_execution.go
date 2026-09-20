@@ -3,6 +3,7 @@ package bbgo
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
@@ -20,6 +21,20 @@ import (
 
 var DefaultSubmitOrderRetryTimeout = 5 * time.Minute
 var batchOrderConcurrent = false
+
+// isNonRetryableSubmitError reports exchange rejects that will not succeed on retry
+// (e.g. Binance -2019 margin / -4118 reduce-only). Retrying these for minutes
+// stalls later grid pins in the same openGrid submit.
+func isNonRetryableSubmitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "Margin is insufficient") ||
+		strings.Contains(s, "code=-2019") ||
+		strings.Contains(s, "code=-4118") ||
+		strings.Contains(s, "ReduceOnly Order Failed")
+}
 
 func init() {
 	if du, ok := envvar.Duration("BBGO_SUBMIT_ORDER_RETRY_TIMEOUT", 5*time.Minute); ok && du > 0 {
@@ -439,6 +454,9 @@ batchRetryOrder:
 				createdOrder, err2 := exchange.SubmitOrder(timeoutCtx, submitOrder)
 				if err2 != nil {
 					logger.WithError(err2).Warnf("submit order error: %s", submitOrder.String())
+					if isNonRetryableSubmitError(err2) {
+						return backoff.Permanent(err2)
+					}
 				}
 
 				if err2 == nil && createdOrder != nil {
@@ -467,7 +485,10 @@ batchRetryOrder:
 				}
 
 				werr = multierr.Append(werr, err2)
-				errIdxNext = append(errIdxNext, idx)
+				// Margin / reduce-only rejects will never succeed — do not re-queue.
+				if !isNonRetryableSubmitError(err2) {
+					errIdxNext = append(errIdxNext, idx)
+				}
 			}
 		}
 

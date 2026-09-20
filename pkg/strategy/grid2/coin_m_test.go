@@ -7,6 +7,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/c9s/bbgo/pkg/bbgo"
 	"github.com/c9s/bbgo/pkg/fixedpoint"
@@ -187,11 +188,17 @@ func TestStrategy_generateGridOrders_USDTM_noBase(t *testing.T) {
 	}
 
 	assertPriceSide(t, []PriceSideAssert{
-		{number(88), types.SideTypeSell},
+		{number(86), types.SideTypeSell}, // nearest-first sells
 		{number(87), types.SideTypeSell},
-		{number(86), types.SideTypeSell}, // pin == lastPrice is sell side
-		{number(84), types.SideTypeBuy},  // pin just below mid skipped (twin gap)
+		{number(88), types.SideTypeSell},
+		{number(84), types.SideTypeBuy}, // twin under lowest sell skipped
 	}, orders)
+
+	for _, o := range orders {
+		if o.Side == types.SideTypeSell {
+			assert.False(t, o.ReduceOnly, "two-sided sells are plain maker limits, not reduce-only")
+		}
+	}
 
 	// Spot with same balances must convert sells → buys (regression)
 	spot := newTestStrategy("HYPEUSDT")
@@ -205,6 +212,57 @@ func TestStrategy_generateGridOrders_USDTM_noBase(t *testing.T) {
 	assert.NoError(t, err)
 	for _, o := range spotOrders {
 		assert.Equal(t, types.SideTypeBuy, o.Side, "spot without base must not place sells")
+	}
+}
+
+func TestStrategy_generateGridOrders_USDTM_twoSided_noReduceOnlyNearestFirst(t *testing.T) {
+	s := newUSDTMTestStrategy()
+	s.UpperPrice = number(1.1591)
+	s.LowerPrice = number(1.0661)
+	s.GridNum = 8
+	s.QuantityOrAmount.Quantity = number(1100)
+	s.Market.TickSize = number(0.0001)
+	s.Market.StepSize = number(0.1)
+	s.Market.PricePrecision = 4
+	s.Market.VolumePrecision = 1
+	s.grid = grid2types.NewGrid(s.LowerPrice, s.UpperPrice, fixedpoint.NewFromInt(s.GridNum), s.Market.TickSize)
+	s.grid.CalculateArithmeticPins()
+	s.Position = types.NewPositionFromMarket(s.Market)
+	s.Position.Base = number(2226.2)
+
+	lastPrice := number(1.0897)
+	orders, err := s.generateGridOrders(number(100_000), number(0), lastPrice)
+	assert.NoError(t, err)
+	require.NotEmpty(t, orders)
+
+	var sells []types.SubmitOrder
+	for _, o := range orders {
+		if o.Side == types.SideTypeSell {
+			assert.False(t, o.ReduceOnly, "two-sided must not use ReduceOnly")
+			assert.Equal(t, "1100", o.Quantity.String())
+			sells = append(sells, o)
+		}
+	}
+	require.GreaterOrEqual(t, len(sells), 3)
+	assert.True(t, sells[0].Price.Compare(lastPrice) >= 0)
+	assert.True(t, sells[0].Price.Compare(sells[1].Price) < 0,
+		"sells must be nearest-first, got %s then %s", sells[0].Price, sells[1].Price)
+
+	// Sells come before buys so mid ladder gets IM priority.
+	firstBuy := -1
+	lastSell := -1
+	for i, o := range orders {
+		switch o.Side {
+		case types.SideTypeSell:
+			lastSell = i
+		case types.SideTypeBuy:
+			if firstBuy < 0 {
+				firstBuy = i
+			}
+		}
+	}
+	if firstBuy >= 0 && lastSell >= 0 {
+		assert.Less(t, lastSell, firstBuy, "sells should submit before buys")
 	}
 }
 

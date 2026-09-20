@@ -60,6 +60,14 @@ echo "==> upload to $SSH_HOST:$REMOTE_TMP"
 scp -o BatchMode=yes -o IdentitiesOnly=yes "$OUT" "$SSH_HOST:$REMOTE_TMP"
 scp -o BatchMode=yes -o IdentitiesOnly=yes "$ROOT/scripts/deploy-prod-remote.sh" "$SSH_HOST:/tmp/deploy-prod-remote.sh"
 
+# nginx serves $BBGO_HOME/web first (try_files); keep it in sync with embedded SPA
+if [[ -f "$FRONTEND_DIR/out/index.html" ]]; then
+  echo "==> sync Dashboard SPA -> $SSH_HOST:$BBGO_HOME/web"
+  rsync -az --delete \
+    -e "ssh -o BatchMode=yes -o IdentitiesOnly=yes" \
+    "$FRONTEND_DIR/out/" "$SSH_HOST:$BBGO_HOME/web/"
+fi
+
 echo "==> remote swap"
 ssh -o BatchMode=yes -o IdentitiesOnly=yes "$SSH_HOST" \
   "BBGO_HOME='$BBGO_HOME' bash /tmp/deploy-prod-remote.sh '$REMOTE_TMP' '$GIT_SHA' && rm -f '$REMOTE_TMP' /tmp/deploy-prod-remote.sh"

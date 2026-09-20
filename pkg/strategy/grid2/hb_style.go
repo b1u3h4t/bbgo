@@ -113,6 +113,8 @@ func (s *Strategy) filterGridSubmitOrders(orders []types.SubmitOrder, lastPrice 
 }
 
 // submitGridOrders submits all orders, optionally in batches (Hummingbot max_orders_per_batch).
+// A failed batch does not abort the rest: later pins still attempt so a far-pin -2019
+// cannot leave the nearer/farther ladder empty (DOT/AVAX/XRP style gap).
 func (s *Strategy) submitGridOrders(ctx context.Context, orders []types.SubmitOrder) (types.OrderSlice, error) {
 	if len(orders) == 0 {
 		return nil, nil
@@ -124,6 +126,7 @@ func (s *Strategy) submitGridOrders(ctx context.Context, orders []types.SubmitOr
 	}
 
 	var created types.OrderSlice
+	var firstErr error
 	freq := s.OrderFrequency.Duration()
 	for i := 0; i < len(orders); i += batchSize {
 		end := i + batchSize
@@ -133,15 +136,21 @@ func (s *Strategy) submitGridOrders(ctx context.Context, orders []types.SubmitOr
 		batch := orders[i:end]
 		s.logger.Infof("submitting grid order batch %d-%d / %d", i+1, end, len(orders))
 		part, err := s.orderExecutor.SubmitOrders(ctx, batch...)
-		if err != nil {
-			return created, err
-		}
 		created = append(created, part...)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			s.logger.WithError(err).Warnf(
+				"grid batch %d-%d failed (%d created in batch); continuing remaining pins",
+				i+1, end, len(part),
+			)
+		}
 		if end < len(orders) && freq > 0 && !bbgo.IsBackTesting {
 			time.Sleep(freq)
 		}
 	}
-	return created, nil
+	return created, firstErr
 }
 
 func (s *Strategy) applyAutoBollinger(session *bbgo.ExchangeSession) error {

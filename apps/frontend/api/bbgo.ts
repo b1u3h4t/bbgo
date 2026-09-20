@@ -179,6 +179,21 @@ export async function queryAnalysisMarket(
   return response.data;
 }
 
+export async function queryAnalysisTrend(
+  session = 'binance',
+  params?: { top?: number; minQuoteVol?: number; bars?: number },
+) {
+  const response = await axios.get(baseURL + '/api/analysis/trend', {
+    params: {
+      session,
+      top: params?.top ?? 25,
+      minQuoteVol: params?.minQuoteVol ?? 50_000_000,
+      bars: params?.bars ?? 1920,
+    },
+  });
+  return response.data;
+}
+
 export async function queryAnalysisGridCalc(params: Record<string, string | number>) {
   const response = await axios.get(baseURL + '/api/analysis/grid-calc', {
     params,

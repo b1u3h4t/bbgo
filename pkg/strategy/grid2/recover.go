@@ -308,8 +308,9 @@ func (s *Strategy) recover(ctx context.Context) error {
 
 		if activeOrdersInTwinOrderBook.EmptyTwinOrderSize() > 0 {
 			// Price outside [lower, upper] leaves one side empty by design; history cannot
-			// rebuild those twins. Soft-skip so periodic recover does not spam Slack —
-			// operational fix is to reband around the market.
+			// rebuild those twins. Soft-skip hard fail so periodic recover does not spam
+			// Slack — but still run repairMissingReverseOrders so pins that failed earlier
+			// with -2019 can be filled once margin frees (AVAX/XRP/ENA above band, etc.).
 			if s.session != nil && !s.LowerPrice.IsZero() && !s.UpperPrice.IsZero() {
 				s.mu.Unlock()
 				lastPrice, err := s.getLastTradePrice(ctx, s.session)
@@ -317,10 +318,13 @@ func (s *Strategy) recover(ctx context.Context) error {
 				if err == nil && !lastPrice.IsZero() {
 					if lastPrice.Compare(s.LowerPrice) < 0 || lastPrice.Compare(s.UpperPrice) > 0 {
 						s.logger.Warnf(
-							"[Recover] price %s outside band [%s, %s] with empty twin pins %+v; skip hard fail (reband needed)",
+							"[Recover] price %s outside band [%s, %s] with empty twin pins %+v; skip hard fail, try repair",
 							lastPrice, s.LowerPrice, s.UpperPrice, noTwinOrderPins,
 						)
 						s.mu.Unlock()
+						if errRepair := s.repairMissingReverseOrders(ctx); errRepair != nil {
+							s.logger.WithError(errRepair).Warn("[Recover] repairMissingReverseOrders failed (outside band)")
+						}
 						return nil
 					}
 				}
@@ -345,6 +349,10 @@ func (s *Strategy) recover(ctx context.Context) error {
 			}
 			if stillRequired > 0 {
 				s.mu.Unlock()
+				// Try margin re-fill before hard-failing; frees IM after other fills.
+				if errRepair := s.repairMissingReverseOrders(ctx); errRepair != nil {
+					s.logger.WithError(errRepair).Warn("[Recover] repairMissingReverseOrders failed before hard fail")
+				}
 				return fmt.Errorf("[Recover] there is still empty grid in twin orderbook")
 			}
 			s.logger.Info("[Recover] remaining empty twins are profit-gated; continue with recovered fills only")
@@ -405,6 +413,14 @@ func (s *Strategy) recover(ctx context.Context) error {
 	// s.EmitGridReady()
 
 	time.Sleep(2 * time.Second)
+
+	// After recover, reverse submits may have been skipped (duplicated fill id) or
+	// failed live with -2019. Re-arm empty twins so sells above last / buys below
+	// last match the expected ladder.
+	if err := s.repairMissingReverseOrders(ctx); err != nil {
+		s.logger.WithError(err).Warn("[Recover] repairMissingReverseOrders failed")
+	}
+
 	debugGrid(s.logger, s.getGrid(), s.orderExecutor.ActiveMakerOrders())
 
 	bbgo.Sync(ctx, s)
