@@ -46,6 +46,10 @@ jobs:
     - name: Per-run tmpdir (scoped; safe on shared runners)
       run: bash scripts/ci-bbgo-tmpdir.sh setup
 
+    - name: Disk preflight (bbgo-ci only; never touches other host processes)
+      if: github.event_name != 'pull_request'
+      run: bash scripts/ci-bbgo-tmpdir.sh preflight
+
     - uses: actions/cache@v6
       # Self-hosted keeps GOCACHE/mod on disk; GitHub cache restore often fails (tar) and wastes ~1min.
       if: github.event_name == 'pull_request'
