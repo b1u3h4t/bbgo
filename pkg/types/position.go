@@ -46,7 +46,10 @@ type PositionRisk struct {
 	OpenOrderInitialMargin fixedpoint.Value     `json:"openOrderInitialMargin,omitempty" db:"open_order_initial_margin"`
 	Adl                    fixedpoint.Value     `json:"adl,omitempty" db:"adl"`
 	MarginAsset            string               `json:"marginAsset,omitempty" db:"margin_asset"`
-	UpdateTime             MillisecondTimestamp `json:"updateTime,omitempty" db:"updated_at"`
+	// MarginType is "cross" or "isolated". Binance fapi/v3/positionRisk omits this;
+	// fapi/v2 still returns it.
+	MarginType string               `json:"marginType,omitempty" db:"margin_type"`
+	UpdateTime MillisecondTimestamp `json:"updateTime,omitempty" db:"updated_at"`
 }
 
 //go:generate stringer -type PnLMode -trimprefix PnLMode

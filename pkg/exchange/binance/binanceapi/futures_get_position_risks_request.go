@@ -29,6 +29,10 @@ type FuturesPositionRisk struct {
 	Adl                    fixedpoint.Value `json:"adl"`
 	BidNotional            fixedpoint.Value `json:"bidNotional"`
 	AskNotional            fixedpoint.Value `json:"askNotional"`
+
+	// Present on fapi/v2/positionRisk; omitted on fapi/v3/positionRisk.
+	Leverage   fixedpoint.Value `json:"leverage"`
+	MarginType string           `json:"marginType"`
 }
 
 //go:generate requestgen -method GET -url "/fapi/v3/positionRisk" -type FuturesGetPositionRisksRequest -responseType []FuturesPositionRisk

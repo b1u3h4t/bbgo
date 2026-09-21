@@ -421,7 +421,17 @@ func toGlobalFuturesOrderStatus(orderStatus futures.OrderStatusType) types.Order
 func toGlobalPositionRisk(positions []binanceapi.FuturesPositionRisk) []types.PositionRisk {
 	retPositions := make([]types.PositionRisk, len(positions))
 	for i, position := range positions {
+		marginType := position.MarginType
+		if marginType == "" {
+			// v3 omits marginType; isolatedMargin > 0 means isolated.
+			if iso, err := strconv.ParseFloat(position.IsolatedMargin, 64); err == nil && iso > 0 {
+				marginType = "isolated"
+			} else {
+				marginType = "cross"
+			}
+		}
 		retPositions[i] = types.PositionRisk{
+			Leverage:               position.Leverage,
 			LiquidationPrice:       position.LiquidationPrice,
 			PositionSide:           toGlobalPositionSide(position.PositionSide),
 			Exchange:               types.ExchangeBinance,
@@ -439,6 +449,7 @@ func toGlobalPositionRisk(positions []binanceapi.FuturesPositionRisk) []types.Po
 			OpenOrderInitialMargin: position.OpenOrderInitialMargin,
 			UpdateTime:             position.UpdateTime,
 			MarginAsset:            position.MarginAsset,
+			MarginType:             marginType,
 		}
 	}
 	return retPositions

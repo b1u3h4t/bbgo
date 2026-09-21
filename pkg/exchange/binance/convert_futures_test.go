@@ -93,6 +93,8 @@ func TestToGlobalPositionRisk(t *testing.T) {
 			OpenOrderInitialMargin: fixedpoint.MustNewFromString("0.1"),
 			UpdateTime:             types.MillisecondTimestamp(time.Unix(1234567890/1000, 0)),
 			MarginAsset:            "USDT",
+			Leverage:               fixedpoint.MustNewFromString("5"),
+			MarginType:             "cross",
 		},
 	}
 
@@ -115,6 +117,8 @@ func TestToGlobalPositionRisk(t *testing.T) {
 	assert.Equal(t, fixedpoint.MustNewFromString("1"), risk.Adl)
 	assert.Equal(t, fixedpoint.MustNewFromString("0.1"), risk.OpenOrderInitialMargin)
 	assert.Equal(t, types.MillisecondTimestamp(time.Unix(1234567890/1000, 0)), risk.UpdateTime)
+	assert.Equal(t, fixedpoint.MustNewFromString("5"), risk.Leverage)
+	assert.Equal(t, "cross", risk.MarginType)
 	assert.Equal(t, "USDT", risk.MarginAsset)
 }
 

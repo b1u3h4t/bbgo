@@ -180,7 +180,7 @@ func (s *BacktestService) SyncFresh(
 func (s *BacktestService) QueryKLine(
 	ex types.Exchange, symbol string, interval types.Interval, orderBy string, limit int,
 ) (*types.KLine, error) {
-	log.Infof("querying last kline exchange = %s AND symbol = %s AND interval = %s", ex, symbol, interval)
+	log.Infof("querying last kline exchange = %s AND symbol = %s AND interval = %s", ex.Name(), symbol, interval)
 
 	tableName := targetKlineTable(ex)
 	// make the SQL syntax IDE friendly, so that it can analyze it.

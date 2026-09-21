@@ -157,25 +157,31 @@ func collectPositions(ctx context.Context, session *bbgo.ExchangeSession) []marg
 		}
 		mark := r.MarkPrice.Float64()
 		notion := math.Abs(amt) * mark
-		lev := r.Leverage.Float64()
-		if lev <= 0 {
-			lev = 1
-		}
-		side := "LONG"
-		if amt < 0 {
-			side = "SHORT"
+		if n := math.Abs(r.Notional.Float64()); n > 0 {
+			notion = n
 		}
 		im := r.InitialMargin.Float64()
 		if im <= 0 {
 			im = r.PositionInitialMargin.Float64()
 		}
+		// Binance fapi/v3/positionRisk omits leverage; fapi/v2 still returns it.
+		// When missing, recover from notional / initial margin (matches exchange setting).
+		lev := resolvePositionLeverage(r.Leverage.Float64(), notion, im)
 		if im <= 0 {
 			im = notion / lev
+		}
+		side := "LONG"
+		if amt < 0 {
+			side = "SHORT"
 		}
 		upnlPos := r.UnrealizedPnL.Float64()
 		roe := 0.0
 		if im > 0 {
 			roe = upnlPos / im * 100
+		}
+		marginType := r.MarginType
+		if marginType == "" {
+			marginType = "cross"
 		}
 		positions = append(positions, marginPositionRow{
 			Symbol:           r.Symbol,
@@ -191,13 +197,28 @@ func collectPositions(ctx context.Context, session *bbgo.ExchangeSession) []marg
 			InitialMarginEst: roundFloat(im, 2),
 			MaintMargin:      roundFloat(r.MaintMargin.Float64(), 2),
 			Side:             side,
-			MarginType:       "cross",
+			MarginType:       marginType,
 		})
 	}
 	sort.Slice(positions, func(i, j int) bool {
 		return positions[i].UnrealizedPnL < positions[j].UnrealizedPnL
 	})
 	return positions
+}
+
+// resolvePositionLeverage returns exchange leverage when present; otherwise
+// derives it from abs(notional)/initialMargin (Binance fapi/v3 omits leverage).
+func resolvePositionLeverage(lev, notion, im float64) float64 {
+	if lev > 0 {
+		return lev
+	}
+	if im > 0 && notion > 0 {
+		derived := math.Round(notion / im)
+		if derived >= 1 {
+			return derived
+		}
+	}
+	return 1
 }
 
 func (s *Server) analysisMargin(c *gin.Context) {
