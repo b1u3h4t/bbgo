@@ -20,6 +20,8 @@ concurrency:
 
 permissions:
   contents: write
+  # Issues are optional: this fork may have Issues disabled. Conflict
+  # notification falls back to the job summary / failure annotation.
   issues: write
 
 jobs:
@@ -69,7 +71,7 @@ jobs:
           else
             echo "conflict=true" >> "$GITHUB_OUTPUT"
             git merge --abort || true
-            echo "Merge has conflicts; will open an issue"
+            echo "Merge has conflicts; will report without requiring Issues"
             exit 0
           fi
 
@@ -90,7 +92,7 @@ jobs:
           inputs.dry_run
         run: echo "Dry run — merge succeeded locally but push was skipped"
 
-      - name: Open issue on conflict
+      - name: Report conflict (summary; issue if enabled)
         if: steps.status.outputs.behind != '0' && steps.merge.outputs.conflict == 'true'
         uses: actions/github-script@v7
         with:
@@ -111,39 +113,63 @@ jobs:
               '```',
             ].join('\n');
 
-            const issues = await github.rest.issues.listForRepo({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              state: 'open',
-              labels: 'upstream-sync',
-              per_page: 10,
-            });
-            const existing = issues.data.find((i) => i.title === title);
-            if (existing) {
-              await github.rest.issues.createComment({
+            await core.summary
+              .addHeading('Upstream sync conflict')
+              .addRaw(body.replace(/\n/g, '\n\n'))
+              .write();
+
+            const issuesDisabled = (err) => {
+              const msg = String(err?.message || err || '');
+              const status = err?.status || err?.response?.status;
+              return status === 410 || /issues has been disabled/i.test(msg);
+            };
+
+            try {
+              const issues = await github.rest.issues.listForRepo({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                issue_number: existing.number,
-                body: `Still conflicting as of run ${context.runId}.`,
+                state: 'open',
+                labels: 'upstream-sync',
+                per_page: 10,
               });
-              core.warning(`Conflict issue already open: #${existing.number}`);
-              return;
+              const existing = issues.data.find((i) => i.title === title);
+              if (existing) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: existing.number,
+                  body: `Still conflicting as of run ${context.runId}.`,
+                });
+                core.warning(`Conflict issue already open: #${existing.number}`);
+              } else {
+                try {
+                  await github.rest.issues.create({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    title,
+                    body,
+                    labels: ['upstream-sync'],
+                  });
+                } catch (e) {
+                  if (issuesDisabled(e)) throw e;
+                  // Label may not exist yet — retry without labels.
+                  await github.rest.issues.create({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    title,
+                    body,
+                  });
+                }
+              }
+            } catch (e) {
+              if (issuesDisabled(e)) {
+                core.warning(
+                  'Issues are disabled on this repository; conflict recorded in the job summary only.',
+                );
+              } else {
+                core.warning(`Could not open/update conflict issue: ${e.message || e}`);
+              }
             }
 
-            // Label may not exist yet — create issue without it if needed.
-            try {
-              await github.rest.issues.create({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                title,
-                body,
-                labels: ['upstream-sync'],
-              });
-            } catch (e) {
-              await github.rest.issues.create({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                title,
-                body,
-              });
-            }
+            // Surface the conflict as a failed run without depending on Issues API.
+            core.setFailed(title);
