@@ -68,6 +68,10 @@ func (q *AsyncTimeRangedBatchQuery) Query(ctx context.Context, ch interface{}, s
 				sliceInf, queryErr = q.Q(startTime, endTime)
 				if queryErr != nil {
 					log.WithError(queryErr).Errorf("unable to query %T, error: %v", q.Type, queryErr)
+					if IsRateLimitError(queryErr) {
+						// Retrying while rate-limited or banned extends the IP ban.
+						return backoff.Permanent(queryErr)
+					}
 				}
 
 				return queryErr

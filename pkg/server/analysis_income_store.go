@@ -11,6 +11,7 @@ import (
 	"github.com/jmoiron/sqlx"
 	log "github.com/sirupsen/logrus"
 
+	"github.com/c9s/bbgo/pkg/exchange/batch"
 	"github.com/c9s/bbgo/pkg/exchange/binance"
 	"github.com/c9s/bbgo/pkg/exchange/binance/binanceapi"
 )
@@ -42,9 +43,12 @@ var (
 	incomeTablesOnce sync.Once
 	incomeTablesErr  error
 
-	incomeSyncMu   sync.Mutex
-	incomeLastSync time.Time
+	incomeSyncMu          sync.Mutex
+	incomeLastSync        time.Time
+	incomeSyncPausedUntil time.Time
 )
+
+const incomeRateLimitPause = 15 * time.Minute
 
 func (s *Server) incomeDB() (*sqlx.DB, string) {
 	if s.Environ == nil || s.Environ.DatabaseService == nil || s.Environ.DatabaseService.DB == nil {
@@ -129,10 +133,18 @@ func setIncomeCursor(ctx context.Context, db *sqlx.DB, driver string, incomeType
 func syncFuturesIncomes(ctx context.Context, ex *binance.Exchange, db *sqlx.DB, driver string, floor time.Time) error {
 	incomeSyncMu.Lock()
 	defer incomeSyncMu.Unlock()
-	if time.Since(incomeLastSync) < incomeSyncMinInterval {
+	if time.Since(incomeLastSync) < incomeSyncMinInterval || time.Now().Before(incomeSyncPausedUntil) {
 		return nil
 	}
 	incomeLastSync = time.Now()
+	err := syncFuturesIncomesLocked(ctx, ex, db, driver, floor)
+	if batch.IsRateLimitError(err) {
+		incomeSyncPausedUntil = time.Now().Add(incomeRateLimitPause)
+	}
+	return err
+}
+
+func syncFuturesIncomesLocked(ctx context.Context, ex *binance.Exchange, db *sqlx.DB, driver string, floor time.Time) error {
 
 	now := time.Now()
 	for _, t := range analysisIncomeTypes {

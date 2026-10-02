@@ -9,6 +9,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/c9s/bbgo/pkg/bbgo"
+	"github.com/c9s/bbgo/pkg/exchange/batch"
 	"github.com/c9s/bbgo/pkg/service"
 	"github.com/c9s/bbgo/pkg/strategy/grid2"
 	"github.com/c9s/bbgo/pkg/types"
@@ -190,8 +191,8 @@ func (s *Server) startAnalysisKlineSync() {
 }
 
 func (s *Server) analysisKlineSyncLoop() {
-	// let the bot finish bootstrapping sessions first
-	time.Sleep(45 * time.Second)
+	// Stay clear of the startup sync burst, which already uses most of the IP weight budget.
+	time.Sleep(5 * time.Minute)
 	s.runAnalysisKlineSync(context.Background())
 
 	ticker := time.NewTicker(15 * time.Minute)
@@ -245,6 +246,11 @@ func (s *Server) runAnalysisKlineSync(ctx context.Context) {
 				start = k.StartTime.Time()
 			}
 			if err := bt.SyncKLineByInterval(ctx, session.Exchange, sym, iv, start, end); err != nil {
+				if batch.IsRateLimitError(err) {
+					// Requests sent while rate-limited or banned extend the IP ban.
+					log.WithError(err).Warn("analysis kline sync aborted: rate limited")
+					return
+				}
 				log.WithError(err).Warnf("analysis SyncKLine %s %s", sym, iv)
 			}
 			select {
