@@ -203,7 +203,7 @@ export async function queryAnalysisGridCalc(params: Record<string, string | numb
 
 export async function queryAnalysisTodayPnL(
   session = 'binance',
-  period: 'today' | '7d' | '30d' = 'today',
+  period: 'today' | '7d' | '30d' | '90d' = 'today',
 ) {
   const response = await axios.get(baseURL + '/api/analysis/pnl', {
     params: { session, period },

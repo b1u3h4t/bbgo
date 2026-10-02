@@ -112,6 +112,15 @@ function IntervalPicker({
   );
 }
 
+type PnlPeriod = 'today' | '7d' | '30d' | '90d';
+
+const PNL_PERIOD_LABEL: Record<PnlPeriod, string> = {
+  today: '今日',
+  '7d': '7日',
+  '30d': '30日',
+  '90d': '90日',
+};
+
 function pnlColor(v: number) {
   if (v > 0) return '#2e7d32';
   if (v < 0) return '#c62828';
@@ -340,7 +349,7 @@ export default function AnalysisPage() {
   const [gridInterval, setGridInterval] = useState('1h');
   const [pnlInterval, setPnlInterval] = useState('1h');
   const [marketInterval, setMarketInterval] = useState('15m');
-  const [pnlPeriod, setPnlPeriod] = useState<'today' | '7d' | '30d'>('today');
+  const [pnlPeriod, setPnlPeriod] = useState<PnlPeriod>('today');
 
   const [symbol, setSymbol] = useState('AVAXUSDT');
   const [atrMult, setAtrMult] = useState('1');
@@ -391,7 +400,7 @@ export default function AnalysisPage() {
     }
   }, [trendTop, trendMinVol, trendBars]);
 
-  const loadPnl = useCallback(async (period: 'today' | '7d' | '30d' = pnlPeriod) => {
+  const loadPnl = useCallback(async (period: PnlPeriod = pnlPeriod) => {
     setLoading(true);
     setError('');
     try {
@@ -1314,6 +1323,7 @@ export default function AnalysisPage() {
               <ToggleButton value="today">今日</ToggleButton>
               <ToggleButton value="7d">近7天</ToggleButton>
               <ToggleButton value="30d">近30天</ToggleButton>
+              <ToggleButton value="90d">近90天</ToggleButton>
             </ToggleButtonGroup>
             <Button
               variant="contained"
@@ -1344,38 +1354,10 @@ export default function AnalysisPage() {
           {pnl?.totals && (
             <Grid container spacing={2} sx={{ mb: 2 }}>
               {[
-                [
-                  pnlPeriod === 'today'
-                    ? '今日已实现'
-                    : pnlPeriod === '7d'
-                      ? '7日已实现'
-                      : '30日已实现',
-                  pnl.totals.realized,
-                ],
-                [
-                  pnlPeriod === 'today'
-                    ? '今日手续费'
-                    : pnlPeriod === '7d'
-                      ? '7日手续费'
-                      : '30日手续费',
-                  pnl.totals.commission,
-                ],
-                [
-                  pnlPeriod === 'today'
-                    ? '今日资金费'
-                    : pnlPeriod === '7d'
-                      ? '7日资金费'
-                      : '30日资金费',
-                  pnl.totals.funding,
-                ],
-                [
-                  pnlPeriod === 'today'
-                    ? '今日净流水'
-                    : pnlPeriod === '7d'
-                      ? '7日净流水'
-                      : '30日净流水',
-                  pnl.totals.net,
-                ],
+                [`${PNL_PERIOD_LABEL[pnlPeriod]}已实现`, pnl.totals.realized],
+                [`${PNL_PERIOD_LABEL[pnlPeriod]}手续费`, pnl.totals.commission],
+                [`${PNL_PERIOD_LABEL[pnlPeriod]}资金费`, pnl.totals.funding],
+                [`${PNL_PERIOD_LABEL[pnlPeriod]}净流水`, pnl.totals.net],
                 ['当前浮动盈亏', pnl.totals.unrealized],
               ].map(([k, v]) => (
                 <Grid item xs={6} sm={4} md={2} key={String(k)}>

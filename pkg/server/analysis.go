@@ -25,7 +25,7 @@ func (s *Server) registerAnalysisRoutes(r *gin.Engine) {
 	r.GET("/api/analysis/trend", s.analysisTrend)
 	r.GET("/api/analysis/grid-calc", s.analysisGridCalc)
 	r.GET("/api/analysis/pnl/today", s.analysisTodayPnL)
-	r.GET("/api/analysis/pnl", s.analysisTodayPnL) // ?period=today|7d|30d (+ daily series)
+	r.GET("/api/analysis/pnl", s.analysisTodayPnL) // ?period=today|7d|30d|90d (+ daily series)
 	r.GET("/api/analysis/klines", s.analysisKlines)
 	r.GET("/api/analysis/avg-down", s.analysisAvgDown)
 	s.startAnalysisKlineSync()
@@ -48,6 +48,9 @@ func analysisPnLRange(period string, now time.Time, loc *time.Location) (start, 
 	case "30d", "30day", "month":
 		start = day0.AddDate(0, 0, -29)
 		label = "30d"
+	case "90d", "90day", "quarter":
+		start = day0.AddDate(0, 0, -89)
+		label = "90d"
 	default:
 		start = day0
 		label = "today"
