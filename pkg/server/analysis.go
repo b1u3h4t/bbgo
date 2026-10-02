@@ -1066,8 +1066,8 @@ func (s *Server) analysisTodayPnL(c *gin.Context) {
 		}
 	}
 
-	addAgg := func(a *agg, incomeType binanceapi.FuturesIncomeType, inc float64, asset string) {
-		switch incomeType {
+	addAgg := func(a *agg, incomeType string, inc float64, asset string) {
+		switch binanceapi.FuturesIncomeType(incomeType) {
 		case binanceapi.FuturesIncomeRealizedPnL:
 			a.Realized += inc
 		case binanceapi.FuturesIncomeCommission:
@@ -1079,50 +1079,45 @@ func (s *Server) analysisTodayPnL(c *gin.Context) {
 		}
 	}
 
-	incomeCounts := map[string]int{}
-	fetch := func(incomeType binanceapi.FuturesIncomeType) error {
-		rows, err := queryFuturesIncomeChunked(ctx, ex, incomeType, rangeStart, rangeEnd)
-		if err != nil {
-			return fmt.Errorf("income %s: %w", incomeType, err)
-		}
-		incomeCounts[string(incomeType)] = len(rows)
-		for _, r := range rows {
-			inc := r.Income.Float64()
-			sym := r.Symbol
-			if sym == "" {
-				sym = "(account)"
-			}
-			if bySym[sym] == nil {
-				bySym[sym] = &agg{}
-			}
-			dayKey := r.Time.Time().In(loc).Format("2006-01-02")
-			if byDay[dayKey] == nil {
-				byDay[dayKey] = &agg{}
-			}
-			addAgg(bySym[sym], r.IncomeType, inc, r.Asset)
-			addAgg(byDay[dayKey], r.IncomeType, inc, r.Asset)
-			switch r.IncomeType {
-			case binanceapi.FuturesIncomeRealizedPnL:
-				totRealized += inc
-			case binanceapi.FuturesIncomeCommission:
-				usdt, bnb := toUSDT(inc, r.Asset)
-				totCommUSDT += usdt
-				totCommBNB += bnb
-			case binanceapi.FuturesIncomeFundingFee:
-				totFunding += inc
-			}
-		}
-		return nil
+	rows, incomeSource, syncErr, err := s.loadIncomes(ctx, ex, deployStart, rangeStart, rangeEnd)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
 	}
-	for _, t := range []binanceapi.FuturesIncomeType{
-		binanceapi.FuturesIncomeRealizedPnL,
-		binanceapi.FuturesIncomeCommission,
-		binanceapi.FuturesIncomeFundingFee,
-	} {
-		if err := fetch(t); err != nil {
-			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
-			return
+	incomeCounts := map[string]int{}
+	for _, t := range analysisIncomeTypes {
+		incomeCounts[string(t)] = 0
+	}
+	for _, r := range rows {
+		incomeCounts[r.IncomeType]++
+		inc := r.Income
+		sym := r.Symbol
+		if sym == "" {
+			sym = "(account)"
 		}
+		if bySym[sym] == nil {
+			bySym[sym] = &agg{}
+		}
+		dayKey := time.UnixMilli(r.TimeMs).In(loc).Format("2006-01-02")
+		if byDay[dayKey] == nil {
+			byDay[dayKey] = &agg{}
+		}
+		addAgg(bySym[sym], r.IncomeType, inc, r.Asset)
+		addAgg(byDay[dayKey], r.IncomeType, inc, r.Asset)
+		switch binanceapi.FuturesIncomeType(r.IncomeType) {
+		case binanceapi.FuturesIncomeRealizedPnL:
+			totRealized += inc
+		case binanceapi.FuturesIncomeCommission:
+			usdt, bnb := toUSDT(inc, r.Asset)
+			totCommUSDT += usdt
+			totCommBNB += bnb
+		case binanceapi.FuturesIncomeFundingFee:
+			totFunding += inc
+		}
+	}
+	syncError := ""
+	if syncErr != nil {
+		syncError = syncErr.Error()
 	}
 
 	symbols := make([]gin.H, 0, len(bySym))
@@ -1185,6 +1180,8 @@ func (s *Server) analysisTodayPnL(c *gin.Context) {
 			"detail":       "COMMISSION paid in BNB is converted to USDT via BNBUSDT last price. Net aligns with Binance /fapi/v1/income (REALIZED_PNL+COMMISSION+FUNDING_FEE). Ranges are CST; history starts 2026-09-03 (deploy). Unrealized is current open-position float (not period delta).",
 		},
 		"incomeCounts": incomeCounts,
+		"incomeSource": incomeSource,
+		"syncError":    syncError,
 		"totals": gin.H{
 			"realized":      roundFloat(totRealized, 4),
 			"commission":    roundFloat(totCommUSDT, 4),
