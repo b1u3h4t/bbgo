@@ -17,7 +17,7 @@ SERVICE=${BBGO_SERVICE:-bbgo}
 LOCK_FILE=${BBGO_DEPLOY_LOCK:-/tmp/bbgo-deploy.lock}
 HEALTH_URL=${BBGO_HEALTH_URL:-http://127.0.0.1:8080/}
 STOP_TIMEOUT=${BBGO_STOP_TIMEOUT:-100}
-START_TIMEOUT=${BBGO_START_TIMEOUT:-60}
+START_TIMEOUT=${BBGO_START_TIMEOUT:-180}
 
 if [[ -z "$NEW_BIN" || ! -f "$NEW_BIN" ]]; then
   echo "usage: $0 /path/to/new-binary [git-sha]" >&2

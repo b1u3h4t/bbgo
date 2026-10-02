@@ -15,7 +15,8 @@ cd "$ROOT"
 
 SSH_HOST=${BBGO_SSH_HOST:-bbgo}
 BBGO_HOME=${BBGO_HOME:-/home/admin/bbgo}
-GIT_SHA=${GITHUB_SHA:-$(git rev-parse --short HEAD)}
+# workflow_dispatch with a custom ref checks out a different commit than GITHUB_SHA.
+GIT_SHA=$(git rev-parse HEAD)
 DIST_DIR=${DIST_DIR:-$ROOT/dist}
 OUT=$DIST_DIR/bbgo-linux-amd64
 REMOTE_TMP=/tmp/bbgo-ci-$GIT_SHA
