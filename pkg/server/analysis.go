@@ -353,24 +353,13 @@ type marketSymbolAnalysis struct {
 	BelowMid    bool      `json:"belowMid"`
 }
 
+// calcRSI returns the latest Wilder RSI (same as TradingView / Binance). Matching their
+// values to ~0.1 needs roughly 5×n bars of history for the smoothing to converge.
 func calcRSI(closes []float64, n int) float64 {
 	if len(closes) < n+1 {
 		return 50
 	}
-	var gains, losses float64
-	for i := len(closes) - n; i < len(closes); i++ {
-		d := closes[i] - closes[i-1]
-		if d >= 0 {
-			gains += d
-		} else {
-			losses -= d
-		}
-	}
-	ag, al := gains/float64(n), losses/float64(n)
-	if al == 0 {
-		return 100
-	}
-	return 100 - 100/(1+ag/al)
+	return rsiSeries(closes, n)[len(closes)-1]
 }
 
 func analyzeSymbolKlines(klines []types.KLine) marketSymbolAnalysis {
