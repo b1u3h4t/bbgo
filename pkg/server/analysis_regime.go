@@ -155,7 +155,7 @@ func (s *Server) analysisRegime(c *gin.Context) {
 		limit int
 	}
 	reqs := []tfReq{
-		{types.Interval15m, 120},
+		{types.Interval15m, 200},
 		{types.Interval1h, 120},
 		{types.Interval4h, 200},
 		{types.Interval1d, 200},
@@ -238,7 +238,7 @@ func (s *Server) analysisRegime(c *gin.Context) {
 
 	horizons := []regimeHorizon{short, med, long}
 
-	ud := buildUDView(klineMap["4h"], klineMap["1d"], klineMap["1w"])
+	ud := buildUDView(klineMap["4h"], klineMap["1d"], klineMap["1w"], klineMap["15m"], now)
 	ud.Backtest = s.udCascadeBacktestPool(ctx, session, btSymbols)
 
 	// multi-symbol historical backtest (4h + 1d)

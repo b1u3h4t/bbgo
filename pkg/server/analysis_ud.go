@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/c9s/bbgo/pkg/bbgo"
 	"github.com/c9s/bbgo/pkg/strategy/udbox"
@@ -67,11 +68,34 @@ type udCascadeBT struct {
 	Note         string  `json:"note"`
 }
 
+// 15m intraday trigger under 4h nest (professional speculation: HTF bias, LTF entry).
+type udTwoBView struct {
+	Side       string  `json:"side"` // long | short — trade after failed break
+	Pierced    float64 `json:"pierced"`
+	BarsAgo    int     `json:"barsAgo"`
+	ClosedBack bool    `json:"closedBack"`
+	Note       string  `json:"note"`
+}
+
+type udIntradayView struct {
+	Box     udTFBoxView `json:"box"`
+	Nest4h  string      `json:"nest4h"` // bull | bear | chop
+	Aligned bool        `json:"aligned"`
+	Setup   string      `json:"setup"` // wait | break_long | break_short | two_b_long | two_b_short | ignore
+	Label   string      `json:"label"`
+	Action  string      `json:"action"`
+	Stop    float64     `json:"stop"`
+	Target  float64     `json:"target"`
+	TwoB    *udTwoBView `json:"twoB,omitempty"`
+	Next15m *regimeClock `json:"next15m,omitempty"`
+}
+
 type analysisUDView struct {
-	Boxes    []udTFBoxView  `json:"boxes"`
-	Cascade  udCascadeView  `json:"cascade"`
-	Backtest udCascadeBT    `json:"backtest"`
-	Rules    []string       `json:"rules"`
+	Boxes    []udTFBoxView   `json:"boxes"`
+	Cascade  udCascadeView   `json:"cascade"`
+	Intraday *udIntradayView `json:"intraday,omitempty"`
+	Backtest udCascadeBT     `json:"backtest"`
+	Rules    []string        `json:"rules"`
 }
 
 func closedHist(ks []types.KLine) []types.KLine {
@@ -143,7 +167,15 @@ func classifyUDBox(iv types.Interval, ks []types.KLine) udTFBoxView {
 	windows := []int{12, 20}
 	minW, maxW := udMinBoxWidth, udMaxBoxWidth4h
 	look := 10
+	zonePct := udBuyZone
 	switch iv {
+	case types.Interval15m:
+		// match config/udbox-backtest-15m.yaml: longer box, wider min, tighter zones
+		windows = []int{40, 48}
+		minW = 0.025
+		maxW = 0.06
+		look = 20
+		zonePct = 0.10
 	case types.Interval1d:
 		windows = []int{10, 20}
 		maxW = udMaxBoxWidthHT
@@ -180,10 +212,10 @@ func classifyUDBox(iv types.Interval, ks []types.KLine) udTFBoxView {
 		case box.BreakShort(last, udBreakBuffer):
 			v.Zone = "below"
 			v.Phase = "break_down"
-		case box.InLowerZone(last, udBuyZone):
+		case box.InLowerZone(last, zonePct):
 			v.Zone = "lower"
 			v.Phase = "range"
-		case box.InUpperZone(last, udSellZone):
+		case box.InUpperZone(last, zonePct):
 			v.Zone = "upper"
 			v.Phase = "range"
 		default:
@@ -330,20 +362,205 @@ func formatLevel(v float64) string {
 	return trimFloat(roundFloat(v, 4))
 }
 
-func buildUDView(h4ks, dks, wks []types.KLine) analysisUDView {
+// detectTwoB finds the most recent Sperandeo-style 2B: pierce box edge then close back inside.
+func detectTwoB(ks []types.KLine, box udbox.Box, lookback int) *udTwoBView {
+	hist := closedHist(ks)
+	n := len(hist)
+	if !box.Valid() || n < 4 {
+		return nil
+	}
+	if lookback < 3 {
+		lookback = 8
+	}
+	start := n - lookback
+	if start < 0 {
+		start = 0
+	}
+	var best *udTwoBView
+	bestAge := 1 << 30
+	for pierce := start; pierce < n; pierce++ {
+		hi := hist[pierce].High.Float64()
+		lo := hist[pierce].Low.Float64()
+		if hi > box.Top*(1+udBreakBuffer) {
+			for j := pierce; j < n; j++ {
+				c := hist[j].Close.Float64()
+				if c < box.Top && c > box.Bottom {
+					age := n - 1 - j
+					if age < bestAge {
+						bestAge = age
+						best = &udTwoBView{
+							Side:       "short",
+							Pierced:    roundFloat(hi, 8),
+							BarsAgo:    age,
+							ClosedBack: true,
+							Note:       "假上破后收回箱内 → 2B 试空（须与 4h 嵌套同向）",
+						}
+					}
+					break
+				}
+			}
+		}
+		if lo < box.Bottom*(1-udBreakBuffer) {
+			for j := pierce; j < n; j++ {
+				c := hist[j].Close.Float64()
+				if c > box.Bottom && c < box.Top {
+					age := n - 1 - j
+					if age < bestAge {
+						bestAge = age
+						best = &udTwoBView{
+							Side:       "long",
+							Pierced:    roundFloat(lo, 8),
+							BarsAgo:    age,
+							ClosedBack: true,
+							Note:       "假下破后收回箱内 → 2B 试多（须与 4h 嵌套同向）",
+						}
+					}
+					break
+				}
+			}
+		}
+	}
+	return best
+}
+
+func h4TradeNest(h4 udTFBoxView) string {
+	// mid-waist locked range = no intraday main line
+	if h4.Locked && h4.Phase == "range" && h4.Zone == "mid" {
+		return "chop"
+	}
+	b := nestBiasFromBox(h4)
+	if h4.Locked && h4.Phase == "range" {
+		switch h4.Zone {
+		case "lower":
+			return "bull" // only long-side probes at HTF support
+		case "upper":
+			return "bear"
+		}
+	}
+	return b
+}
+
+func buildUDIntraday(m15ks, h4ks []types.KLine, now time.Time) *udIntradayView {
+	m15 := classifyUDBox(types.Interval15m, m15ks)
+	h4 := classifyUDBox(types.Interval4h, h4ks)
+	nest := h4TradeNest(h4)
+
+	hist := closedHist(m15ks)
+	var box udbox.Box
+	if m15.Locked && m15.Top > m15.Bottom {
+		box = udbox.Box{Top: m15.Top, Bottom: m15.Bottom}
+	} else {
+		raw, _, ok := pickUDBox(m15ks, []int{40, 48}, 0.025, 0.06)
+		if ok {
+			box = raw
+		}
+	}
+	twoB := detectTwoB(m15ks, box, 12)
+
+	clk := makeClock(now, types.Interval15m, "15m 换线：下一根 15m 收盘")
+	out := &udIntradayView{
+		Box:     m15,
+		Nest4h:  nest,
+		TwoB:    twoB,
+		Next15m: &clk,
+		Setup:   "wait",
+		Label:   "等待",
+	}
+
+	width := m15.Top - m15.Bottom
+	if width < 0 {
+		width = 0
+	}
+
+	switch {
+	case nest == "chop":
+		out.Label = "无主线"
+		out.Action = "4h 中腰/未出箱：15m 空仓。等 4h 到沿或收盘出箱后再找 15m 扳机"
+		return out
+	case !m15.Locked:
+		out.Label = "15m 未锁箱"
+		out.Action = "等 15m 收敛锁箱（窗约 40 根、宽 2.5%～6%）后再做突破或 2B"
+		return out
+	case m15.Phase == "break_up" && nest == "bull":
+		out.Setup = "break_long"
+		out.Aligned = true
+		out.Label = "顺势上破"
+		out.Stop = m15.Bottom
+		out.Target = roundFloat(m15.Top+width*0.5, 8)
+		out.Action = "4h 嵌套偏多 + 15m 收盘破顶：趋势多，停损箱底，目标约半箱延申"
+	case m15.Phase == "break_down" && nest == "bear":
+		out.Setup = "break_short"
+		out.Aligned = true
+		out.Label = "顺势下破"
+		out.Stop = m15.Top
+		out.Target = roundFloat(m15.Bottom-width*0.5, 8)
+		out.Action = "4h 嵌套偏空 + 15m 收盘破底：趋势空，停损箱顶"
+	case m15.Phase == "break_up" && nest == "bear":
+		out.Setup = "ignore"
+		out.Label = "逆嵌套上破"
+		out.Action = "4h 偏空时的 15m 上破当诱饵；优先等收回后的 2B 空，不追多"
+	case m15.Phase == "break_down" && nest == "bull":
+		out.Setup = "ignore"
+		out.Label = "逆嵌套下破"
+		out.Action = "4h 偏多时的 15m 下破当诱饵；优先等收回后的 2B 多，不追空"
+	case twoB != nil && twoB.Side == "long" && nest == "bull" && twoB.BarsAgo <= 4:
+		out.Setup = "two_b_long"
+		out.Aligned = true
+		out.Label = "2B 试多"
+		out.Stop = roundFloat(twoB.Pierced*(1-udBreakBuffer), 8)
+		if out.Stop > m15.Bottom || out.Stop <= 0 {
+			out.Stop = roundFloat(m15.Bottom*(1-udBreakBuffer), 8)
+		}
+		out.Target = m15.Mid
+		if m15.Zone == "lower" || m15.PosPct < 40 {
+			out.Target = m15.Top
+		}
+		out.Action = "假跌破收回 + 4h 偏多：试多，止损刺穿极值外，目标箱中/对侧"
+	case twoB != nil && twoB.Side == "short" && nest == "bear" && twoB.BarsAgo <= 4:
+		out.Setup = "two_b_short"
+		out.Aligned = true
+		out.Label = "2B 试空"
+		out.Stop = roundFloat(twoB.Pierced*(1+udBreakBuffer), 8)
+		if out.Stop < m15.Top {
+			out.Stop = roundFloat(m15.Top*(1+udBreakBuffer), 8)
+		}
+		out.Target = m15.Mid
+		if m15.Zone == "upper" || m15.PosPct > 60 {
+			out.Target = m15.Bottom
+		}
+		out.Action = "假升破收回 + 4h 偏空：试空，止损刺穿极值外，目标箱中/对侧"
+	case m15.Locked && m15.Compressing && m15.Zone == "mid":
+		out.Label = "15m 中腰等沿"
+		out.Action = "已锁且收敛，人在中腰：不追。等收到上下沿或收盘出箱；方向跟 4h=" + nest
+	case m15.Locked && !m15.Compressing:
+		out.Label = "等起涨点"
+		out.Action = "15m 已锁但未收敛：不做沿、不追突破，等波动压后再扳机"
+	default:
+		out.Label = "观望"
+		out.Action = "无合格 15m 扳机。仓位≤趋势仓 1/3，单笔按箱宽控险"
+	}
+	_ = hist
+	return out
+}
+
+func buildUDView(h4ks, dks, wks, m15ks []types.KLine, now time.Time) analysisUDView {
 	h4 := classifyUDBox(types.Interval4h, h4ks)
 	d := classifyUDBox(types.Interval1d, dks)
 	w := classifyUDBox(types.Interval1w, wks)
+	intraday := buildUDIntraday(m15ks, h4ks, now)
 	return analysisUDView{
-		Boxes:   []udTFBoxView{h4, d, w},
-		Cascade: buildUDCascade(h4, d, w),
+		Boxes:    []udTFBoxView{h4, d, w},
+		Cascade:  buildUDCascade(h4, d, w),
+		Intraday: intraday,
 		Rules: []string{
 			"优道嵌套：4h 破关键支撑 → 日线出空预警；日线再破 → 周线出空。反向同理。",
 			"箱体用近期高低锁定，过宽不锁；锁住后不再用滚动窗口把箱拉开。",
 			"变盘 = 收盘出箱，不是 EMA 也不是反弹满 N 小时。",
 			"箱内只做上下沿（约 15% 区）且最好先收敛（起涨点）；中腰空仓。",
 			"大周期管小周期：周线未出空时，4h 出空只当中级回调。",
-			"换线时刻 = 下一根 4h / 日 / 周 / 月 收盘，用来重新判定，不是闹钟。",
+			"15m 只做扳机：4h 定多空，15m 只做同向突破或 2B；4h 中腰则 15m 空仓。",
+			"2B：刺穿箱沿后收盘收回箱内，且须与 4h 嵌套同向；逆嵌套突破当诱饵。",
+			"换线时刻 = 下一根 15m / 4h / 日 / 周 / 月 收盘，用来重新判定，不是闹钟。",
 		},
 	}
 }

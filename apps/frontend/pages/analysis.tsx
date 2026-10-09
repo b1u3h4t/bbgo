@@ -2091,7 +2091,82 @@ export default function AnalysisPage() {
 
               <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
                 优道：锁箱 → 沿上做空/沿下做多 → 收盘出箱才变盘。4h 破支撑只出「日线出空预警」，日线再破才看周线。量能按币圈绿涨红跌：绿肥红瘦偏多，红肥绿瘦偏空。
+                15m 只做扳机：跟 4h 同向突破或 2B。
               </Typography>
+
+              {regime.ud?.intraday && (
+                <Card
+                  variant="outlined"
+                  sx={{
+                    mb: 2,
+                    borderColor: regime.ud.intraday.aligned ? 'success.main' : 'divider',
+                  }}
+                >
+                  <CardContent>
+                    <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, alignItems: 'center', mb: 1 }}>
+                      <Typography variant="subtitle1">15m 日内扳机</Typography>
+                      <Chip
+                        size="small"
+                        label={regime.ud.intraday.label}
+                        color={
+                          regime.ud.intraday.aligned
+                            ? 'success'
+                            : regime.ud.intraday.setup === 'ignore'
+                              ? 'warning'
+                              : 'default'
+                        }
+                      />
+                      <Chip
+                        size="small"
+                        label={`4h嵌套 ${
+                          regime.ud.intraday.nest4h === 'bull'
+                            ? '偏多'
+                            : regime.ud.intraday.nest4h === 'bear'
+                              ? '偏空'
+                              : '无主线'
+                        }`}
+                      />
+                      {regime.ud.intraday.aligned && (
+                        <Chip size="small" color="success" label="同向" />
+                      )}
+                    </Box>
+                    <Typography variant="body2" color="warning.main">
+                      {regime.ud.intraday.action}
+                    </Typography>
+                    {regime.ud.intraday.box && (
+                      <Typography variant="body2" sx={{ mt: 1 }}>
+                        15m 箱 {fmtNum(regime.ud.intraday.box.bottom, 2)} –{' '}
+                        {fmtNum(regime.ud.intraday.box.top, 2)}
+                        （{regime.ud.intraday.box.locked ? '已锁' : '不锁'} ·{' '}
+                        {regime.ud.intraday.box.compressing ? '收敛' : '未收敛'} · 箱内{' '}
+                        {fmtNum(regime.ud.intraday.box.posPct, 0)}% ·{' '}
+                        {regime.ud.intraday.box.volumeBias}）
+                      </Typography>
+                    )}
+                    {regime.ud.intraday.twoB && (
+                      <Typography variant="body2" sx={{ mt: 0.5 }}>
+                        2B：{regime.ud.intraday.twoB.side === 'long' ? '试多' : '试空'} · 刺穿{' '}
+                        {fmtNum(regime.ud.intraday.twoB.pierced, 2)} · {regime.ud.intraday.twoB.barsAgo}{' '}
+                        根前收回 · {regime.ud.intraday.twoB.note}
+                      </Typography>
+                    )}
+                    {(regime.ud.intraday.stop > 0 || regime.ud.intraday.target > 0) && (
+                      <Typography variant="caption" display="block" sx={{ mt: 0.5 }}>
+                        停损 {fmtNum(regime.ud.intraday.stop, 2)} · 目标{' '}
+                        {fmtNum(regime.ud.intraday.target, 2)}
+                        {regime.ud.intraday.next15m
+                          ? ` · 下一 15m 收盘 ${regime.ud.intraday.next15m.cst}`
+                          : ''}
+                      </Typography>
+                    )}
+                    {!regime.ud.intraday.stop && regime.ud.intraday.next15m && (
+                      <Typography variant="caption" display="block" sx={{ mt: 0.5 }}>
+                        下一 15m 收盘 {regime.ud.intraday.next15m.cst}
+                      </Typography>
+                    )}
+                  </CardContent>
+                </Card>
+              )}
 
               <Grid container spacing={2} sx={{ mb: 2 }}>
                 {(regime.ud?.boxes || []).map((b: any) => (

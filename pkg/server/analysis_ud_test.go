@@ -2,7 +2,9 @@ package server
 
 import (
 	"testing"
+	"time"
 
+	"github.com/c9s/bbgo/pkg/strategy/udbox"
 	"github.com/c9s/bbgo/pkg/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -64,4 +66,53 @@ func TestVolumeBiasUpBars(t *testing.T) {
 	bias, ratio := volumeBias(ks, 20)
 	assert.Equal(t, "绿肥红瘦", bias)
 	assert.Greater(t, ratio, 1.0)
+}
+
+func TestDetectTwoBFalseBreakDown(t *testing.T) {
+	box := udbox.Box{Top: 110, Bottom: 100}
+	ks := synthKLines(20, 105, func(i int, prev float64) (o, h, l, c float64) {
+		if i == 15 {
+			// pierce below then close back inside
+			return 102, 103, 98, 101.5
+		}
+		c = 105
+		return c, c + 0.3, c - 0.3, c
+	})
+	tb := detectTwoB(ks, box, 12)
+	require.NotNil(t, tb)
+	assert.Equal(t, "long", tb.Side)
+	assert.True(t, tb.ClosedBack)
+}
+
+func TestBuildUDIntradayWaitsWhenH4Mid(t *testing.T) {
+	// 4h mid-waist range: oscillating around box center
+	h4 := synthKLines(40, 100, func(i int, prev float64) (o, h, l, c float64) {
+		c = 102 + float64(i%4)*0.2
+		return c, c + 0.8, c - 0.8, c
+	})
+	// force a wider 4h box that locks mid
+	for i := range h4 {
+		if i == 5 {
+			h4[i].High = fp(105)
+		}
+		if i == 10 {
+			h4[i].Low = fp(99)
+		}
+	}
+	m15 := synthKLines(60, 102, func(i int, prev float64) (o, h, l, c float64) {
+		c = 102 + float64(i%5)*0.15
+		return c, c + 0.2, c - 0.2, c
+	})
+	v := buildUDIntraday(m15, h4, time.Now().UTC())
+	require.NotNil(t, v)
+	assert.False(t, v.Aligned)
+	assert.NotEqual(t, "break_long", v.Setup)
+	assert.NotEqual(t, "break_short", v.Setup)
+}
+
+func TestH4TradeNestMidIsChop(t *testing.T) {
+	h4 := udTFBoxView{Locked: true, Phase: "range", Zone: "mid"}
+	assert.Equal(t, "chop", h4TradeNest(h4))
+	h4.Zone = "lower"
+	assert.Equal(t, "bull", h4TradeNest(h4))
 }
