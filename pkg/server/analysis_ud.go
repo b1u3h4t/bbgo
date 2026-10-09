@@ -357,7 +357,7 @@ func backtestUDCascade(klines []types.KLine, horizonBars int) (downN, followDown
 	windows := []int{12, 20}
 	for i := 40; i < n-horizonBars; i++ {
 		prefix := hist[:i+1]
-		box, _, locked := pickUDBox(prefix, windows, udMinBoxWidth, udMaxBoxWidth4h)
+		box, _, locked := pickUDBox(prefix, windows, udMinBoxWidth, udMaxBoxWidthHT)
 		if !locked {
 			continue
 		}
