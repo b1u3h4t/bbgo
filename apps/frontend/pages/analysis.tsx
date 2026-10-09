@@ -42,6 +42,7 @@ import {
   queryAnalysisKlines,
   queryAnalysisMargin,
   queryAnalysisMarket,
+  queryAnalysisProspec,
   queryAnalysisRegime,
   queryAnalysisTodayPnL,
   queryAnalysisTrend,
@@ -345,6 +346,8 @@ export default function AnalysisPage() {
   const [trendBars, setTrendBars] = useState('1920');
   const [regime, setRegime] = useState<any>(null);
   const [regimeSymbol, setRegimeSymbol] = useState('BTCUSDT');
+  const [prospec, setProspec] = useState<any>(null);
+  const [prospecSymbol, setProspecSymbol] = useState('BTCUSDT');
   const [avgSymbol, setAvgSymbol] = useState('DOGEUSDT');
   const [avgAddIm, setAvgAddIm] = useState('200');
   const [avgPrice, setAvgPrice] = useState('');
@@ -414,6 +417,20 @@ export default function AnalysisPage() {
       setLoading(false);
     }
   }, [regimeSymbol]);
+
+  const loadProspec = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      setProspec(
+        await queryAnalysisProspec('binance', { symbol: prospecSymbol || 'BTCUSDT', scan: true }),
+      );
+    } catch (e: any) {
+      setError(e?.response?.data?.error || e?.message || 'failed to load prospec');
+    } finally {
+      setLoading(false);
+    }
+  }, [prospecSymbol]);
 
   const loadPnl = useCallback(async (period: PnlPeriod = pnlPeriod) => {
     setLoading(true);
@@ -618,6 +635,7 @@ export default function AnalysisPage() {
             if (v === 4) loadAvgDown();
             if (v === 5) loadTrend();
             if (v === 6) loadRegime();
+            if (v === 7) loadProspec();
           }}
           variant="scrollable"
           scrollButtons="auto"
@@ -631,6 +649,7 @@ export default function AnalysisPage() {
           <Tab label="慎重补仓" />
           <Tab label="趋势选股" />
           <Tab label="优道嵌套" />
+          <Tab label="专业投机" />
         </Tabs>
 
         <TabPanel value={tab} index={0}>
@@ -2296,6 +2315,207 @@ export default function AnalysisPage() {
                   </Typography>
                   <List dense>
                     {(regime.ud?.rules || regime.rules || []).map((r: string, i: number) => (
+                      <ListItem key={i} disableGutters>
+                        <ListItemText primary={`${i + 1}. ${r}`} />
+                      </ListItem>
+                    ))}
+                  </List>
+                </CardContent>
+              </Card>
+            </>
+          )}
+        </TabPanel>
+
+        <TabPanel value={tab} index={7}>
+          <Box
+            sx={{
+              display: 'flex',
+              gap: 1,
+              mb: 2,
+              alignItems: 'center',
+              flexWrap: 'wrap',
+            }}
+          >
+            <TextField
+              size="small"
+              label="主观察币"
+              value={prospecSymbol}
+              onChange={(e) => setProspecSymbol(e.target.value.toUpperCase())}
+              sx={{ width: 140 }}
+            />
+            <Button variant="contained" onClick={loadProspec} size={isMobile ? 'small' : 'medium'}>
+              刷新 1-2-3 / 2B / 嵌套
+            </Button>
+            {prospec?.tookMs != null && (
+              <Typography variant="caption" color="text.secondary">
+                策略 prospec · {prospec.tookMs}ms · {prospec.klineSource}
+              </Typography>
+            )}
+          </Box>
+
+          {prospec && (
+            <>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                《专业投机原理》：周/日定势，4h/15m 找点。1-2-3 收盘确认变盘；2B
+                假突破收回；不逆嵌套开仓。可配置策略 ID <code>prospec</code>。
+              </Typography>
+
+              {prospec.primary && (
+                <Card variant="outlined" sx={{ mb: 2, borderColor: 'primary.main' }}>
+                  <CardContent>
+                    <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, mb: 1, alignItems: 'center' }}>
+                      <Chip
+                        label={prospec.primary.label || '等待'}
+                        color={
+                          prospec.primary.side === 'long'
+                            ? 'success'
+                            : prospec.primary.side === 'short'
+                              ? 'error'
+                              : 'default'
+                        }
+                      />
+                      {prospec.primary.aligned && <Chip size="small" color="success" label="嵌套同向" />}
+                      <Chip size="small" label={prospec.primary.kind || 'wait'} />
+                    </Box>
+                    <Typography variant="body2" color="warning.main">
+                      {prospec.primary.action}
+                    </Typography>
+                    {(prospec.primary.stop > 0 || prospec.primary.target > 0) && (
+                      <Typography variant="caption" display="block" sx={{ mt: 1 }}>
+                        参考进场 {fmtNum(prospec.primary.entry, 2)} · 停损{' '}
+                        {fmtNum(prospec.primary.stop, 2)} · 目标 {fmtNum(prospec.primary.target, 2)}
+                      </Typography>
+                    )}
+                  </CardContent>
+                </Card>
+              )}
+
+              <Grid container spacing={2} sx={{ mb: 2 }}>
+                {[
+                  { key: 'weekly', title: '周线（大势）', tf: prospec.weekly },
+                  { key: 'daily', title: '日线（结构）', tf: prospec.daily },
+                  { key: 'h4', title: '4h（波段）', tf: prospec.h4 },
+                  { key: 'm15', title: '15m（扳机）', tf: prospec.m15 },
+                ].map(({ key, title, tf }) => (
+                  <Grid item xs={12} md={6} key={key}>
+                    <Card variant="outlined" sx={{ height: '100%' }}>
+                      <CardContent>
+                        <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', mb: 1, alignItems: 'center' }}>
+                          <Typography variant="subtitle2">{title}</Typography>
+                          <Chip
+                            size="small"
+                            label={
+                              tf?.nest?.bias === 'bull'
+                                ? '嵌套偏多'
+                                : tf?.nest?.bias === 'bear'
+                                  ? '嵌套偏空'
+                                  : '嵌套震荡'
+                            }
+                            color={
+                              tf?.nest?.bias === 'bull'
+                                ? 'success'
+                                : tf?.nest?.bias === 'bear'
+                                  ? 'error'
+                                  : 'default'
+                            }
+                          />
+                          <Chip
+                            size="small"
+                            label={`1-2-3 阶段${tf?.oneTwoThree?.stage ?? 0}${
+                              tf?.oneTwoThree?.confirmed ? ' 确认' : ''
+                            }`}
+                          />
+                        </Box>
+                        <Typography variant="caption" display="block">
+                          {tf?.nest?.note}
+                        </Typography>
+                        <Typography variant="caption" display="block" sx={{ mt: 0.5 }}>
+                          1-2-3：{tf?.oneTwoThree?.direction || 'none'} · {tf?.oneTwoThree?.note}
+                        </Typography>
+                        {tf?.twoB && (
+                          <Typography variant="caption" display="block" color="text.secondary">
+                            2B：{tf.twoB.side === 'long' ? '试多' : '试空'} · 刺穿{' '}
+                            {fmtNum(tf.twoB.pierced, 2)} · {tf.twoB.barsAgo} 根前
+                          </Typography>
+                        )}
+                        <Typography variant="body2" sx={{ mt: 1 }}>
+                          现价 {fmtNum(tf?.last, 2)} · EMA50 {fmtNum(tf?.nest?.ema50, 2)}
+                        </Typography>
+                      </CardContent>
+                    </Card>
+                  </Grid>
+                ))}
+              </Grid>
+
+              <Grid container spacing={2} sx={{ mb: 2 }}>
+                {(prospec.clocks || []).map((ck: any) => (
+                  <Grid item xs={6} md={3} key={ck.interval}>
+                    <Card variant="outlined">
+                      <CardContent>
+                        <Typography variant="caption" color="text.secondary">
+                          {ck.note}
+                        </Typography>
+                        <Typography variant="body2">{ck.cst}</Typography>
+                      </CardContent>
+                    </Card>
+                  </Grid>
+                ))}
+              </Grid>
+
+              {(prospec.scan || []).length > 0 && (
+                <Card variant="outlined" sx={{ mb: 2 }}>
+                  <CardContent>
+                    <Typography variant="subtitle2" gutterBottom>
+                      多币扫描（日线 1-2-3 / 15m 2B 有信号）
+                    </Typography>
+                    <ScrollTable>
+                      <Table size="small">
+                        <TableHead>
+                          <TableRow>
+                            <TableCell>币</TableCell>
+                            <TableCell>日嵌套</TableCell>
+                            <TableCell>1-2-3</TableCell>
+                            <TableCell>2B</TableCell>
+                            <TableCell>设置</TableCell>
+                            <TableCell align="right">价格</TableCell>
+                          </TableRow>
+                        </TableHead>
+                        <TableBody>
+                          {prospec.scan.map((row: any) => (
+                            <TableRow
+                              key={row.symbol}
+                              hover
+                              sx={{ cursor: 'pointer' }}
+                              onClick={() => setProspecSymbol(row.symbol)}
+                            >
+                              <TableCell>{row.symbol}</TableCell>
+                              <TableCell>{row.nestBias}</TableCell>
+                              <TableCell>
+                                {row.dir123}/{row.stage123}
+                                {row.confirmed ? '✓' : ''}
+                              </TableCell>
+                              <TableCell>{row.twoBSide || '—'}</TableCell>
+                              <TableCell>
+                                {row.label}
+                                {row.aligned ? ' ·同向' : ''}
+                              </TableCell>
+                              <TableCell align="right">{fmtNum(row.last, 4)}</TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </ScrollTable>
+                  </CardContent>
+                </Card>
+              )}
+
+              <Card variant="outlined">
+                <CardContent>
+                  <Typography variant="subtitle2" gutterBottom>
+                    规则（策略 prospec）
+                  </Typography>
+                  <List dense>
+                    {(prospec.rules || []).map((r: string, i: number) => (
                       <ListItem key={i} disableGutters>
                         <ListItemText primary={`${i + 1}. ${r}`} />
                       </ListItem>

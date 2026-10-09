@@ -1,0 +1,41 @@
+---
+# prospec 15m + 4h nest backtest
+#   ./bbgo backtest --config config/prospec-backtest-15m.yaml --sync --force
+sessions:
+  binance:
+    exchange: binance
+    envVarPrefix: BINANCE
+    futures: true
+    symbolLeverage:
+      BTCUSDT: 2
+
+backtest:
+  startTime: "2026-08-01"
+  endTime: "2026-09-01"
+  symbols:
+    - BTCUSDT
+  sessions:
+    - binance
+  feeMode: native
+  accounts:
+    binance:
+      makerFeeRate: 0.02%
+      takerFeeRate: 0.05%
+      balances:
+        USDT: 10000.0
+
+exchangeStrategies:
+  - on: binance
+    prospec:
+      symbol: BTCUSDT
+      interval: 15m
+      nestInterval: 4h
+      useNestFilter: true
+      requireNestAlign: true
+      enable123: true
+      enable2B: true
+      swingLook: 3
+      enableLong: true
+      enableShort: true
+      quantity: 0.05
+      minRR: 1.0

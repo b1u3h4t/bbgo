@@ -207,6 +207,20 @@ export async function queryAnalysisRegime(
   return response.data;
 }
 
+export async function queryAnalysisProspec(
+  session = 'binance',
+  params?: { symbol?: string; scan?: boolean },
+) {
+  const response = await axios.get(baseURL + '/api/analysis/prospec', {
+    params: {
+      session,
+      symbol: params?.symbol || 'BTCUSDT',
+      scan: params?.scan === false ? '0' : '1',
+    },
+  });
+  return response.data;
+}
+
 export async function queryAnalysisGridCalc(params: Record<string, string | number>) {
   const response = await axios.get(baseURL + '/api/analysis/grid-calc', {
     params,

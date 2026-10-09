@@ -24,6 +24,7 @@ func (s *Server) registerAnalysisRoutes(r *gin.Engine) {
 	r.GET("/api/analysis/market", s.analysisMarket)
 	r.GET("/api/analysis/trend", s.analysisTrend)
 	r.GET("/api/analysis/regime", s.analysisRegime)
+	r.GET("/api/analysis/prospec", s.analysisProspec)
 	r.GET("/api/analysis/grid-calc", s.analysisGridCalc)
 	r.GET("/api/analysis/pnl/today", s.analysisTodayPnL)
 	r.GET("/api/analysis/pnl", s.analysisTodayPnL) // ?period=today|7d|30d|90d (+ daily series)
