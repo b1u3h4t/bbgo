@@ -17,10 +17,12 @@ import (
 )
 
 type prospecTrendLines struct {
-	OLSSupport       *prospec.TrendLine `json:"olsSupport,omitempty"`
-	OLSResistance    *prospec.TrendLine `json:"olsResistance,omitempty"`
-	RANSACSupport    *prospec.TrendLine `json:"ransacSupport,omitempty"`
-	RANSACResistance *prospec.TrendLine `json:"ransacResistance,omitempty"`
+	OLSSupport        *prospec.TrendLine   `json:"olsSupport,omitempty"`
+	OLSResistance     *prospec.TrendLine   `json:"olsResistance,omitempty"`
+	RANSACSupport     *prospec.TrendLine   `json:"ransacSupport,omitempty"` // primary: recent unbroken preferred
+	RANSACResistance  *prospec.TrendLine   `json:"ransacResistance,omitempty"`
+	RANSACSupports    []*prospec.TrendLine `json:"ransacSupports,omitempty"`
+	RANSACResistances []*prospec.TrendLine `json:"ransacResistances,omitempty"`
 }
 
 type prospecTFView struct {
@@ -80,10 +82,11 @@ func buildProspecTF(iv types.Interval, ks []types.KLine) prospecTFView {
 	v.Nest = prospec.ClassifyNest(ks, string(iv))
 	v.OneTwoThree = prospec.DetectOneTwoThree(ks, 3)
 	v.TwoB = prospec.DetectTwoB(ks, 3, 16)
-	olsS, olsR, rS, rR := prospec.DetectTrendLines(ks, 3)
+	tls := prospec.DetectTrendLineSet(ks, 3, prospec.MaxTrendLinesPerKind)
 	v.TrendLines = prospecTrendLines{
-		OLSSupport: olsS, OLSResistance: olsR,
-		RANSACSupport: rS, RANSACResistance: rR,
+		OLSSupport: tls.OLSSupport, OLSResistance: tls.OLSResistance,
+		RANSACSupport: tls.RANSACSupport, RANSACResistance: tls.RANSACResistance,
+		RANSACSupports: tls.RANSACSupports, RANSACResistances: tls.RANSACResistances,
 	}
 	// setup under self-nest (same TF structure as local bias)
 	v.Setup = prospec.BuildSetup(v.Nest, v.OneTwoThree, v.TwoB, v.Last)

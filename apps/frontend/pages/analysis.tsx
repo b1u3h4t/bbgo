@@ -2452,8 +2452,37 @@ export default function AnalysisPage() {
                             dashed: broken || !!dashed,
                           });
                         };
-                        push(tl.ransacSupport, '#2e7d32', 'RANSAC支撑');
-                        push(tl.ransacResistance, '#c62828', 'RANSAC阻力');
+                        const pushMany = (
+                          arr: any[] | undefined,
+                          fallback: any,
+                          color: string,
+                          base: string,
+                          dashed?: boolean,
+                        ) => {
+                          const list =
+                            Array.isArray(arr) && arr.length > 0
+                              ? arr
+                              : fallback
+                                ? [fallback]
+                                : [];
+                          list.forEach((ln, i) => {
+                            const title =
+                              list.length > 1 ? `${base}${i + 1}` : base;
+                            push(ln, color, title, dashed);
+                          });
+                        };
+                        pushMany(
+                          tl.ransacSupports,
+                          tl.ransacSupport,
+                          '#2e7d32',
+                          'RANSAC支撑',
+                        );
+                        pushMany(
+                          tl.ransacResistances,
+                          tl.ransacResistance,
+                          '#c62828',
+                          'RANSAC阻力',
+                        );
                         push(tl.olsSupport, '#00897b', 'OLS支撑', true);
                         push(tl.olsResistance, '#ef6c00', 'OLS阻力', true);
                         return segs;
@@ -2639,11 +2668,29 @@ export default function AnalysisPage() {
                         <Typography variant="caption" display="block" sx={{ mt: 0.5 }}>
                           1-2-3：{tf?.oneTwoThree?.direction || 'none'} · {tf?.oneTwoThree?.note}
                         </Typography>
-                        {(tf?.trendLines?.ransacSupport || tf?.trendLines?.ransacResistance) && (
+                        {(tf?.trendLines?.ransacSupport ||
+                          tf?.trendLines?.ransacResistance ||
+                          tf?.trendLines?.ransacSupports?.length ||
+                          tf?.trendLines?.ransacResistances?.length) && (
                           <Typography variant="caption" display="block" color="text.secondary">
-                            趋势线 RANSAC：支撑触点{' '}
-                            {tf.trendLines.ransacSupport?.touches ?? '—'} / 阻力触点{' '}
-                            {tf.trendLines.ransacResistance?.touches ?? '—'}
+                            趋势线 RANSAC：支撑{' '}
+                            {tf.trendLines.ransacSupports?.length ||
+                              (tf.trendLines.ransacSupport ? 1 : 0)}{' '}
+                            条
+                            {tf.trendLines.ransacSupport
+                              ? `（主触点 ${tf.trendLines.ransacSupport.touches}${
+                                  tf.trendLines.ransacSupport.broken ? '·破' : ''
+                                }）`
+                              : ''}{' '}
+                            / 阻力{' '}
+                            {tf.trendLines.ransacResistances?.length ||
+                              (tf.trendLines.ransacResistance ? 1 : 0)}{' '}
+                            条
+                            {tf.trendLines.ransacResistance
+                              ? `（主触点 ${tf.trendLines.ransacResistance.touches}${
+                                  tf.trendLines.ransacResistance.broken ? '·破' : ''
+                                }）`
+                              : ''}
                           </Typography>
                         )}
                         {tf?.twoB && (

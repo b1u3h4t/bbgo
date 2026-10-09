@@ -261,29 +261,63 @@ func tailPivots(pts []pivotPt, max int) []pivotPt {
 	return pts[len(pts)-max:]
 }
 
+// MaxTrendLinesPerKind caps how many support/resistance segments we keep for charts.
+const MaxTrendLinesPerKind = 3
+
 // FitTrendRANSAC exhaustive pair scan (deterministic RANSAC) + OLS refit on inliers.
+// Returns the primary line of each kind: prefer recent unbroken, then recent break.
 func FitTrendRANSAC(hist []types.KLine, sw []Swing, minTouches int) (support, resistance *TrendLine) {
+	sups, ress := FitTrendRANSACMulti(hist, sw, minTouches, 1)
+	if len(sups) > 0 {
+		support = sups[0]
+	}
+	if len(ress) > 0 {
+		resistance = ress[0]
+	}
+	return
+}
+
+// FitTrendRANSACMulti returns up to maxN distinct lines per kind, ranked for trading relevance.
+func FitTrendRANSACMulti(hist []types.KLine, sw []Swing, minTouches, maxN int) (supports, resistances []*TrendLine) {
+	if maxN <= 0 {
+		maxN = MaxTrendLinesPerKind
+	}
 	if minTouches < 2 {
 		minTouches = 3
 	}
 	tol := atrApprox(hist, 14) * 0.3
-	if tol <= 0 {
+	if tol <= 0 && len(hist) > 0 {
 		tol = hist[len(hist)-1].Close.Float64() * 0.004
 	}
-	lows := tailPivots(pivotsOfKind(sw, "low"), 12)
-	highs := tailPivots(pivotsOfKind(sw, "high"), 12)
-	support = bestConsensusLine(hist, lows, tol, minTouches, true)
-	resistance = bestConsensusLine(hist, highs, tol, minTouches, false)
+	lows := tailPivots(pivotsOfKind(sw, "low"), 14)
+	highs := tailPivots(pivotsOfKind(sw, "high"), 14)
+	// Collect with minTouches, fall back to 2 so short recent legs (V-bounce) can appear.
+	supports = selectConsensusLines(hist, lows, tol, minTouches, true, maxN)
+	if len(supports) == 0 && minTouches > 2 {
+		supports = selectConsensusLines(hist, lows, tol, 2, true, maxN)
+	}
+	resistances = selectConsensusLines(hist, highs, tol, minTouches, false, maxN)
+	if len(resistances) == 0 && minTouches > 2 {
+		resistances = selectConsensusLines(hist, highs, tol, 2, false, maxN)
+	}
 	return
 }
 
 func bestConsensusLine(hist []types.KLine, pts []pivotPt, tol float64, minTouches int, support bool) *TrendLine {
+	lines := selectConsensusLines(hist, pts, tol, minTouches, support, 1)
+	if len(lines) == 0 {
+		return nil
+	}
+	return lines[0]
+}
+
+// collectConsensusCandidates enumerates RANSAC pair hypotheses (unstamped).
+func collectConsensusCandidates(hist []types.KLine, pts []pivotPt, tol float64, minTouches int, support bool) []*TrendLine {
 	n := len(pts)
 	if n < 2 {
 		return nil
 	}
-	var best *TrendLine
-	bestScore := -1.0
+	var out []*TrendLine
 	for i := 0; i < n; i++ {
 		for j := i + 1; j < n; j++ {
 			dx := float64(pts[j].idx - pts[i].idx)
@@ -319,36 +353,147 @@ func bestConsensusLine(hist []types.KLine, pts []pivotPt, tol float64, minTouche
 			if ln == nil {
 				continue
 			}
-			if ln.Score > bestScore {
-				bestScore = ln.Score
-				best = ln
-			}
+			out = append(out, ln)
 		}
 	}
-	// fallback: 2-point if minTouches forced high but only 2 pivots
-	if best == nil && n >= 2 && minTouches > 2 {
-		return bestConsensusLine(hist, pts, tol, 2, support)
-	}
-	return best
+	return out
 }
 
-// DetectTrendLines returns both OLS and RANSAC lines for charting / API.
+// rankTrendLine prefers unbroken + recent last touch/break, then geometric score.
+func rankTrendLine(ln *TrendLine, nBars int) float64 {
+	if ln == nil || nBars <= 0 {
+		return -1
+	}
+	r := ln.Score
+	if !ln.Broken {
+		r += 50
+		// fresher last pivot touch
+		r += 35 * float64(ln.EndIdx) / float64(nBars)
+	} else {
+		// recently broken still useful for Stage①; ancient breaks sink
+		r += 12
+		bi := ln.BreakIdx
+		if bi <= 0 {
+			bi = ln.EndIdx
+		}
+		r += 25 * float64(bi) / float64(nBars)
+		age := nBars - 1 - bi
+		if age > 0 {
+			r -= float64(age) * 0.08
+		}
+	}
+	return r
+}
+
+func linesSimilar(a, b *TrendLine, tol float64) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	if a.Kind != b.Kind {
+		return false
+	}
+	mid := (a.StartIdx + a.EndIdx) / 2
+	if mid < 0 {
+		mid = 0
+	}
+	end := a.EndIdx
+	if b.EndIdx > end {
+		end = b.EndIdx
+	}
+	if end < mid {
+		end = mid
+	}
+	da := math.Abs(a.PriceAt(mid) - b.PriceAt(mid))
+	db := math.Abs(a.PriceAt(end) - b.PriceAt(end))
+	thr := tol * 2.5
+	if thr < 1e-9 {
+		thr = 1
+	}
+	if da > thr || db > thr {
+		return false
+	}
+	den := math.Abs(a.Slope) + math.Abs(b.Slope) + 1e-9
+	return math.Abs(a.Slope-b.Slope)/den < 0.35
+}
+
+// selectConsensusLines stamps candidates, ranks (recent unbroken first), keeps distinct top maxN.
+func selectConsensusLines(hist []types.KLine, pts []pivotPt, tol float64, minTouches int, support bool, maxN int) []*TrendLine {
+	cands := collectConsensusCandidates(hist, pts, tol, minTouches, support)
+	if len(cands) == 0 {
+		return nil
+	}
+	nBars := len(hist)
+	for _, ln := range cands {
+		stampTrendLine(hist, ln)
+	}
+	sort.SliceStable(cands, func(i, j int) bool {
+		return rankTrendLine(cands[i], nBars) > rankTrendLine(cands[j], nBars)
+	})
+	var out []*TrendLine
+	for _, ln := range cands {
+		dup := false
+		for _, kept := range out {
+			if linesSimilar(ln, kept, tol) {
+				dup = true
+				break
+			}
+		}
+		if dup {
+			continue
+		}
+		out = append(out, ln)
+		if len(out) >= maxN {
+			break
+		}
+	}
+	return out
+}
+
+// TrendLineSet is the multi-segment chart payload (OLS primary + RANSAC multi).
+type TrendLineSet struct {
+	OLSSupport        *TrendLine   `json:"olsSupport,omitempty"`
+	OLSResistance     *TrendLine   `json:"olsResistance,omitempty"`
+	RANSACSupport     *TrendLine   `json:"ransacSupport,omitempty"` // primary (= ransacSupports[0])
+	RANSACResistance  *TrendLine   `json:"ransacResistance,omitempty"`
+	RANSACSupports    []*TrendLine `json:"ransacSupports,omitempty"`
+	RANSACResistances []*TrendLine `json:"ransacResistances,omitempty"`
+}
+
+// DetectTrendLines returns primary OLS + RANSAC lines (backward compatible).
 func DetectTrendLines(ks []types.KLine, look int) (olsSup, olsRes, ransacSup, ransacRes *TrendLine) {
+	set := DetectTrendLineSet(ks, look, 1)
+	return set.OLSSupport, set.OLSResistance, set.RANSACSupport, set.RANSACResistance
+}
+
+// DetectTrendLineSet fits OLS primaries and up to maxPerKind RANSAC segments per side.
+func DetectTrendLineSet(ks []types.KLine, look, maxPerKind int) TrendLineSet {
+	var set TrendLineSet
 	hist := closedHist(ks)
 	if len(hist) < 40 {
-		return
+		return set
 	}
 	if look < 2 {
 		look = 3
 	}
+	if maxPerKind <= 0 {
+		maxPerKind = MaxTrendLinesPerKind
+	}
 	sw := FindSwings(hist, look)
-	olsSup, olsRes = FitTrendOLS(hist, sw, 2)
-	ransacSup, ransacRes = FitTrendRANSAC(hist, sw, 3)
+	olsSup, olsRes := FitTrendOLS(hist, sw, 2)
 	stampTrendLine(hist, olsSup)
 	stampTrendLine(hist, olsRes)
-	stampTrendLine(hist, ransacSup)
-	stampTrendLine(hist, ransacRes)
-	return
+	sups, ress := FitTrendRANSACMulti(hist, sw, 3, maxPerKind)
+	set.OLSSupport = olsSup
+	set.OLSResistance = olsRes
+	set.RANSACSupports = sups
+	set.RANSACResistances = ress
+	if len(sups) > 0 {
+		set.RANSACSupport = sups[0]
+	}
+	if len(ress) > 0 {
+		set.RANSACResistance = ress[0]
+	}
+	return set
 }
 
 func stampTrendLine(hist []types.KLine, ln *TrendLine) {

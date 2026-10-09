@@ -1,6 +1,7 @@
 package prospec
 
 import (
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -86,4 +87,34 @@ func TestCompare123MethodsRuns(t *testing.T) {
 	assert.Equal(t, "hl", rows[0].Method)
 	assert.Equal(t, "ols", rows[1].Method)
 	assert.Equal(t, "ransac", rows[2].Method)
+}
+
+func TestPreferRecentUnbrokenAfterVBounce(t *testing.T) {
+	// Declining channel (clear LH) then V-bounce with higher lows.
+	ks := synth(140, func(i int, prev float64) (o, h, l, c float64) {
+		if i < 80 {
+			base := 170 - float64(i)*0.55
+			zig := math.Sin(float64(i)*0.55) * 2.2
+			c = base + zig
+			return c - 0.3, c + 1.6, c - 1.8, c
+		}
+		base := 120 + float64(i-80)*0.5
+		zig := math.Sin(float64(i-80)*0.7) * 1.2
+		c = base + zig
+		return c - 0.25, c + 1.2, c - 1.5, c
+	})
+	set := DetectTrendLineSet(ks, 2, 3)
+	require.NotNil(t, set.RANSACSupport, "should find ascending support on bounce")
+	assert.Greater(t, set.RANSACSupport.Slope, 0.0)
+	assert.False(t, set.RANSACSupport.Broken, "primary support should be recent unbroken bounce")
+	total := len(set.RANSACSupports) + len(set.RANSACResistances)
+	assert.GreaterOrEqual(t, total, 2, "multi-segment set should keep support + resistance")
+	require.NotNil(t, set.RANSACResistance)
+	assert.Less(t, set.RANSACResistance.Slope, 0.0)
+}
+
+func TestRankTrendLinePrefersUnbroken(t *testing.T) {
+	alive := &TrendLine{Score: 10, EndIdx: 80, Broken: false}
+	dead := &TrendLine{Score: 40, EndIdx: 40, BreakIdx: 50, Broken: true}
+	assert.Greater(t, rankTrendLine(alive, 100), rankTrendLine(dead, 100))
 }
