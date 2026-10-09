@@ -59,6 +59,7 @@ type analysisRegimeResp struct {
 	Current     *regimeCurrentEpisode `json:"current,omitempty"`
 	Backtest4h  regimeBTPool          `json:"backtest4h"`
 	Backtest1d  regimeBTPool          `json:"backtest1d"`
+	UD          analysisUDView        `json:"ud"`
 	Rules       []string              `json:"rules"`
 	SymbolsUsed []string              `json:"symbolsUsed"`
 	KlineSource string                `json:"klineSource"`
@@ -142,9 +143,10 @@ func (s *Server) analysisRegime(c *gin.Context) {
 
 	now := time.Now().UTC()
 	clocks := []regimeClock{
-		makeClock(now, types.Interval4h, "中周期确认：下一根 4h 收盘"),
-		makeClock(now, types.Interval1d, "中/长周期确认：下一根日线收盘"),
-		makeClock(now, types.Interval1w, "长周期确认：下一根周线收盘（周一开盘对齐）"),
+		makeClock(now, types.Interval4h, "4h 换线：下一根 4h 收盘"),
+		makeClock(now, types.Interval1d, "日线换线：下一根日线收盘"),
+		makeClock(now, types.Interval1w, "周线换线：下一根周线收盘"),
+		makeClock(now, types.Interval1mo, "月线换线：下一根月线收盘"),
 	}
 
 	// live TFs for focus symbol
@@ -160,6 +162,7 @@ func (s *Server) analysisRegime(c *gin.Context) {
 		{types.Interval1w, 120},
 	}
 	tfMap := map[string]regimeTFState{}
+	klineMap := map[string][]types.KLine{}
 	klineSources := map[string]int{}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -172,6 +175,7 @@ func (s *Server) analysisRegime(c *gin.Context) {
 			st.Interval = string(r.iv)
 			mu.Lock()
 			tfMap[string(r.iv)] = st
+			klineMap[string(r.iv)] = ks
 			if err != nil {
 				log.WithError(err).Warnf("regime: klines %s %s", symbol, r.iv)
 			} else {
@@ -185,12 +189,12 @@ func (s *Server) analysisRegime(c *gin.Context) {
 	short := buildHorizon("short", "短周期（15m+1h）", tfMap["15m"], tfMap["1h"],
 		&clocks[0], // reuse 4h as nearby — replace below
 		[]string{
-			"1h 收盘重新站上 EMA20 且 RSI 回升 > 45",
-			"15m 不再创新低，连续 2 根收阳",
+			"1h 收盘站上 4h 箱顶 / 关键压力",
+			"回踩箱顶不破后再放量",
 		},
 		[]string{
-			"1h 收盘跌破近期摆动低点",
-			"15m/1h 同时收在 EMA20 下方且 EMA20 向下",
+			"1h 收盘跌破反弹抬高点或 4h 箱底",
+			"15m/1h 同时收在箱下沿之下",
 		},
 	)
 	// short next close = 1h
@@ -200,12 +204,12 @@ func (s *Server) analysisRegime(c *gin.Context) {
 	med := buildHorizon("medium", "中周期（4h+日线）", tfMap["4h"], tfMap["1d"],
 		&clocks[0],
 		[]string{
-			"4h 收盘站回 EMA20，且日线仍在 EMA50 上方",
-			"日线收盘创出反弹高点并站上前一日高点",
+			"4h 收盘升破锁箱顶，且日线未破关键支撑",
+			"日线收盘确认出多（跟 4h 突破）",
 		},
 		[]string{
-			"4h 收盘跌破本轮摆动低点",
-			"日线收盘跌破 EMA50 且 EMA20 拐头向下",
+			"4h 收盘跌破关键支撑/箱底 → 日线出空预警",
+			"日线收盘跌破日线箱底 → 周线出空预警",
 		},
 	)
 
@@ -222,17 +226,20 @@ func (s *Server) analysisRegime(c *gin.Context) {
 		Timeframes: filterTF(longTF, weekTF),
 		NextClose:  &clocks[2],
 		FlipUp: []string{
-			"周线收盘站上 EMA20",
-			"日线重新站上 EMA50 且周线未破前低",
+			"周线收盘升破周线箱顶",
+			"日线出多且周线未破前低（嵌套仍多）",
 		},
 		FlipDown: []string{
-			"周线收盘跌破 EMA20 / 前低",
-			"日线收盘跌破本轮上升结构低点",
+			"周线收盘跌破周线箱底 / 关键支撑",
+			"日线出空后周线跟随（长周期转空）",
 		},
 	}
 	long.Summary = horizonSummary(long.Bias, long.Label)
 
 	horizons := []regimeHorizon{short, med, long}
+
+	ud := buildUDView(klineMap["4h"], klineMap["1d"], klineMap["1w"])
+	ud.Backtest = s.udCascadeBacktestPool(ctx, session, btSymbols)
 
 	// multi-symbol historical backtest (4h + 1d)
 	bt4h, open4hFocus := s.regimeBacktestPool(ctx, session, btSymbols, types.Interval4h, 300, 4.0, symbol)
@@ -302,12 +309,8 @@ func (s *Server) analysisRegime(c *gin.Context) {
 		Current:  current,
 		Backtest4h: bt4h,
 		Backtest1d: bt1d,
-		Rules: []string{
-			"变盘不看时钟，看收盘：短看 1h，中看 4h+日线，长看周线。",
-			"历史回测：各币种 4h/日线出现 ≥5% 回调后，统计反弹到触及 EMA20（成功）或跌破摆动低点（失败）的时长分布。",
-			"P50/P80 是历史分位窗口，不是预测点位；超时未确认则风险升、仓位应降。",
-			"三周期共振（短中长同向）才提高操作权重；冲突时以更长周期为准。",
-		},
+		UD:       ud,
+		Rules:    ud.Rules,
 		SymbolsUsed: btSymbols,
 		KlineSource: strings.Join(srcParts, ","),
 		TookMs:      time.Since(started).Milliseconds(),

@@ -630,7 +630,7 @@ export default function AnalysisPage() {
           <Tab label="盈亏" />
           <Tab label="慎重补仓" />
           <Tab label="趋势选股" />
-          <Tab label="周期变盘" />
+          <Tab label="优道嵌套" />
         </Tabs>
 
         <TabPanel value={tab} index={0}>
@@ -2041,113 +2041,105 @@ export default function AnalysisPage() {
               sx={{ width: 140 }}
             />
             <Button variant="contained" onClick={loadRegime} size={isMobile ? 'small' : 'medium'}>
-              刷新三周期 + 历史回测
+              刷新优道嵌套 + 破箱回测
             </Button>
             {regime?.tookMs != null && (
               <Typography variant="caption" color="text.secondary">
-                {regime.symbolsUsed?.length || 0} 币种回测 · {regime.tookMs}ms · {regime.klineSource}
+                {regime.symbolsUsed?.length || 0} 币种 · {regime.tookMs}ms · {regime.klineSource}
               </Typography>
             )}
           </Box>
 
           {regime && (
             <>
-              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                变盘看收盘确认，不看时钟。历史：各币 ≥5% 回调后，反弹触 EMA20（成功）或破低（失败）的时长分位。
-              </Typography>
-
-              <Grid container spacing={2} sx={{ mb: 2 }}>
-                {(regime.horizons || []).map((h: any) => (
-                  <Grid item xs={12} md={4} key={h.name}>
-                    <Card variant="outlined" sx={{ height: '100%' }}>
-                      <CardContent>
-                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
-                          <Typography variant="subtitle1">{h.label}</Typography>
-                          <Chip
-                            size="small"
-                            label={
-                              h.bias === 'bull' ? '偏多' : h.bias === 'bear' ? '偏空' : '震荡'
-                            }
-                            color={
-                              h.bias === 'bull' ? 'success' : h.bias === 'bear' ? 'error' : 'default'
-                            }
-                          />
-                        </Box>
-                        <Typography variant="body2" sx={{ mb: 1 }}>
-                          {h.summary}
-                        </Typography>
-                        {(h.timeframes || []).map((tf: any) => (
-                          <Typography key={tf.interval} variant="caption" display="block">
-                            {tf.interval}: RSI {fmtNum(tf.rsi14, 1)} · vsEMA20{' '}
-                            {tf.aboveEMA20 ? '上' : '下'} · 斜率 {tf.ema20Slope} ·{' '}
-                            {tf.fromHi20Pct}% from hi20
-                          </Typography>
-                        ))}
-                        {h.nextClose && (
-                          <Typography variant="caption" display="block" sx={{ mt: 1 }} color="primary.main">
-                            下一确认收盘: {h.nextClose.cst}（约 {fmtNum(h.nextClose.inHours, 1)}h）
-                          </Typography>
-                        )}
-                        <Typography variant="caption" display="block" sx={{ mt: 1 }} color="success.main">
-                          转多: {(h.flipUp || []).join('；')}
-                        </Typography>
-                        <Typography variant="caption" display="block" color="error.main">
-                          转空: {(h.flipDown || []).join('；')}
-                        </Typography>
-                      </CardContent>
-                    </Card>
-                  </Grid>
-                ))}
-              </Grid>
-
-              {regime.current && (
-                <Card variant="outlined" sx={{ mb: 2 }}>
+              {regime.ud?.cascade && (
+                <Card variant="outlined" sx={{ mb: 2, borderColor: 'warning.main' }}>
                   <CardContent>
-                    <Typography variant="subtitle2" gutterBottom>
-                      当前 4h 回调/反弹窗口（{regime.current.symbol}）
+                    <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, alignItems: 'center', mb: 1 }}>
+                      <Chip
+                        label={regime.ud.cascade.label}
+                        color={
+                          String(regime.ud.cascade.signal).includes('short')
+                            ? 'error'
+                            : String(regime.ud.cascade.signal).includes('long')
+                              ? 'success'
+                              : 'default'
+                        }
+                      />
+                      <Chip
+                        size="small"
+                        label={`周线嵌套 ${
+                          regime.ud.cascade.nestWeekly === 'bull'
+                            ? '偏多'
+                            : regime.ud.cascade.nestWeekly === 'bear'
+                              ? '偏空'
+                              : '震荡'
+                        }`}
+                      />
+                    </Box>
+                    <Typography variant="body2">{regime.ud.cascade.trigger}</Typography>
+                    <Typography variant="body2" sx={{ mt: 1 }} color="warning.main">
+                      {regime.ud.cascade.action}
                     </Typography>
-                    <Typography variant="body2">
-                      高 {fmtNum(regime.current.high, 2)} → 低 {fmtNum(regime.current.low, 2)}（
-                      {fmtNum(regime.current.dropPct, 2)}%）· 自低点已过{' '}
-                      {fmtNum(regime.current.hoursSinceLow, 1)}h（{regime.current.barsSinceLow} 根 4h）·
-                      现价 {fmtNum(regime.current.last, 2)}{' '}
-                      {regime.current.aboveEMA20 ? '已站 EMA20' : '仍在 EMA20 下'}
-                    </Typography>
-                    <Typography variant="body2" sx={{ mt: 1 }}>
-                      历史触 EMA20：P50 {fmtNum(regime.current.histP50Hours, 1)}h / P80{' '}
-                      {fmtNum(regime.current.histP80Hours, 1)}h · 成功率{' '}
-                      {fmtNum(regime.current.successRateHist, 1)}%
-                    </Typography>
-                    <Typography variant="body2" color="warning.main" sx={{ mt: 1 }}>
-                      {regime.current.windowNote}
+                    <Typography variant="caption" display="block" sx={{ mt: 1 }}>
+                      关键支撑 {fmtNum(regime.ud.cascade.keySupport, 2)} · 关键压力{' '}
+                      {fmtNum(regime.ud.cascade.keyResist, 2)}
                     </Typography>
                   </CardContent>
                 </Card>
               )}
 
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                优道：锁箱 → 沿上做空/沿下做多 → 收盘出箱才变盘。4h 破支撑只出「日线出空预警」，日线再破才看周线。
+              </Typography>
+
               <Grid container spacing={2} sx={{ mb: 2 }}>
-                {[
-                  { title: '4h 多币种回测', bt: regime.backtest4h },
-                  { title: '日线多币种回测', bt: regime.backtest1d },
-                ].map(({ title, bt }) => (
-                  <Grid item xs={12} md={6} key={title}>
-                    <Card variant="outlined">
+                {(regime.ud?.boxes || []).map((b: any) => (
+                  <Grid item xs={12} md={4} key={b.interval}>
+                    <Card variant="outlined" sx={{ height: '100%' }}>
                       <CardContent>
-                        <Typography variant="subtitle2" gutterBottom>
-                          {title}（{bt?.symbols || 0} 币 / {bt?.episodes || 0} 段）
+                        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', mb: 1, flexWrap: 'wrap' }}>
+                          <Typography variant="subtitle1">{b.interval} 箱</Typography>
+                          <Chip
+                            size="small"
+                            label={b.locked ? '已锁' : '不锁'}
+                            color={b.locked ? 'success' : 'default'}
+                          />
+                          <Chip size="small" label={b.phase} />
+                          <Chip
+                            size="small"
+                            label={
+                              b.zone === 'lower'
+                                ? '下沿'
+                                : b.zone === 'upper'
+                                  ? '上沿'
+                                  : b.zone === 'mid'
+                                    ? '中腰'
+                                    : b.zone === 'below'
+                                      ? '箱下'
+                                      : b.zone === 'above'
+                                        ? '箱上'
+                                        : b.zone
+                            }
+                            color={
+                              b.zone === 'lower' || b.zone === 'above'
+                                ? 'success'
+                                : b.zone === 'upper' || b.zone === 'below'
+                                  ? 'error'
+                                  : 'default'
+                            }
+                          />
+                        </Box>
+                        <Typography variant="body2">
+                          {fmtNum(b.bottom, 2)} – {fmtNum(b.top, 2)}（宽 {fmtNum(b.widthPct, 2)}% · 窗
+                          {b.window}）
                         </Typography>
                         <Typography variant="body2">
-                          触 EMA20：P50 {fmtNum(bt?.toEMA20?.p50Hours, 1)}h · P80{' '}
-                          {fmtNum(bt?.toEMA20?.p80Hours, 1)}h · n={bt?.toEMA20?.samples || 0} · 成功率{' '}
-                          {fmtNum(bt?.toEMA20?.successRate, 1)}%
+                          现价 {fmtNum(b.last, 2)} · 箱内 {fmtNum(b.posPct, 0)}% ·{' '}
+                          {b.compressing ? '已收敛' : '未收敛'} · {b.volumeBias}
                         </Typography>
-                        <Typography variant="body2">
-                          破低失败：P50 {fmtNum(bt?.toFail?.p50Hours, 1)}h · P80{' '}
-                          {fmtNum(bt?.toFail?.p80Hours, 1)}h · n={bt?.toFail?.samples || 0}
-                        </Typography>
-                        <Typography variant="body2">
-                          全部已结束：P50 {fmtNum(bt?.allClosed?.p50Hours, 1)}h · P80{' '}
-                          {fmtNum(bt?.allClosed?.p80Hours, 1)}h
+                        <Typography variant="caption" color="text.secondary">
+                          {b.note}
                         </Typography>
                       </CardContent>
                     </Card>
@@ -2155,21 +2147,85 @@ export default function AnalysisPage() {
                 ))}
               </Grid>
 
-              <Card variant="outlined">
+              <Grid container spacing={2} sx={{ mb: 2 }}>
+                {(regime.clocks || []).map((ck: any) => (
+                  <Grid item xs={6} md={3} key={ck.interval}>
+                    <Card variant="outlined">
+                      <CardContent>
+                        <Typography variant="caption" color="text.secondary">
+                          {ck.note}
+                        </Typography>
+                        <Typography variant="body2">{ck.cst}</Typography>
+                        <Typography variant="caption">约 {fmtNum(ck.inHours, 1)}h</Typography>
+                      </CardContent>
+                    </Card>
+                  </Grid>
+                ))}
+              </Grid>
+
+              {regime.ud?.backtest && (
+                <Card variant="outlined" sx={{ mb: 2 }}>
+                  <CardContent>
+                    <Typography variant="subtitle2" gutterBottom>
+                      嵌套回测（{regime.ud.backtest.symbols} 币 · 4h 破合格箱后 {regime.ud.backtest.horizonBars}{' '}
+                      根）
+                    </Typography>
+                    <Typography variant="body2">
+                      破箱底 {regime.ud.backtest.breaksDown} 次 · 跟随{' '}
+                      {regime.ud.backtest.followed} · 假突破收回 {regime.ud.backtest.failed} · 跟随率{' '}
+                      {fmtNum(regime.ud.backtest.followRate, 1)}%
+                    </Typography>
+                    <Typography variant="body2">
+                      破箱顶 {regime.ud.backtest.breaksUp} 次 · 跟随 {regime.ud.backtest.followedUp} · 跟随率{' '}
+                      {fmtNum(regime.ud.backtest.followRateUp, 1)}%
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      {regime.ud.backtest.note}
+                    </Typography>
+                  </CardContent>
+                </Card>
+              )}
+
+              <Accordion>
+                <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                  <Typography variant="subtitle2">均线副屏（不作为优道变盘）</Typography>
+                </AccordionSummary>
+                <AccordionDetails>
+                  <Grid container spacing={2} sx={{ mb: 2 }}>
+                    {(regime.horizons || []).map((h: any) => (
+                      <Grid item xs={12} md={4} key={h.name}>
+                        <Typography variant="body2">
+                          {h.label} · {h.summary}
+                        </Typography>
+                        {(h.timeframes || []).map((tf: any) => (
+                          <Typography key={tf.interval} variant="caption" display="block">
+                            {tf.interval}: RSI {fmtNum(tf.rsi14, 1)} · EMA20 {tf.aboveEMA20 ? '上' : '下'}
+                          </Typography>
+                        ))}
+                      </Grid>
+                    ))}
+                  </Grid>
+                  {regime.current && (
+                    <Typography variant="caption" display="block">
+                      反弹 EMA 窗口 P50 {fmtNum(regime.current.histP50Hours, 1)}h / P80{' '}
+                      {fmtNum(regime.current.histP80Hours, 1)}h（仅参考）
+                    </Typography>
+                  )}
+                </AccordionDetails>
+              </Accordion>
+
+              <Card variant="outlined" sx={{ mt: 2 }}>
                 <CardContent>
                   <Typography variant="subtitle2" gutterBottom>
-                    程序标准
+                    优道规则
                   </Typography>
                   <List dense>
-                    {(regime.rules || []).map((r: string, i: number) => (
+                    {(regime.ud?.rules || regime.rules || []).map((r: string, i: number) => (
                       <ListItem key={i} disableGutters>
                         <ListItemText primary={`${i + 1}. ${r}`} />
                       </ListItem>
                     ))}
                   </List>
-                  <Typography variant="caption" color="text.secondary">
-                    样本币: {(regime.symbolsUsed || []).join(', ')}
-                  </Typography>
                 </CardContent>
               </Card>
             </>
