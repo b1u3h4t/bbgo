@@ -350,6 +350,28 @@ func (s *Strategy) isEnabled() bool {
 	return s.Enable == nil || *s.Enable
 }
 
+// isGridPinOpenOrder reports whether an open order is a grid pin (LIMIT / LIMIT_MAKER).
+// Binance USDT-M QueryOpenOrders also returns conditional/algo orders (TP/SL);
+// those must not be cancelled when disabling or clearing the grid book.
+func isGridPinOpenOrder(o types.Order) bool {
+	switch o.Type {
+	case types.OrderTypeLimit, types.OrderTypeLimitMaker:
+		return true
+	default:
+		return false
+	}
+}
+
+func filterGridPinOpenOrders(orders []types.Order) []types.Order {
+	out := make([]types.Order, 0, len(orders))
+	for _, o := range orders {
+		if isGridPinOpenOrder(o) {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
 func (s *Strategy) Initialize() error {
 	s.filledOrderIDMap = types.NewSyncOrderMap()
 	s.logger = log.WithFields(s.LogFields)
@@ -2411,13 +2433,27 @@ func (s *Strategy) generateUSDTMGridOrders(totalQuote, totalBase, lastPrice fixe
 }
 
 func (s *Strategy) clearOpenOrders(ctx context.Context, session *bbgo.ExchangeSession) error {
-	// clear open orders when start
+	// Clear only grid pin LIMIT orders. On Binance futures, QueryOpenOrders
+	// also returns open algo/conditional TPs and stops — leave those alone so
+	// manual reduce-only protection survives enable=false / restart.
 	openOrders, err := retry.QueryOpenOrdersUntilSuccessful(ctx, session.Exchange, s.Symbol)
 	if err != nil {
 		return err
 	}
 
-	return retry.CancelOrdersUntilSuccessful(ctx, session.Exchange, openOrders...)
+	gridOrders := filterGridPinOpenOrders(openOrders)
+	skipped := len(openOrders) - len(gridOrders)
+	if skipped > 0 {
+		s.logger.Infof(
+			"%s: clearOpenOrders: cancelling %d grid pin order(s), keeping %d non-grid order(s) (TP/SL/algo)",
+			s.Symbol, len(gridOrders), skipped,
+		)
+	}
+	if len(gridOrders) == 0 {
+		return nil
+	}
+
+	return retry.CancelOrdersUntilSuccessful(ctx, session.Exchange, gridOrders...)
 }
 
 func (s *Strategy) getLastTradePrice(ctx context.Context, session *bbgo.ExchangeSession) (fixedpoint.Value, error) {
@@ -2612,11 +2648,11 @@ func (s *Strategy) Run(ctx context.Context, _ bbgo.OrderExecutor, session *bbgo.
 
 	if !s.isEnabled() {
 		s.logger.Warnf(
-			"%s: enable=false — grid will not open or recover; cancelling open orders for manual handling",
+			"%s: enable=false — grid will not open or recover; cancelling grid pin orders only (keeping TP/SL/algo)",
 			s.Symbol,
 		)
 		if err := s.clearOpenOrders(ctx, session); err != nil {
-			s.logger.WithError(err).Errorf("%s: failed to cancel open orders while disabled", s.Symbol)
+			s.logger.WithError(err).Errorf("%s: failed to cancel grid pin orders while disabled", s.Symbol)
 		}
 		return nil
 	}
@@ -2885,6 +2921,10 @@ func (s *Strategy) openOrdersMismatches(ctx context.Context, session *bbgo.Excha
 
 	grid := s.newGrid()
 	for _, o := range openOrders {
+		// Manual TP/SL/algo orders are not grid pins; ignore them for mismatch.
+		if !isGridPinOpenOrder(o) {
+			continue
+		}
 		// if any of the open order is not on the grid, or out of the range
 		// we should cancel all of them
 		if !grid.HasPrice(o.Price) || grid.OutOfRange(o.Price) {
