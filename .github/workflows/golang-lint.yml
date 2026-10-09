@@ -20,7 +20,7 @@ jobs:
         run: bash scripts/ci-bbgo-tmpdir.sh setup
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.26'
+          go-version: '1.27'
           cache: ${{ github.event_name == 'pull_request' }}
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
