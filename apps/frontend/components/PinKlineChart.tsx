@@ -61,6 +61,17 @@ export type ChartPosition = {
   leverage?: number;
 };
 
+/** Diagonal trendline segment (Sperandeo / RANSAC overlays). */
+export type TrendSegment = {
+  t1: string;
+  p1: number;
+  t2: string;
+  p2: number;
+  color?: string;
+  title?: string;
+  dashed?: boolean;
+};
+
 type Props = {
   symbol: string;
   klines: KlineBar[];
@@ -75,6 +86,8 @@ type Props = {
   height?: number;
   /** Current futures position — drawn at entry like Binance */
   position?: ChartPosition | null;
+  /** Diagonal OLS/RANSAC trendlines */
+  trendSegments?: TrendSegment[];
 };
 
 type Ohlcv = {
@@ -189,6 +202,7 @@ export default function PinKlineChart({
   klineSource,
   height = 360,
   position,
+  trendSegments = [],
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -198,6 +212,7 @@ export default function PinKlineChart({
   const linesRef = useRef<IPriceLine[]>([]);
   const indicatorLinesRef = useRef<IPriceLine[]>([]);
   const indicatorSeriesRef = useRef<Map<string, SeriesHandle>>(new Map());
+  const trendSeriesRef = useRef<ISeriesApi<'Line'>[]>([]);
   const latestRef = useRef<Ohlcv | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
@@ -671,6 +686,45 @@ export default function PinKlineChart({
       }
     }
   }, [indicators, klines]);
+
+  // diagonal trendlines (RANSAC / OLS)
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    for (const s of trendSeriesRef.current) {
+      try {
+        chart.removeSeries(s);
+      } catch {
+        /* ignore */
+      }
+    }
+    trendSeriesRef.current = [];
+    if (!trendSegments?.length) return;
+    for (const seg of trendSegments) {
+      if (!(seg.p1 > 0 && seg.p2 > 0 && seg.t1 && seg.t2)) continue;
+      const t1 = toChartTime(seg.t1);
+      const t2 = toChartTime(seg.t2);
+      if ((t1 as number) === (t2 as number)) continue;
+      const s = chart.addLineSeries({
+        color: seg.color || '#00897b',
+        lineWidth: 2,
+        lineStyle: seg.dashed ? 2 : 0,
+        title: seg.title || '',
+        lastValueVisible: true,
+        priceLineVisible: false,
+        crosshairMarkerVisible: false,
+      });
+      const a = (t1 as number) < (t2 as number) ? t1 : t2;
+      const b = (t1 as number) < (t2 as number) ? t2 : t1;
+      const pa = (t1 as number) < (t2 as number) ? seg.p1 : seg.p2;
+      const pb = (t1 as number) < (t2 as number) ? seg.p2 : seg.p1;
+      s.setData([
+        { time: a, value: pa },
+        { time: b, value: pb },
+      ]);
+      trendSeriesRef.current.push(s);
+    }
+  }, [trendSegments, klines]);
 
   if (!klines?.length) {
     return (

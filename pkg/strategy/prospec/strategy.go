@@ -51,6 +51,12 @@ type Strategy struct {
 	// MinRR minimum reward:risk using stop→target estimate (0 disables)
 	MinRR float64 `json:"minRR"`
 
+	// RewardRisk sets take-profit distance in R multiples (ablation: 2 on daily+nest).
+	RewardRisk float64 `json:"rewardRisk"`
+
+	// TrendFit: hl | ols | ransac (default ransac; casoon≈ransac+minTouches3).
+	TrendFit string `json:"trendFit"`
+
 	Position    *types.Position    `persistence:"position"`
 	ProfitStats *types.ProfitStats `persistence:"profit_stats"`
 	TradeStats  *types.TradeStats  `persistence:"trade_stats"`
@@ -106,6 +112,19 @@ func (s *Strategy) Defaults() error {
 	}
 	if s.Leverage.IsZero() && s.Quantity.IsZero() {
 		s.Leverage = fixedpoint.NewFromInt(1)
+	}
+	// Ablation defaults: 2R targets. Nest align must be enabled explicitly in yaml
+	// (bool zero-value cannot distinguish unset vs false).
+	if s.RewardRisk <= 0 {
+		s.RewardRisk = DefaultRewardRisk
+	}
+	if s.TrendFit == "" {
+		s.TrendFit = string(TrendFitRANSAC)
+	}
+	if s.Interval == types.Interval15m || s.Interval == types.Interval30m || s.Interval == types.Interval4h {
+		if !s.UseNestFilter || !s.RequireNestAlign {
+			log.Warnf("prospec: interval=%s without useNestFilter+requireNestAlign — ablation shows negative expectancy", s.Interval)
+		}
 	}
 	return nil
 }
@@ -216,13 +235,17 @@ func (s *Strategy) onExecClosed(ctx context.Context, k types.KLine) {
 	}
 	var o123 OneTwoThree
 	if s.Enable123 {
-		o123 = DetectOneTwoThree(s.klineBuf, s.SwingLook)
+		m := TrendFitMethod(s.TrendFit)
+		if m != TrendFitHL && m != TrendFitOLS && m != TrendFitRANSAC {
+			m = TrendFitRANSAC
+		}
+		o123 = DetectOneTwoThreeMethod(s.klineBuf, s.SwingLook, m)
 	}
 	var twoB *TwoBSignal
 	if s.Enable2B {
 		twoB = DetectTwoB(s.klineBuf, s.SwingLook, 16)
 	}
-	setup := BuildSetup(nest, o123, twoB, last)
+	setup := BuildSetupRR(nest, o123, twoB, last, s.RewardRisk)
 	if setup.Side == "flat" || setup.Kind == "wait" {
 		return
 	}

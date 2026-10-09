@@ -67,6 +67,8 @@ func TestBuildSetup123Bear(t *testing.T) {
 	assert.Equal(t, "one_two_three", s.Kind)
 	assert.Greater(t, s.Stop, s.Entry, "short stop must be above entry")
 	assert.Less(t, s.Target, s.Entry, "short target must be below entry")
+	risk := s.Stop - s.Entry
+	assert.InDelta(t, 2*risk, s.Entry-s.Target, 1e-6, "default 2R target")
 }
 
 func TestRiskGeometryShortNeverAboveEntry(t *testing.T) {

@@ -30,17 +30,19 @@ type NestState struct {
 
 // OneTwoThree is Sperandeo's 1-2-3 trend-change checklist.
 type OneTwoThree struct {
-	Direction    string    `json:"direction"` // to_bear | to_bull | none
-	Stage        int       `json:"stage"`     // 0..3
-	Confirmed    bool      `json:"confirmed"`
-	Stage1Price  float64   `json:"stage1Price"`
-	Stage2Price  float64   `json:"stage2Price"`
-	Stage3Price  float64   `json:"stage3Price"`
-	Stage1Time   time.Time `json:"stage1Time,omitempty"`
-	Stage2Time   time.Time `json:"stage2Time,omitempty"`
-	Stage3Time   time.Time `json:"stage3Time,omitempty"`
-	PriorExtreme float64   `json:"priorExtreme"` // prior HH (to_bear) or LL (to_bull)
-	Note         string    `json:"note"`
+	Direction    string     `json:"direction"` // to_bear | to_bull | none
+	Stage        int        `json:"stage"`     // 0..3
+	Confirmed    bool       `json:"confirmed"`
+	Method       string     `json:"method,omitempty"` // hl | ols | ransac
+	Stage1Price  float64    `json:"stage1Price"`
+	Stage2Price  float64    `json:"stage2Price"`
+	Stage3Price  float64    `json:"stage3Price"`
+	Stage1Time   time.Time  `json:"stage1Time,omitempty"`
+	Stage2Time   time.Time  `json:"stage2Time,omitempty"`
+	Stage3Time   time.Time  `json:"stage3Time,omitempty"`
+	PriorExtreme float64    `json:"priorExtreme"` // prior HH (to_bear) or LL (to_bull)
+	TrendLine    *TrendLine `json:"trendLine,omitempty"`
+	Note         string     `json:"note"`
 }
 
 // TwoBSignal is a failed breakout (2B rule).
@@ -206,25 +208,32 @@ func ClassifyNest(ks []types.KLine, interval string) NestState {
 	return st
 }
 
-// DetectOneTwoThree scans for progressive 1-2-3 stages on closed bars.
+// DetectOneTwoThree scans 1-2-3 using book-style RANSAC trendline for stage ①.
 func DetectOneTwoThree(ks []types.KLine, look int) OneTwoThree {
-	out := OneTwoThree{Direction: "none", Note: "未形成 1-2-3"}
+	return DetectOneTwoThreeMethod(ks, look, TrendFitRANSAC)
+}
+
+// DetectOneTwoThreeMethod allows hl | ols | ransac stage-① definitions.
+func DetectOneTwoThreeMethod(ks []types.KLine, look int, method TrendFitMethod) OneTwoThree {
+	out := OneTwoThree{Direction: "none", Method: string(method), Note: "未形成 1-2-3"}
 	hist := closedHist(ks)
 	n := len(hist)
 	if n < 40 {
 		out.Note = "K线不足"
 		return out
 	}
+	if look < 2 {
+		look = 3
+	}
 	sw := FindSwings(hist, look)
 	if len(sw) < 4 {
 		return out
 	}
 
-	// Prefer ending an uptrend → to_bear
-	if o := detect123ToBear(hist, sw); o.Stage > out.Stage {
+	if o := detect123ToBear(hist, sw, method); o.Stage > out.Stage {
 		out = o
 	}
-	if o := detect123ToBull(hist, sw); o.Stage > out.Stage || (o.Confirmed && !out.Confirmed) {
+	if o := detect123ToBull(hist, sw, method); o.Stage > out.Stage || (o.Confirmed && !out.Confirmed) {
 		if o.Confirmed || out.Direction == "none" || o.Stage >= out.Stage {
 			out = o
 		}
@@ -232,8 +241,8 @@ func DetectOneTwoThree(ks []types.KLine, look int) OneTwoThree {
 	return out
 }
 
-func detect123ToBear(hist []types.KLine, sw []Swing) OneTwoThree {
-	out := OneTwoThree{Direction: "to_bear", Note: "升势未破"}
+func detect123ToBear(hist []types.KLine, sw []Swing, method TrendFitMethod) OneTwoThree {
+	out := OneTwoThree{Direction: "to_bear", Method: string(method), Note: "升势未破"}
 	var highs, lows []Swing
 	for _, s := range sw {
 		if s.Kind == "high" {
@@ -243,7 +252,7 @@ func detect123ToBear(hist []types.KLine, sw []Swing) OneTwoThree {
 		}
 	}
 	if len(highs) < 2 || len(lows) < 2 {
-		return OneTwoThree{Direction: "none", Note: "摆动不足"}
+		return OneTwoThree{Direction: "none", Method: string(method), Note: "摆动不足"}
 	}
 	// last completed upswing: prior HL then HH
 	hh := highs[len(highs)-1]
@@ -262,15 +271,43 @@ func detect123ToBear(hist []types.KLine, sw []Swing) OneTwoThree {
 	out.Stage1Price = hl.Price
 
 	lastClose := hist[len(hist)-1].Close.Float64()
-	// Stage 1: close below last HL
 	stage1Idx := -1
-	for i := hl.Index + 1; i < len(hist); i++ {
-		if hist[i].Close.Float64() < hl.Price {
-			stage1Idx = i
+	switch method {
+	case TrendFitOLS, TrendFitRANSAC:
+		var line *TrendLine
+		if method == TrendFitOLS {
+			line, _ = FitTrendOLS(hist, sw, 2)
+		} else {
+			line, _ = FitTrendRANSAC(hist, sw, 3)
+		}
+		if line == nil {
+			out.Note = "① 无合格上升趋势线 (" + string(method) + ")"
+			return out
+		}
+		out.TrendLine = line
+		out.Stage1Price = round8(line.PriceAt(len(hist) - 1))
+		if idx, ok := firstCloseBreak(hist, line, true); ok {
+			stage1Idx = idx
 			out.Stage = 1
-			out.Stage1Time = hist[i].StartTime.Time().UTC()
-			out.Note = "① 收盘跌破上升结构低点 (HL)"
-			break
+			out.Stage1Time = hist[idx].StartTime.Time().UTC()
+			out.Stage1Price = round8(line.PriceAt(idx))
+			out.Note = "① 收盘跌破上升趋势线 (" + string(method) + ", touches=" + itoa(line.Touches) + ")"
+		} else {
+			out.Note = "① 上升趋势线未破 (" + string(method) + ")"
+			return out
+		}
+	default: // TrendFitHL
+		for i := hl.Index + 1; i < len(hist); i++ {
+			if hist[i].Close.Float64() < hl.Price {
+				stage1Idx = i
+				out.Stage = 1
+				out.Stage1Time = hist[i].StartTime.Time().UTC()
+				out.Note = "① 收盘跌破上升结构低点 (HL)"
+				break
+			}
+		}
+		if stage1Idx < 0 {
+			return out
 		}
 	}
 	if stage1Idx < 0 {
@@ -292,11 +329,11 @@ func detect123ToBear(hist []types.KLine, sw []Swing) OneTwoThree {
 		}
 		// if makes new high above hh, cancel to_bear path
 		if hist[i].Close.Float64() > hh.Price {
-			return OneTwoThree{Direction: "none", Note: "反抽创新高，1-2-3 空头作废"}
+			return OneTwoThree{Direction: "none", Method: string(method), Note: "反抽创新高，1-2-3 空头作废"}
 		}
 	}
 	if bounceIdx < 0 || bounceHi >= hh.Price {
-		out.Note = "① 已破 HL，等失败反抽（不过前高）"
+		out.Note = "① 已破，等失败反抽（不过前高）"
 		return out
 	}
 	out.Stage = 2
@@ -304,33 +341,26 @@ func detect123ToBear(hist []types.KLine, sw []Swing) OneTwoThree {
 	out.Stage2Time = hist[bounceIdx].StartTime.Time().UTC()
 	out.Note = "② 反抽不过前高"
 
-	// reaction low after bounce start
+	// Intervening trough between ① and ② (Sperandeo / RoboForex point-2 low).
 	reactLow := bounceHi
-	reactIdx := bounceIdx
-	for i := bounceIdx; i < len(hist); i++ {
+	for i := stage1Idx; i <= bounceIdx; i++ {
 		l := hist[i].Low.Float64()
 		if l < reactLow {
 			reactLow = l
-			reactIdx = i
 		}
 	}
 	out.Stage3Price = reactLow
-	_ = reactIdx
 
-	if lastClose < reactLow || (bounceIdx < len(hist)-1 && lastClose < out.Stage1Price && lastClose < bounceHi*0.995) {
-		// Stage 3: break of reaction low (use min low after stage1 bounce peak)
-		for i := bounceIdx + 1; i < len(hist); i++ {
-			if hist[i].Close.Float64() < reactLow {
-				out.Stage = 3
-				out.Confirmed = true
-				out.Stage3Time = hist[i].StartTime.Time().UTC()
-				out.Stage3Price = reactLow
-				out.Note = "③ 收盘跌破②的反弹低点 → 1-2-3 转空确认"
-				return out
-			}
+	for i := bounceIdx + 1; i < len(hist); i++ {
+		if hist[i].Close.Float64() < reactLow {
+			out.Stage = 3
+			out.Confirmed = true
+			out.Stage3Time = hist[i].StartTime.Time().UTC()
+			out.Stage3Price = reactLow
+			out.Note = "③ 收盘跌破①→②之间拐点低点 → 1-2-3 转空确认"
+			return out
 		}
 	}
-	// also confirm if close breaks stage1 HL again after failed bounce
 	if lastClose < hl.Price && bounceIdx > stage1Idx {
 		out.Stage = 3
 		out.Confirmed = true
@@ -338,13 +368,13 @@ func detect123ToBear(hist []types.KLine, sw []Swing) OneTwoThree {
 		out.Stage3Time = hist[len(hist)-1].StartTime.Time().UTC()
 		out.Note = "③ 失败反抽后再次收破 HL → 转空确认"
 	} else {
-		out.Note = "② 已现失败反抽，等收盘破反弹低点确认③"
+		out.Note = "② 已现失败反抽，等收盘破拐点低点确认③"
 	}
 	return out
 }
 
-func detect123ToBull(hist []types.KLine, sw []Swing) OneTwoThree {
-	out := OneTwoThree{Direction: "to_bull", Note: "跌势未破"}
+func detect123ToBull(hist []types.KLine, sw []Swing, method TrendFitMethod) OneTwoThree {
+	out := OneTwoThree{Direction: "to_bull", Method: string(method), Note: "跌势未破"}
 	var highs, lows []Swing
 	for _, s := range sw {
 		if s.Kind == "high" {
@@ -354,7 +384,7 @@ func detect123ToBull(hist []types.KLine, sw []Swing) OneTwoThree {
 		}
 	}
 	if len(highs) < 2 || len(lows) < 2 {
-		return OneTwoThree{Direction: "none", Note: "摆动不足"}
+		return OneTwoThree{Direction: "none", Method: string(method), Note: "摆动不足"}
 	}
 	ll := lows[len(lows)-1]
 	lh := highs[len(highs)-1]
@@ -371,13 +401,42 @@ func detect123ToBull(hist []types.KLine, sw []Swing) OneTwoThree {
 	out.Stage1Price = lh.Price
 
 	stage1Idx := -1
-	for i := lh.Index + 1; i < len(hist); i++ {
-		if hist[i].Close.Float64() > lh.Price {
-			stage1Idx = i
+	switch method {
+	case TrendFitOLS, TrendFitRANSAC:
+		var line *TrendLine
+		if method == TrendFitOLS {
+			_, line = FitTrendOLS(hist, sw, 2)
+		} else {
+			_, line = FitTrendRANSAC(hist, sw, 3)
+		}
+		if line == nil {
+			out.Note = "① 无合格下降趋势线 (" + string(method) + ")"
+			return out
+		}
+		out.TrendLine = line
+		out.Stage1Price = round8(line.PriceAt(len(hist) - 1))
+		if idx, ok := firstCloseBreak(hist, line, false); ok {
+			stage1Idx = idx
 			out.Stage = 1
-			out.Stage1Time = hist[i].StartTime.Time().UTC()
-			out.Note = "① 收盘升破下降结构高点 (LH)"
-			break
+			out.Stage1Time = hist[idx].StartTime.Time().UTC()
+			out.Stage1Price = round8(line.PriceAt(idx))
+			out.Note = "① 收盘升破下降趋势线 (" + string(method) + ", touches=" + itoa(line.Touches) + ")"
+		} else {
+			out.Note = "① 下降趋势线未破 (" + string(method) + ")"
+			return out
+		}
+	default:
+		for i := lh.Index + 1; i < len(hist); i++ {
+			if hist[i].Close.Float64() > lh.Price {
+				stage1Idx = i
+				out.Stage = 1
+				out.Stage1Time = hist[i].StartTime.Time().UTC()
+				out.Note = "① 收盘升破下降结构高点 (LH)"
+				break
+			}
+		}
+		if stage1Idx < 0 {
+			return out
 		}
 	}
 	if stage1Idx < 0 {
@@ -393,7 +452,7 @@ func detect123ToBull(hist []types.KLine, sw []Swing) OneTwoThree {
 			bounceIdx = i
 		}
 		if hist[i].Close.Float64() < ll.Price {
-			return OneTwoThree{Direction: "none", Note: "回踩创新低，1-2-3 多头作废"}
+			return OneTwoThree{Direction: "none", Method: string(method), Note: "回踩创新低，1-2-3 多头作废"}
 		}
 	}
 	if bounceIdx < 0 || bounceLo <= ll.Price {
@@ -405,8 +464,9 @@ func detect123ToBull(hist []types.KLine, sw []Swing) OneTwoThree {
 	out.Stage2Time = hist[bounceIdx].StartTime.Time().UTC()
 	out.Note = "② 回踩不破前低"
 
+	// Intervening peak between ① and ②.
 	reactHi := bounceLo
-	for i := bounceIdx; i < len(hist); i++ {
+	for i := stage1Idx; i <= bounceIdx; i++ {
 		h := hist[i].High.Float64()
 		if h > reactHi {
 			reactHi = h
@@ -419,7 +479,7 @@ func detect123ToBull(hist []types.KLine, sw []Swing) OneTwoThree {
 			out.Stage = 3
 			out.Confirmed = true
 			out.Stage3Time = hist[i].StartTime.Time().UTC()
-			out.Note = "③ 收盘升破②的反弹高点 → 1-2-3 转多确认"
+			out.Note = "③ 收盘升破①→②之间拐点高点 → 1-2-3 转多确认"
 			return out
 		}
 	}
@@ -430,7 +490,7 @@ func detect123ToBull(hist []types.KLine, sw []Swing) OneTwoThree {
 		out.Stage3Time = hist[len(hist)-1].StartTime.Time().UTC()
 		out.Note = "③ 失败回踩后再次收上 LH → 转多确认"
 	} else {
-		out.Note = "② 已现失败回踩，等收盘破反弹高点确认③"
+		out.Note = "② 已现失败回踩，等收盘破拐点高点确认③"
 	}
 	return out
 }
@@ -501,8 +561,18 @@ func DetectTwoB(ks []types.KLine, look int, lookbackBars int) *TwoBSignal {
 	return best
 }
 
-// riskGeometryShort: stop above entry, target below by ~1R.
+// DefaultRewardRisk is ablation-proven for daily 123 (1R was break-even / negative).
+const DefaultRewardRisk = 2.0
+
+// riskGeometryShort: stop above entry, target below by rr×risk.
 func riskGeometryShort(entry, stopHint, altStop float64) (stop, target float64) {
+	return riskGeometryShortRR(entry, stopHint, altStop, DefaultRewardRisk)
+}
+
+func riskGeometryShortRR(entry, stopHint, altStop, rr float64) (stop, target float64) {
+	if rr <= 0 {
+		rr = DefaultRewardRisk
+	}
 	stop = stopHint
 	if stop <= entry {
 		stop = altStop
@@ -515,15 +585,22 @@ func riskGeometryShort(entry, stopHint, altStop float64) (stop, target float64) 
 		risk = entry * 0.01
 		stop = entry + risk
 	}
-	target = entry - risk
+	target = entry - risk*rr
 	if target <= 0 {
-		target = entry * 0.99
+		target = entry * (1 - 0.01*rr)
 	}
 	return round8(stop), round8(target)
 }
 
-// riskGeometryLong: stop below entry, target above by ~1R.
+// riskGeometryLong: stop below entry, target above by rr×risk.
 func riskGeometryLong(entry, stopHint, altStop float64) (stop, target float64) {
+	return riskGeometryLongRR(entry, stopHint, altStop, DefaultRewardRisk)
+}
+
+func riskGeometryLongRR(entry, stopHint, altStop, rr float64) (stop, target float64) {
+	if rr <= 0 {
+		rr = DefaultRewardRisk
+	}
 	stop = stopHint
 	if stop >= entry || stop <= 0 {
 		stop = altStop
@@ -536,13 +613,21 @@ func riskGeometryLong(entry, stopHint, altStop float64) (stop, target float64) {
 		risk = entry * 0.01
 		stop = entry - risk
 	}
-	target = entry + risk
+	target = entry + risk*rr
 	return round8(stop), round8(target)
 }
 
-// BuildSetup combines nest + 1-2-3 + 2B into one action plan.
+// BuildSetup combines nest + 1-2-3 + 2B into one action plan (2R targets).
 func BuildSetup(nest NestState, o123 OneTwoThree, twoB *TwoBSignal, last float64) Setup {
+	return BuildSetupRR(nest, o123, twoB, last, DefaultRewardRisk)
+}
+
+// BuildSetupRR is BuildSetup with explicit reward:risk multiple.
+func BuildSetupRR(nest NestState, o123 OneTwoThree, twoB *TwoBSignal, last, rr float64) Setup {
 	s := Setup{Kind: "wait", Side: "flat", Label: "等待", Action: "无合格信号"}
+	if rr <= 0 {
+		rr = DefaultRewardRisk
+	}
 
 	// Confirmed 1-2-3 first
 	if o123.Confirmed {
@@ -552,8 +637,8 @@ func BuildSetup(nest NestState, o123 OneTwoThree, twoB *TwoBSignal, last float64
 			s.Aligned = nest.Bias == "bear"
 			s.Label = "1-2-3 转空"
 			s.Entry = round8(last)
-			s.Stop, s.Target = riskGeometryShort(last, o123.Stage2Price, o123.PriorExtreme)
-			s.Action = "①破上升低点→②反抽不过前高→③再破②低点。做空：停损在②高点之上，目标约 1R（对称风险）"
+			s.Stop, s.Target = riskGeometryShortRR(last, o123.Stage2Price, o123.PriorExtreme, rr)
+			s.Action = "①破趋势线→②反抽不过前高→③破拐点。做空：停损②上，目标约 2R（消融：日线+嵌套+2R）"
 			if nest.Bias == "bull" {
 				s.Aligned = false
 				s.Action += "。嵌套仍多：只当中级修正，减仓或观望"
@@ -569,8 +654,8 @@ func BuildSetup(nest NestState, o123 OneTwoThree, twoB *TwoBSignal, last float64
 			s.Aligned = nest.Bias == "bull"
 			s.Label = "1-2-3 转多"
 			s.Entry = round8(last)
-			s.Stop, s.Target = riskGeometryLong(last, o123.Stage2Price, o123.PriorExtreme)
-			s.Action = "①破下降高点→②回踩不破前低→③再破②高点。做多：停损在②低点之下，目标约 1R"
+			s.Stop, s.Target = riskGeometryLongRR(last, o123.Stage2Price, o123.PriorExtreme, rr)
+			s.Action = "①破趋势线→②回踩不破前低→③破拐点。做多：停损②下，目标约 2R"
 			if nest.Bias == "bear" {
 				s.Aligned = false
 				s.Action += "。嵌套仍空：当反弹，不按牛市满仓"
@@ -589,8 +674,8 @@ func BuildSetup(nest NestState, o123 OneTwoThree, twoB *TwoBSignal, last float64
 			s.Aligned = nest.Bias == "bull"
 			s.Label = "2B 试多"
 			s.Entry = round8(last)
-			s.Stop, s.Target = riskGeometryLong(last, twoB.Pierced*0.998, twoB.Level*0.995)
-			s.Action = twoB.Note + "。停损刺穿极值下，目标 1R"
+			s.Stop, s.Target = riskGeometryLongRR(last, twoB.Pierced*0.998, twoB.Level*0.995, rr)
+			s.Action = twoB.Note + "。停损刺穿极值下，目标约 2R"
 			if nest.Bias == "chop" {
 				s.Action += "；嵌套震荡，仓位宜小"
 			}
@@ -602,8 +687,8 @@ func BuildSetup(nest NestState, o123 OneTwoThree, twoB *TwoBSignal, last float64
 			s.Aligned = nest.Bias == "bear"
 			s.Label = "2B 试空"
 			s.Entry = round8(last)
-			s.Stop, s.Target = riskGeometryShort(last, twoB.Pierced*1.002, twoB.Level*1.005)
-			s.Action = twoB.Note + "。停损刺穿极值上，目标 1R"
+			s.Stop, s.Target = riskGeometryShortRR(last, twoB.Pierced*1.002, twoB.Level*1.005, rr)
+			s.Action = twoB.Note + "。停损刺穿极值上，目标约 2R"
 			return s
 		}
 		s.Kind = "wait"

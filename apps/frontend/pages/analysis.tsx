@@ -348,6 +348,12 @@ export default function AnalysisPage() {
   const [regimeSymbol, setRegimeSymbol] = useState('BTCUSDT');
   const [prospec, setProspec] = useState<any>(null);
   const [prospecSymbol, setProspecSymbol] = useState('BTCUSDT');
+  const [prospecChart, setProspecChart] = useState<{
+    klines: any[];
+    klineSource?: string;
+    interval: string;
+  } | null>(null);
+  const [prospecChartIv, setProspecChartIv] = useState('1d');
   const [avgSymbol, setAvgSymbol] = useState('DOGEUSDT');
   const [avgAddIm, setAvgAddIm] = useState('200');
   const [avgPrice, setAvgPrice] = useState('');
@@ -422,15 +428,27 @@ export default function AnalysisPage() {
     setLoading(true);
     setError('');
     try {
-      setProspec(
-        await queryAnalysisProspec('binance', { symbol: prospecSymbol || 'BTCUSDT', scan: true }),
-      );
+      const sym = prospecSymbol || 'BTCUSDT';
+      const [p, kl] = await Promise.all([
+        queryAnalysisProspec('binance', { symbol: sym, scan: true }),
+        queryAnalysisKlines({
+          symbol: sym,
+          interval: prospecChartIv || '1d',
+          limit: prospecChartIv === '4h' ? 200 : 180,
+        }),
+      ]);
+      setProspec(p);
+      setProspecChart({
+        klines: kl?.klines || [],
+        klineSource: kl?.klineSource,
+        interval: prospecChartIv || '1d',
+      });
     } catch (e: any) {
       setError(e?.response?.data?.error || e?.message || 'failed to load prospec');
     } finally {
       setLoading(false);
     }
-  }, [prospecSymbol]);
+  }, [prospecSymbol, prospecChartIv]);
 
   const loadPnl = useCallback(async (period: PnlPeriod = pnlPeriod) => {
     setLoading(true);
@@ -2355,9 +2373,13 @@ export default function AnalysisPage() {
 
           {prospec && (
             <>
-              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                《专业投机原理》：周/日定势，4h/15m 找点。做空：停损在进场上方、目标在进场下方；做多相反。策略{' '}
-                <code>prospec</code>。
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                《专业投机原理》结构看板：周/日定势，日线 1-2-3 为主；4h/15m 只作观察/扳机。目标约{' '}
+                <strong>2R</strong>，须<strong>嵌套同向</strong>。策略 <code>prospec</code> —
+                仅供人工参考，非自动下单信号。
+              </Typography>
+              <Typography variant="caption" color="warning.main" display="block" sx={{ mb: 2 }}>
+                消融结论：裸 4h 123 期望为负；日线 + 嵌套 + 2R 相对最好。未对齐嵌套时不要当交易信号。
               </Typography>
 
               <Accordion sx={{ mb: 2 }}>
@@ -2366,21 +2388,105 @@ export default function AnalysisPage() {
                 </AccordionSummary>
                 <AccordionDetails>
                   <Typography variant="body2" gutterBottom>
-                    <strong>1-2-3 转空（升势结束）</strong>
-                    ：①收盘跌破上升结构的最近抬高点(HL) → ②反抽高点不过前高 →
-                    ③收盘再跌破②那段反弹的低点，才算转空确认。进场看③收盘；停损放②高点之上；目标约等于风险 1R（进场价 −
-                    (停损 − 进场价)），必须低于进场价。
+                    <strong>1-2-3 转空</strong>
+                    ：①收盘跌破上升趋势线（RANSAC/OLS；旧版用破 HL）→ ②反抽不过前高 →
+                    ③收盘破①→②之间拐点低点。进场看③收盘；停损在②上；目标约{' '}
+                    <strong>2R</strong>（须低于进场）。
                   </Typography>
                   <Typography variant="body2" gutterBottom>
                     <strong>1-2-3 转多</strong>
-                    ：镜像——①收上 LH → ②回踩不破前低 → ③收上②高点。停损在②下，目标在进场上方 1R。
+                    ：镜像——①升破下降趋势线 → ②回踩不破前低 → ③破拐点高点。停损②下，目标进场上方 2R。
                   </Typography>
                   <Typography variant="body2">
                     <strong>2B</strong>
-                    ：价格刺穿前高/前低后，同一根（或紧随）收盘收回内侧。假上破→试空（停损刺穿极值上）；假下破→试多。必须与大周期嵌套同向；逆嵌套当诱饵不追。
+                    ：刺穿前高/前低后收盘收回。假上破→试空；假下破→试多。必须嵌套同向；逆嵌套当诱饵。
                   </Typography>
                 </AccordionDetails>
               </Accordion>
+
+              <Card variant="outlined" sx={{ mb: 2 }}>
+                <CardContent>
+                  <Box
+                    sx={{
+                      display: 'flex',
+                      flexWrap: 'wrap',
+                      gap: 1,
+                      mb: 1,
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                    }}
+                  >
+                    <Typography variant="subtitle2">
+                      {prospecSymbol} 趋势线图（绿=RANSAC 支撑 · 红=RANSAC 阻力 · 虚线=OLS）
+                    </Typography>
+                    <ToggleButtonGroup
+                      size="small"
+                      exclusive
+                      value={prospecChartIv}
+                      onChange={async (_, v) => {
+                        if (!v) return;
+                        setProspecChartIv(v);
+                        try {
+                          const kl = await queryAnalysisKlines({
+                            symbol: prospecSymbol || 'BTCUSDT',
+                            interval: v,
+                            limit: v === '4h' ? 200 : 180,
+                          });
+                          setProspecChart({
+                            klines: kl?.klines || [],
+                            klineSource: kl?.klineSource,
+                            interval: v,
+                          });
+                        } catch {
+                          /* keep previous chart */
+                        }
+                      }}
+                    >
+                      <ToggleButton value="1d">日线</ToggleButton>
+                      <ToggleButton value="4h">4h</ToggleButton>
+                    </ToggleButtonGroup>
+                  </Box>
+                  {prospecChart?.klines?.length ? (
+                    <PinKlineChart
+                      symbol={prospecSymbol}
+                      klines={prospecChart.klines}
+                      interval={prospecChart.interval}
+                      klineSource={prospecChart.klineSource}
+                      height={isMobile ? 280 : 380}
+                      trendSegments={(() => {
+                        const tf =
+                          prospecChart.interval === '4h' ? prospec.h4 : prospec.daily;
+                        const tl = tf?.trendLines || {};
+                        const segs: any[] = [];
+                        const push = (ln: any, color: string, title: string, dashed?: boolean) => {
+                          if (!ln?.startTime || !ln?.y1) return;
+                          const t2 = ln.nowTime || ln.endTime;
+                          const p2 = ln.yNow > 0 ? ln.yNow : ln.y2;
+                          if (!t2 || !(p2 > 0)) return;
+                          segs.push({
+                            t1: ln.startTime,
+                            p1: ln.y1,
+                            t2,
+                            p2,
+                            color,
+                            title,
+                            dashed: !!dashed,
+                          });
+                        };
+                        push(tl.ransacSupport, '#2e7d32', 'RANSAC支撑');
+                        push(tl.ransacResistance, '#c62828', 'RANSAC阻力');
+                        push(tl.olsSupport, '#00897b', 'OLS支撑', true);
+                        push(tl.olsResistance, '#ef6c00', 'OLS阻力', true);
+                        return segs;
+                      })()}
+                    />
+                  ) : (
+                    <Typography variant="body2" color="text.secondary">
+                      暂无 K 线；点刷新加载。部署新版 API 后可画 RANSAC/OLS 斜线。
+                    </Typography>
+                  )}
+                </CardContent>
+              </Card>
 
               {prospec.primary && (
                 <Card variant="outlined" sx={{ mb: 2, borderColor: 'primary.main' }}>
@@ -2397,9 +2503,9 @@ export default function AnalysisPage() {
                         }
                       />
                       {prospec.primary.aligned ? (
-                        <Chip size="small" color="success" label="嵌套同向" />
+                        <Chip size="small" color="success" label="嵌套同向 · 可参考" />
                       ) : (
-                        <Chip size="small" label="嵌套未对齐" />
+                        <Chip size="small" color="warning" label="嵌套未对齐 · 勿跟单" />
                       )}
                       <Chip size="small" label={prospec.primary.kind || 'wait'} />
                     </Box>
@@ -2410,6 +2516,15 @@ export default function AnalysisPage() {
                       <Typography variant="caption" display="block" sx={{ mt: 1 }}>
                         参考进场 {fmtNum(prospec.primary.entry, 2)} · 停损{' '}
                         {fmtNum(prospec.primary.stop, 2)} · 目标 {fmtNum(prospec.primary.target, 2)}
+                        {prospec.primary.entry > 0 &&
+                        prospec.primary.stop > 0 &&
+                        Math.abs(prospec.primary.entry - prospec.primary.stop) > 0
+                          ? ` · ≈${fmtNum(
+                              Math.abs(prospec.primary.target - prospec.primary.entry) /
+                                Math.abs(prospec.primary.entry - prospec.primary.stop),
+                              1
+                            )}R`
+                          : ''}
                         {prospec.primary.side === 'short' &&
                         prospec.primary.target >= prospec.primary.entry
                           ? ' ⚠ 目标应低于进场'
@@ -2427,9 +2542,17 @@ export default function AnalysisPage() {
 
               <Grid container spacing={2} sx={{ mb: 2 }}>
                 {[
-                  { title: '4h 多币回测', bt: prospec.backtest4h },
-                  { title: '日线多币回测', bt: prospec.backtest1d },
-                ].map(({ title, bt }) => (
+                  {
+                    title: '日线多币回测（主看）',
+                    bt: prospec.backtest1d,
+                    hint: '消融：日线 + 嵌套 + 2R 相对最好',
+                  },
+                  {
+                    title: '4h 多币回测（仅对照）',
+                    bt: prospec.backtest4h,
+                    hint: '消融：裸 4h 期望偏负，勿作下单依据',
+                  },
+                ].map(({ title, bt, hint }) => (
                   <Grid item xs={12} md={6} key={title}>
                     <Card variant="outlined">
                       <CardContent>
@@ -2444,6 +2567,9 @@ export default function AnalysisPage() {
                           2B：n={bt?.trades2B || 0} · 胜率 {fmtNum(bt?.winRate2B, 1)}% · 均 R{' '}
                           {fmtNum(bt?.avgR2B, 2)}（胜 {bt?.wins2B || 0} / 负 {bt?.losses2B || 0}）
                         </Typography>
+                        <Typography variant="caption" color="text.secondary" display="block">
+                          {hint}
+                        </Typography>
                         <Typography variant="caption" color="text.secondary">
                           {bt?.note}
                         </Typography>
@@ -2453,18 +2579,57 @@ export default function AnalysisPage() {
                 ))}
               </Grid>
 
+              <Card variant="outlined" sx={{ mb: 2 }}>
+                <CardContent>
+                  <Typography variant="subtitle2" gutterBottom>
+                    趋势线画法对比（hl / ols / ransac · 1-2-3）
+                  </Typography>
+                  <Grid container spacing={2}>
+                    {[
+                      { title: '日线', rows: prospec.methodCompare1d },
+                      { title: '4h', rows: prospec.methodCompare4h },
+                    ].map(({ title, rows }) => (
+                      <Grid item xs={12} md={6} key={title}>
+                        <Typography variant="caption" color="text.secondary">
+                          {title}
+                        </Typography>
+                        {(rows || []).length === 0 ? (
+                          <Typography variant="body2" color="text.secondary">
+                            部署含 methodCompare 的 API 后显示
+                          </Typography>
+                        ) : (
+                          (rows || []).map((r: any) => (
+                            <Typography variant="body2" key={r.method}>
+                              {r.method}：n={r.trades123 || 0} · 胜率 {fmtNum(r.winRate123, 1)}% · 均
+                              R {fmtNum(r.avgR123, 2)}
+                            </Typography>
+                          ))
+                        )}
+                      </Grid>
+                    ))}
+                  </Grid>
+                </CardContent>
+              </Card>
+
               <Grid container spacing={2} sx={{ mb: 2 }}>
                 {[
-                  { key: 'weekly', title: '周线（大势）', tf: prospec.weekly },
-                  { key: 'daily', title: '日线（结构）', tf: prospec.daily },
-                  { key: 'h4', title: '4h（波段）', tf: prospec.h4 },
-                  { key: 'm15', title: '15m（扳机）', tf: prospec.m15 },
-                ].map(({ key, title, tf }) => (
+                  { key: 'weekly', title: '周线（大势）', tf: prospec.weekly, role: '定势' },
+                  { key: 'daily', title: '日线（主结构）', tf: prospec.daily, role: '主看' },
+                  { key: 'h4', title: '4h（波段·对照）', tf: prospec.h4, role: '对照' },
+                  { key: 'm15', title: '15m（扳机·谨慎）', tf: prospec.m15, role: '扳机' },
+                ].map(({ key, title, tf, role }) => (
                   <Grid item xs={12} md={6} key={key}>
-                    <Card variant="outlined" sx={{ height: '100%' }}>
+                    <Card
+                      variant="outlined"
+                      sx={{
+                        height: '100%',
+                        borderColor: role === '主看' ? 'success.main' : undefined,
+                      }}
+                    >
                       <CardContent>
                         <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', mb: 1, alignItems: 'center' }}>
                           <Typography variant="subtitle2">{title}</Typography>
+                          <Chip size="small" variant="outlined" label={role} />
                           <Chip
                             size="small"
                             label={
@@ -2486,7 +2651,7 @@ export default function AnalysisPage() {
                             size="small"
                             label={`1-2-3 阶段${tf?.oneTwoThree?.stage ?? 0}${
                               tf?.oneTwoThree?.confirmed ? ' 确认' : ''
-                            }`}
+                            }${tf?.oneTwoThree?.method ? ` ·${tf.oneTwoThree.method}` : ''}`}
                           />
                         </Box>
                         <Typography variant="caption" display="block">
@@ -2495,6 +2660,13 @@ export default function AnalysisPage() {
                         <Typography variant="caption" display="block" sx={{ mt: 0.5 }}>
                           1-2-3：{tf?.oneTwoThree?.direction || 'none'} · {tf?.oneTwoThree?.note}
                         </Typography>
+                        {(tf?.trendLines?.ransacSupport || tf?.trendLines?.ransacResistance) && (
+                          <Typography variant="caption" display="block" color="text.secondary">
+                            趋势线 RANSAC：支撑触点{' '}
+                            {tf.trendLines.ransacSupport?.touches ?? '—'} / 阻力触点{' '}
+                            {tf.trendLines.ransacResistance?.touches ?? '—'}
+                          </Typography>
+                        )}
                         {tf?.twoB && (
                           <Typography variant="caption" display="block" color="text.secondary">
                             2B：{tf.twoB.side === 'long' ? '试多' : '试空'} · 刺穿{' '}

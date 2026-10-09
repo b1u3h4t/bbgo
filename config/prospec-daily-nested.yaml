@@ -1,0 +1,18 @@
+# Ablation-proven shape: daily 123/2B + weekly nest + 2R. Alerts/small size only.
+exchangeStrategies:
+  - on: binance
+    prospec:
+      symbol: BTCUSDT
+      interval: 1d
+      nestInterval: 1w
+      useNestFilter: true
+      requireNestAlign: true
+      enable123: true
+      enable2B: true
+      trendFit: ransac
+      rewardRisk: 2
+      minRR: 2
+      swingLook: 3
+      enableLong: true
+      enableShort: true
+      quantity: 0.001

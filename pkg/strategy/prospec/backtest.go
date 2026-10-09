@@ -78,8 +78,23 @@ func simulateTrade(hist []types.KLine, entryIdx int, long bool, entry, stop, tar
 	return btTrade{R: r, Win: r > 0, Closed: true}
 }
 
+// MethodBTStats is one stage-① method's walk-forward result.
+type MethodBTStats struct {
+	Method     string  `json:"method"`
+	Trades123  int     `json:"trades123"`
+	Wins123    int     `json:"wins123"`
+	Losses123  int     `json:"losses123"`
+	WinRate123 float64 `json:"winRate123"`
+	AvgR123    float64 `json:"avgR123"`
+}
+
 // Backtest123 walks bars; on newly confirmed 1-2-3, enter at that close with 1R geometry.
 func Backtest123(ks []types.KLine, look, horizon int) (trades int, wins int, losses int, sumR float64) {
+	return Backtest123Method(ks, look, horizon, TrendFitRANSAC)
+}
+
+// Backtest123Method is the same walk-forward with an explicit stage-① method.
+func Backtest123Method(ks []types.KLine, look, horizon int, method TrendFitMethod) (trades int, wins int, losses int, sumR float64) {
 	hist := closedHist(ks)
 	n := len(hist)
 	if n < 80 || horizon < 4 {
@@ -90,7 +105,7 @@ func Backtest123(ks []types.KLine, look, horizon int) (trades int, wins int, los
 	}
 	var lastKey string
 	for i := 50; i < n-horizon; i++ {
-		o := DetectOneTwoThree(hist[:i+1], look)
+		o := DetectOneTwoThreeMethod(hist[:i+1], look, method)
 		if !o.Confirmed || o.Direction == "none" {
 			continue
 		}
@@ -174,6 +189,22 @@ func Backtest2B(ks []types.KLine, look, horizon int) (trades int, wins int, loss
 		lastSig = i
 	}
 	return
+}
+
+// Compare123Methods runs hl / ols / ransac on the same series.
+func Compare123Methods(ks []types.KLine, look, horizon int) []MethodBTStats {
+	methods := []TrendFitMethod{TrendFitHL, TrendFitOLS, TrendFitRANSAC}
+	out := make([]MethodBTStats, 0, len(methods))
+	for _, m := range methods {
+		t, w, l, sum := Backtest123Method(ks, look, horizon, m)
+		st := MethodBTStats{Method: string(m), Trades123: t, Wins123: w, Losses123: l}
+		if t > 0 {
+			st.WinRate123 = round8(100 * float64(w) / float64(t))
+			st.AvgR123 = round8(sum / float64(t))
+		}
+		out = append(out, st)
+	}
+	return out
 }
 
 func SummarizeBT(symbols int, t123, w123, l123 int, sum123 float64, t2b, w2b, l2b int, sum2b float64, horizon int) BTStats {

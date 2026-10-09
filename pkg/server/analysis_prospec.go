@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -15,12 +16,20 @@ import (
 	"github.com/c9s/bbgo/pkg/types"
 )
 
+type prospecTrendLines struct {
+	OLSSupport       *prospec.TrendLine `json:"olsSupport,omitempty"`
+	OLSResistance    *prospec.TrendLine `json:"olsResistance,omitempty"`
+	RANSACSupport    *prospec.TrendLine `json:"ransacSupport,omitempty"`
+	RANSACResistance *prospec.TrendLine `json:"ransacResistance,omitempty"`
+}
+
 type prospecTFView struct {
 	Interval    string              `json:"interval"`
 	Nest        prospec.NestState   `json:"nest"`
 	OneTwoThree prospec.OneTwoThree `json:"oneTwoThree"`
 	TwoB        *prospec.TwoBSignal `json:"twoB,omitempty"`
 	Setup       prospec.Setup       `json:"setup"`
+	TrendLines  prospecTrendLines   `json:"trendLines"`
 	Last        float64             `json:"last"`
 	Bars        int                 `json:"bars"`
 }
@@ -50,12 +59,14 @@ type analysisProspecResp struct {
 	Primary     prospec.Setup    `json:"primary"`
 	Clocks      []regimeClock    `json:"clocks"`
 	Scan        []prospecScanRow `json:"scan,omitempty"`
-	Backtest4h  prospec.BTStats  `json:"backtest4h"`
-	Backtest1d  prospec.BTStats  `json:"backtest1d"`
-	Rules       []string         `json:"rules"`
-	SymbolsUsed []string         `json:"symbolsUsed,omitempty"`
-	KlineSource string           `json:"klineSource"`
-	TookMs      int64            `json:"tookMs"`
+	Backtest4h       prospec.BTStats         `json:"backtest4h"`
+	Backtest1d       prospec.BTStats         `json:"backtest1d"`
+	MethodCompare4h  []prospec.MethodBTStats `json:"methodCompare4h,omitempty"`
+	MethodCompare1d  []prospec.MethodBTStats `json:"methodCompare1d,omitempty"`
+	Rules            []string                `json:"rules"`
+	SymbolsUsed      []string                `json:"symbolsUsed,omitempty"`
+	KlineSource      string                  `json:"klineSource"`
+	TookMs           int64                   `json:"tookMs"`
 }
 
 func buildProspecTF(iv types.Interval, ks []types.KLine) prospecTFView {
@@ -67,6 +78,11 @@ func buildProspecTF(iv types.Interval, ks []types.KLine) prospecTFView {
 	v.Nest = prospec.ClassifyNest(ks, string(iv))
 	v.OneTwoThree = prospec.DetectOneTwoThree(ks, 3)
 	v.TwoB = prospec.DetectTwoB(ks, 3, 16)
+	olsS, olsR, rS, rR := prospec.DetectTrendLines(ks, 3)
+	v.TrendLines = prospecTrendLines{
+		OLSSupport: olsS, OLSResistance: olsR,
+		RANSACSupport: rS, RANSACResistance: rR,
+	}
 	// setup under self-nest (same TF structure as local bias)
 	v.Setup = prospec.BuildSetup(v.Nest, v.OneTwoThree, v.TwoB, v.Last)
 	return v
@@ -177,6 +193,8 @@ func (s *Server) analysisProspec(c *gin.Context) {
 	}
 	bt4h := s.prospecBacktestPool(ctx, session, syms, types.Interval4h, 300, 24)
 	bt1d := s.prospecBacktestPool(ctx, session, syms, types.Interval1d, 260, 12)
+	cmp4h := s.prospecMethodCompare(ctx, session, syms, types.Interval4h, 300, 24)
+	cmp1d := s.prospecMethodCompare(ctx, session, syms, types.Interval1d, 260, 12)
 
 	srcParts := make([]string, 0, len(srcCount))
 	for k := range srcCount {
@@ -184,32 +202,99 @@ func (s *Server) analysisProspec(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, analysisProspecResp{
-		Symbol:     symbol,
-		AsOf:       now,
-		Timezone:   "Asia/Shanghai",
-		Weekly:     weekly,
-		Daily:      daily,
-		H4:         h4,
-		M15:        m15,
-		Primary:    primary,
-		Clocks:     clocks,
-		Scan:       scan,
-		Backtest4h: bt4h,
-		Backtest1d: bt1d,
+		Symbol:          symbol,
+		AsOf:            now,
+		Timezone:        "Asia/Shanghai",
+		Weekly:          weekly,
+		Daily:           daily,
+		H4:              h4,
+		M15:             m15,
+		Primary:         primary,
+		Clocks:          clocks,
+		Scan:            scan,
+		Backtest4h:      bt4h,
+		Backtest1d:      bt1d,
+		MethodCompare4h: cmp4h,
+		MethodCompare1d: cmp1d,
 		Rules: []string{
 			"《专业投机原理》：大周期定势，小周期找点；不逆势投机。",
 			"周线/日线嵌套：HH+HL 且价在 EMA50 上 = 偏多；LH+LL 且价在 EMA50 下 = 偏空。",
-			"1-2-3 转空：①收盘跌破上升结构低点(HL) → ②反抽高点不过前高 → ③收盘再破②的反弹低点。做空停损在②上方，目标约 1R（进场下对称）。",
-			"1-2-3 转多：①收盘升破下降结构高点(LH) → ②回踩低点不破前低 → ③收盘再破②的反弹高点。做多停损在②下方，目标约 1R。",
-			"2B：刺穿前高/前低后同一根收盘收回；空单停损刺穿极值上、目标在进场下方 1R；多单相反。须与嵌套同向。",
-			"变盘认收盘，不认插针。未完成 1-2-3 前不提前开仓。「嵌套同向」仅当大周期 bias 与方向一致。",
-			"回测：多币种 4h/日线，信号收盘进场，1R 停损目标，先触先平。",
+			"1-2-3 ①（默认 ransac）：收盘跌破/升破「摆动点共识趋势线」；备选 ols=全体 pivot 最小二乘，hl=破水平 HL/LH。",
+			"1-2-3 ②③：失败测试极值 → 收盘破中间拐点；做多/空停损在②侧，目标约 1R。",
+			"2B：刺穿前高/前低后同一根收盘收回；须与嵌套同向。",
+			"变盘认收盘。TradingView 对照脚本：docs/tradingview/prospec_trendlines.pine",
+			"回测：多币种 4h/日线；methodCompare* 对比 hl/ols/ransac。",
 			"策略 ID：prospec（enable123/enable2B/useNestFilter/requireNestAlign）。",
 		},
 		SymbolsUsed: syms,
 		KlineSource: strings.Join(srcParts, ","),
 		TookMs:      time.Since(started).Milliseconds(),
 	})
+}
+
+func (s *Server) prospecMethodCompare(
+	ctx context.Context,
+	session *bbgo.ExchangeSession,
+	symbols []string,
+	iv types.Interval,
+	limit, horizon int,
+) []prospec.MethodBTStats {
+	methods := []prospec.TrendFitMethod{prospec.TrendFitHL, prospec.TrendFitOLS, prospec.TrendFitRANSAC}
+	agg := map[prospec.TrendFitMethod]*struct {
+		t, w, l int
+		sum     float64
+	}{}
+	for _, m := range methods {
+		agg[m] = &struct {
+			t, w, l int
+			sum     float64
+		}{}
+	}
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 4)
+	for _, sy := range symbols {
+		wg.Add(1)
+		go func(sy string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			ks, _, err := s.queryAnalysisKLines(ctx, session, sy, iv, limit)
+			if err != nil || len(ks) < 80 {
+				return
+			}
+			local := prospec.Compare123Methods(ks, 3, horizon)
+			mu.Lock()
+			defer mu.Unlock()
+			for _, row := range local {
+				m := prospec.TrendFitMethod(row.Method)
+				a := agg[m]
+				if a == nil {
+					continue
+				}
+				a.t += row.Trades123
+				a.w += row.Wins123
+				a.l += row.Losses123
+				a.sum += row.AvgR123 * float64(row.Trades123)
+			}
+		}(sy)
+	}
+	wg.Wait()
+	out := make([]prospec.MethodBTStats, 0, len(methods))
+	for _, m := range methods {
+		a := agg[m]
+		st := prospec.MethodBTStats{Method: string(m), Trades123: a.t, Wins123: a.w, Losses123: a.l}
+		if a.t > 0 {
+			st.WinRate123 = mathRound8(100 * float64(a.w) / float64(a.t))
+			st.AvgR123 = mathRound8(a.sum / float64(a.t))
+		}
+		out = append(out, st)
+	}
+	return out
+}
+
+func mathRound8(v float64) float64 {
+	return math.Round(v*1e8) / 1e8
 }
 
 func (s *Server) prospecBacktestPool(

@@ -31,6 +31,7 @@ func analysisDefaultSymbols() []string {
 	return []string{
 		"BTCUSDT", "ETHUSDT", "XRPUSDT", "NEARUSDT", "HYPEUSDT", "AVAXUSDT",
 		"DOGEUSDT", "WLDUSDT", "ENAUSDT", "SOLUSDT", "BNBUSDT", "SUIUSDT", "DOTUSDT",
+		"LINKUSDT", "ZECUSDT",
 	}
 }
 
