@@ -88,31 +88,13 @@ const CHART_INTERVALS: { value: string; label: string }[] = [
   { value: '1d', label: '日线' },
 ];
 
-function IntervalPicker({
-  value,
-  onChange,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-}) {
-  return (
-    <ToggleButtonGroup
-      exclusive
-      size="small"
-      value={value}
-      onChange={(_, v) => {
-        if (v) onChange(v);
-      }}
-      sx={{ flexWrap: 'wrap' }}
-    >
-      {CHART_INTERVALS.map((iv) => (
-        <ToggleButton key={iv.value} value={iv.value} sx={{ px: 1.25 }}>
-          {iv.label}
-        </ToggleButton>
-      ))}
-    </ToggleButtonGroup>
-  );
-}
+const PROSPEC_INTERVALS: { value: string; label: string }[] = [
+  { value: '15m', label: '15m' },
+  { value: '30m', label: '30m' },
+  { value: '1h', label: '1h' },
+  { value: '4h', label: '4h' },
+  { value: '1d', label: '日线' },
+];
 
 type PnlPeriod = 'today' | '7d' | '30d' | '90d';
 
@@ -455,6 +437,29 @@ export default function AnalysisPage() {
       setLoading(false);
     }
   }, [prospecSymbol, prospecChartIv]);
+
+  const changeProspecChartIv = useCallback(
+    async (v: string) => {
+      setProspecChartIv(v);
+      try {
+        const lim =
+          v === '15m' || v === '30m' || v === '1h' || v === '4h' ? 200 : 180;
+        const kl = await queryAnalysisKlines({
+          symbol: prospecSymbol || 'BTCUSDT',
+          interval: v,
+          limit: lim,
+        });
+        setProspecChart({
+          klines: kl?.klines || [],
+          klineSource: kl?.klineSource,
+          interval: v,
+        });
+      } catch {
+        /* keep previous chart */
+      }
+    },
+    [prospecSymbol],
+  );
 
   const loadPnl = useCallback(async (period: PnlPeriod = pnlPeriod) => {
     setLoading(true);
@@ -919,15 +924,9 @@ export default function AnalysisPage() {
                       ? `（${marketChart.klineSource}）`
                       : ''}
                   </Typography>
-                  <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
-                    <IntervalPicker
-                      value={marketChart.interval || marketInterval}
-                      onChange={(iv) => loadMarketChart(marketChart.symbol, iv)}
-                    />
-                    <Button size="small" onClick={() => setMarketChart(null)}>
-                      关闭
-                    </Button>
-                  </Box>
+                  <Button size="small" onClick={() => setMarketChart(null)}>
+                    关闭
+                  </Button>
                 </Box>
                 <PinKlineChart
                   symbol={marketChart.symbol}
@@ -945,6 +944,10 @@ export default function AnalysisPage() {
                     findPosition(margin?.positions, marketChart.symbol)
                   }
                   height={chartH}
+                  intervalOptions={CHART_INTERVALS}
+                  onIntervalChange={(iv) =>
+                    loadMarketChart(marketChart.symbol, iv)
+                  }
                 />
               </CardContent>
             </Card>
@@ -1275,10 +1278,6 @@ export default function AnalysisPage() {
                       <Typography variant="subtitle2">
                         {'K 线 + Pins（qty@price，买绿/卖红）'}
                       </Typography>
-                      <IntervalPicker
-                        value={grid.interval || gridInterval}
-                        onChange={reloadGridKlines}
-                      />
                     </Box>
                     <PinKlineChart
                       symbol={grid.symbol}
@@ -1299,6 +1298,8 @@ export default function AnalysisPage() {
                         )
                       }
                       height={chartHLg}
+                      intervalOptions={CHART_INTERVALS}
+                      onIntervalChange={reloadGridKlines}
                     />
                   </CardContent>
                 </Card>
@@ -1515,15 +1516,9 @@ export default function AnalysisPage() {
                     {pnlChart.interval === '1d' ? '日线' : pnlChart.interval}
                     （买绿/卖红）
                   </Typography>
-                  <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
-                    <IntervalPicker
-                      value={pnlChart.interval || pnlInterval}
-                      onChange={(iv) => loadPnlChart(pnlChart.symbol, iv)}
-                    />
-                    <Button size="small" onClick={() => setPnlChart(null)}>
-                      关闭
-                    </Button>
-                  </Box>
+                  <Button size="small" onClick={() => setPnlChart(null)}>
+                    关闭
+                  </Button>
                 </Box>
                 <PinKlineChart
                   symbol={pnlChart.symbol}
@@ -1544,6 +1539,8 @@ export default function AnalysisPage() {
                     )
                   }
                   height={chartHSm}
+                  intervalOptions={CHART_INTERVALS}
+                  onIntervalChange={(iv) => loadPnlChart(pnlChart.symbol, iv)}
                 />
               </CardContent>
             </Card>
@@ -2412,59 +2409,19 @@ export default function AnalysisPage() {
 
               <Card variant="outlined" sx={{ mb: 2 }}>
                 <CardContent>
-                  <Box
-                    sx={{
-                      display: 'flex',
-                      flexWrap: 'wrap',
-                      gap: 1,
-                      mb: 1,
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                    }}
-                  >
-                    <Typography variant="subtitle2">
-                      {prospecSymbol} 趋势线（绿/红=RANSAC · 虚线=OLS · 灰=已破停画）
-                      {prospecChart?.klineSource ? ` · ${prospecChart.klineSource}` : ''}
-                    </Typography>
-                    <ToggleButtonGroup
-                      size="small"
-                      exclusive
-                      value={prospecChartIv}
-                      onChange={async (_, v) => {
-                        if (!v) return;
-                        setProspecChartIv(v);
-                        try {
-                          const lim =
-                            v === '15m' || v === '30m' ? 200 : v === '1h' || v === '4h' ? 200 : 180;
-                          const kl = await queryAnalysisKlines({
-                            symbol: prospecSymbol || 'BTCUSDT',
-                            interval: v,
-                            limit: lim,
-                          });
-                          setProspecChart({
-                            klines: kl?.klines || [],
-                            klineSource: kl?.klineSource,
-                            interval: v,
-                          });
-                        } catch {
-                          /* keep previous chart */
-                        }
-                      }}
-                    >
-                      <ToggleButton value="15m">15m</ToggleButton>
-                      <ToggleButton value="30m">30m</ToggleButton>
-                      <ToggleButton value="1h">1h</ToggleButton>
-                      <ToggleButton value="4h">4h</ToggleButton>
-                      <ToggleButton value="1d">日线</ToggleButton>
-                    </ToggleButtonGroup>
-                  </Box>
+                  <Typography variant="subtitle2" sx={{ mb: 1 }}>
+                    {prospecSymbol} 趋势线（绿/红=RANSAC · 虚线=OLS · 灰=已破停画）
+                    {prospecChart?.klineSource ? ` · ${prospecChart.klineSource}` : ''}
+                  </Typography>
                   {prospecChart?.klines?.length ? (
                     <PinKlineChart
                       symbol={prospecSymbol}
                       klines={prospecChart.klines}
-                      interval={prospecChart.interval}
+                      interval={prospecChart.interval || prospecChartIv}
                       klineSource={prospecChart.klineSource}
                       height={isMobile ? 280 : 380}
+                      intervalOptions={PROSPEC_INTERVALS}
+                      onIntervalChange={changeProspecChartIv}
                       trendSegments={(() => {
                         const iv = prospecChart.interval;
                         const tf =

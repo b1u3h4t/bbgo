@@ -6,6 +6,8 @@ import {
   IconButton,
   Paper,
   TextField,
+  ToggleButton,
+  ToggleButtonGroup,
   Tooltip,
   Typography,
 } from '@mui/material';
@@ -88,6 +90,11 @@ type Props = {
   position?: ChartPosition | null;
   /** Diagonal OLS/RANSAC trendlines */
   trendSegments?: TrendSegment[];
+  /** Shown in chart toolbar (incl. fullscreen) when onIntervalChange is set */
+  intervalOptions?: { value: string; label: string }[];
+  onIntervalChange?: (interval: string) => void;
+  /** Disable interval toggles while parent reloads klines */
+  intervalLoading?: boolean;
 };
 
 type Ohlcv = {
@@ -203,6 +210,9 @@ export default function PinKlineChart({
   height = 360,
   position,
   trendSegments = [],
+  intervalOptions,
+  onIntervalChange,
+  intervalLoading = false,
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -215,6 +225,8 @@ export default function PinKlineChart({
   const trendSeriesRef = useRef<ISeriesApi<'Line'>[]>([]);
   const latestRef = useRef<Ohlcv | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  /** Reset fitContent only when symbol/interval changes so user pan is kept. */
+  const fittedKeyRef = useRef('');
 
   const [indicators, setIndicators] = useState<ActiveIndicator[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -375,11 +387,40 @@ export default function PinKlineChart({
         horzLines: { color: '#eeeeee' },
       },
       crosshair: { mode: CrosshairMode.Normal },
-      rightPriceScale: { borderColor: '#e0e0e0' },
+      rightPriceScale: {
+        borderColor: '#e0e0e0',
+        // Keep wide axis labels (趋势线 title) from eating candle space.
+        entireTextOnly: true,
+      },
+      // Drag / wheel / pinch: pan & zoom so latest bars are not stuck under labels.
+      handleScroll: {
+        mouseWheel: true,
+        pressedMouseMove: true,
+        horzTouchDrag: true,
+        vertTouchDrag: true,
+      },
+      handleScale: {
+        axisPressedMouseMove: { time: true, price: true },
+        axisDoubleClickReset: true,
+        mouseWheel: true,
+        pinch: true,
+      },
+      kineticScroll: {
+        mouse: true,
+        touch: true,
+      },
       timeScale: {
         borderColor: '#e0e0e0',
         timeVisible: true,
         secondsVisible: false,
+        // Empty bars on the right so last candles clear price-scale labels.
+        rightOffset: 18,
+        barSpacing: 10,
+        minBarSpacing: 2,
+        fixLeftEdge: false,
+        fixRightEdge: false,
+        lockVisibleTimeRangeOnResize: true,
+        shiftVisibleRangeOnNewBar: true,
       },
     });
     const series = chart.addCandlestickSeries({
@@ -590,7 +631,13 @@ export default function PinKlineChart({
       }),
     );
 
-    chart.timeScale().fitContent();
+    const fitKey = `${symbol}|${interval}`;
+    if (fittedKeyRef.current !== fitKey) {
+      fittedKeyRef.current = fitKey;
+      chart.timeScale().fitContent();
+      // Nudge left of the price scale so the newest bar is not under labels.
+      chart.timeScale().applyOptions({ rightOffset: 18 });
+    }
   }, [
     klines,
     pins,
@@ -600,6 +647,8 @@ export default function PinKlineChart({
     lower,
     upper,
     position,
+    symbol,
+    interval,
   ]);
 
   // indicators
@@ -710,7 +759,8 @@ export default function PinKlineChart({
         lineWidth: 2,
         lineStyle: seg.dashed ? 2 : 0,
         title: seg.title || '',
-        lastValueVisible: true,
+        // Avoid huge axis chips (e.g.「RANSAC压力·破」) covering the last candles.
+        lastValueVisible: false,
         priceLineVisible: false,
         crosshairMarkerVisible: false,
       });
@@ -796,7 +846,25 @@ export default function PinKlineChart({
             </Box>
           )}
         </Typography>
-        <Box sx={{ ml: 'auto', display: 'flex', alignItems: 'center', gap: 0.5 }}>
+        <Box sx={{ ml: 'auto', display: 'flex', alignItems: 'center', gap: 0.5, flexWrap: 'wrap' }}>
+          {onIntervalChange && intervalOptions && intervalOptions.length > 0 && (
+            <ToggleButtonGroup
+              exclusive
+              size="small"
+              value={interval}
+              disabled={intervalLoading}
+              onChange={(_, v) => {
+                if (v && v !== interval) onIntervalChange(v);
+              }}
+              sx={{ flexWrap: 'wrap' }}
+            >
+              {intervalOptions.map((iv) => (
+                <ToggleButton key={iv.value} value={iv.value} sx={{ px: 1.1, py: 0.25 }}>
+                  {iv.label}
+                </ToggleButton>
+              ))}
+            </ToggleButtonGroup>
+          )}
           <Tooltip title="添加指标（快捷键 /）">
             <IconButton size="small" onClick={openPicker}>
               <ShowChartIcon fontSize="small" />
@@ -984,6 +1052,11 @@ export default function PinKlineChart({
           bgcolor: '#fafafa',
           borderRadius: 1,
           flex: fullscreen ? 1 : undefined,
+          cursor: 'grab',
+          touchAction: 'none', // let LWC own touch pan (avoid page scroll steal)
+          '&:active': { cursor: 'grabbing' },
+          // Ensure canvas receives drag; no overlay intercepts pointer events.
+          '& > *': { touchAction: 'none' },
         }}
       />
     </Box>

@@ -27,6 +27,17 @@ func (s *Server) analysisBacktestService() *service.BacktestService {
 	return service.NewBacktestService(s.Environ.DatabaseService.DB)
 }
 
+// analysisDBSourceTag returns the persistence driver name for UI (postgres/mysql/sqlite3).
+func (s *Server) analysisDBSourceTag() string {
+	if s.Environ == nil || s.Environ.DatabaseService == nil || s.Environ.DatabaseService.DB == nil {
+		return "db"
+	}
+	if d := s.Environ.DatabaseService.DB.DriverName(); d != "" {
+		return d
+	}
+	return "db"
+}
+
 func analysisDefaultSymbols() []string {
 	return []string{
 		"BTCUSDT", "ETHUSDT", "XRPUSDT", "NEARUSDT", "HYPEUSDT", "AVAXUSDT",
@@ -35,7 +46,7 @@ func analysisDefaultSymbols() []string {
 	}
 }
 
-// intervals we keep warm in MySQL (binance_futures_klines). 8h has no historical sync coverage.
+// intervals we keep warm in DB (binance_futures_klines). 8h has no historical sync coverage.
 func analysisSyncIntervals() []types.Interval {
 	return []types.Interval{
 		types.Interval5m, types.Interval15m, types.Interval30m,
@@ -70,17 +81,18 @@ func (s *Server) queryAnalysisKLines(
 	}
 
 	bt := s.analysisBacktestService()
+	dbTag := s.analysisDBSourceTag()
 	var dbKlines []types.KLine
 	source := "exchange"
 
 	if bt != nil && intervalSupportedInDB(interval) {
 		if ks, err := bt.QueryKLinesBackward(session.Exchange, symbol, interval, time.Now(), limit); err == nil && len(ks) > 0 {
 			dbKlines = ks
-			source = "mysql"
+			source = dbTag
 		}
 	}
 
-	// Prefer MySQL. Only hit the exchange for tip refresh (few bars) or when DB is empty/short.
+	// Prefer DB. Only hit the exchange for tip refresh (few bars) or when DB is empty/short.
 	tipOnly := false
 	needExchange := len(dbKlines) == 0
 	if len(dbKlines) > 0 {
@@ -125,15 +137,15 @@ func (s *Server) queryAnalysisKLines(
 	merged := mergeKLinesPreferNewer(dbKlines, exKlines)
 	if len(dbKlines) > 0 {
 		if tipOnly {
-			source = "mysql+tip"
+			source = dbTag + "+tip"
 		} else {
-			source = "mysql+exchange"
+			source = dbTag + "+exchange"
 		}
 	} else {
 		source = "exchange"
 	}
 
-	// best-effort persist closed bars back into MySQL
+	// best-effort persist closed bars back into DB
 	if bt != nil && intervalSupportedInDB(interval) {
 		go s.persistClosedKlines(bt, session.Exchange, exKlines)
 	}
