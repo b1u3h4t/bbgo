@@ -25,6 +25,10 @@ jobs:
   deploy:
     runs-on: [self-hosted, bbgo]
     timeout-minutes: 45
+    # Runner host may export GOTOOLCHAIN=local; that blocks go from fetching
+    # a newer toolchain when go.mod requires >= 1.27.1.
+    env:
+      GOTOOLCHAIN: auto
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -38,14 +42,14 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version: "1.26"
+          go-version: "1.27.1"
 
       # Self-hosted runners run as github-runner (no sudo). Do not apt-install Node.
       # Do not set cache: yarn here — setup-node requires yarn on PATH before install.
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
-          node-version: "18"
+          node-version: "20"
 
       - name: Ensure yarn
         run: |
