@@ -42,6 +42,7 @@ import {
   queryAnalysisKlines,
   queryAnalysisMargin,
   queryAnalysisMarket,
+  queryAnalysisRegime,
   queryAnalysisTodayPnL,
   queryAnalysisTrend,
 } from '../api/bbgo';
@@ -342,6 +343,8 @@ export default function AnalysisPage() {
   const [trendTop, setTrendTop] = useState('25');
   const [trendMinVol, setTrendMinVol] = useState('50000000');
   const [trendBars, setTrendBars] = useState('1920');
+  const [regime, setRegime] = useState<any>(null);
+  const [regimeSymbol, setRegimeSymbol] = useState('BTCUSDT');
   const [avgSymbol, setAvgSymbol] = useState('DOGEUSDT');
   const [avgAddIm, setAvgAddIm] = useState('200');
   const [avgPrice, setAvgPrice] = useState('');
@@ -399,6 +402,18 @@ export default function AnalysisPage() {
       setLoading(false);
     }
   }, [trendTop, trendMinVol, trendBars]);
+
+  const loadRegime = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      setRegime(await queryAnalysisRegime('binance', { symbol: regimeSymbol || 'BTCUSDT' }));
+    } catch (e: any) {
+      setError(e?.response?.data?.error || e?.message || 'failed to load regime');
+    } finally {
+      setLoading(false);
+    }
+  }, [regimeSymbol]);
 
   const loadPnl = useCallback(async (period: PnlPeriod = pnlPeriod) => {
     setLoading(true);
@@ -602,6 +617,7 @@ export default function AnalysisPage() {
             }
             if (v === 4) loadAvgDown();
             if (v === 5) loadTrend();
+            if (v === 6) loadRegime();
           }}
           variant="scrollable"
           scrollButtons="auto"
@@ -614,6 +630,7 @@ export default function AnalysisPage() {
           <Tab label="盈亏" />
           <Tab label="慎重补仓" />
           <Tab label="趋势选股" />
+          <Tab label="周期变盘" />
         </Tabs>
 
         <TabPanel value={tab} index={0}>
@@ -2004,6 +2021,159 @@ export default function AnalysisPage() {
               </TableBody>
             </Table>
           </ScrollTable>
+        </TabPanel>
+
+        <TabPanel value={tab} index={6}>
+          <Box
+            sx={{
+              display: 'flex',
+              gap: 1,
+              mb: 2,
+              alignItems: 'center',
+              flexWrap: 'wrap',
+            }}
+          >
+            <TextField
+              size="small"
+              label="主观察币"
+              value={regimeSymbol}
+              onChange={(e) => setRegimeSymbol(e.target.value.toUpperCase())}
+              sx={{ width: 140 }}
+            />
+            <Button variant="contained" onClick={loadRegime} size={isMobile ? 'small' : 'medium'}>
+              刷新三周期 + 历史回测
+            </Button>
+            {regime?.tookMs != null && (
+              <Typography variant="caption" color="text.secondary">
+                {regime.symbolsUsed?.length || 0} 币种回测 · {regime.tookMs}ms · {regime.klineSource}
+              </Typography>
+            )}
+          </Box>
+
+          {regime && (
+            <>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                变盘看收盘确认，不看时钟。历史：各币 ≥5% 回调后，反弹触 EMA20（成功）或破低（失败）的时长分位。
+              </Typography>
+
+              <Grid container spacing={2} sx={{ mb: 2 }}>
+                {(regime.horizons || []).map((h: any) => (
+                  <Grid item xs={12} md={4} key={h.name}>
+                    <Card variant="outlined" sx={{ height: '100%' }}>
+                      <CardContent>
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                          <Typography variant="subtitle1">{h.label}</Typography>
+                          <Chip
+                            size="small"
+                            label={
+                              h.bias === 'bull' ? '偏多' : h.bias === 'bear' ? '偏空' : '震荡'
+                            }
+                            color={
+                              h.bias === 'bull' ? 'success' : h.bias === 'bear' ? 'error' : 'default'
+                            }
+                          />
+                        </Box>
+                        <Typography variant="body2" sx={{ mb: 1 }}>
+                          {h.summary}
+                        </Typography>
+                        {(h.timeframes || []).map((tf: any) => (
+                          <Typography key={tf.interval} variant="caption" display="block">
+                            {tf.interval}: RSI {fmtNum(tf.rsi14, 1)} · vsEMA20{' '}
+                            {tf.aboveEMA20 ? '上' : '下'} · 斜率 {tf.ema20Slope} ·{' '}
+                            {tf.fromHi20Pct}% from hi20
+                          </Typography>
+                        ))}
+                        {h.nextClose && (
+                          <Typography variant="caption" display="block" sx={{ mt: 1 }} color="primary.main">
+                            下一确认收盘: {h.nextClose.cst}（约 {fmtNum(h.nextClose.inHours, 1)}h）
+                          </Typography>
+                        )}
+                        <Typography variant="caption" display="block" sx={{ mt: 1 }} color="success.main">
+                          转多: {(h.flipUp || []).join('；')}
+                        </Typography>
+                        <Typography variant="caption" display="block" color="error.main">
+                          转空: {(h.flipDown || []).join('；')}
+                        </Typography>
+                      </CardContent>
+                    </Card>
+                  </Grid>
+                ))}
+              </Grid>
+
+              {regime.current && (
+                <Card variant="outlined" sx={{ mb: 2 }}>
+                  <CardContent>
+                    <Typography variant="subtitle2" gutterBottom>
+                      当前 4h 回调/反弹窗口（{regime.current.symbol}）
+                    </Typography>
+                    <Typography variant="body2">
+                      高 {fmtNum(regime.current.high, 2)} → 低 {fmtNum(regime.current.low, 2)}（
+                      {fmtNum(regime.current.dropPct, 2)}%）· 自低点已过{' '}
+                      {fmtNum(regime.current.hoursSinceLow, 1)}h（{regime.current.barsSinceLow} 根 4h）·
+                      现价 {fmtNum(regime.current.last, 2)}{' '}
+                      {regime.current.aboveEMA20 ? '已站 EMA20' : '仍在 EMA20 下'}
+                    </Typography>
+                    <Typography variant="body2" sx={{ mt: 1 }}>
+                      历史触 EMA20：P50 {fmtNum(regime.current.histP50Hours, 1)}h / P80{' '}
+                      {fmtNum(regime.current.histP80Hours, 1)}h · 成功率{' '}
+                      {fmtNum(regime.current.successRateHist, 1)}%
+                    </Typography>
+                    <Typography variant="body2" color="warning.main" sx={{ mt: 1 }}>
+                      {regime.current.windowNote}
+                    </Typography>
+                  </CardContent>
+                </Card>
+              )}
+
+              <Grid container spacing={2} sx={{ mb: 2 }}>
+                {[
+                  { title: '4h 多币种回测', bt: regime.backtest4h },
+                  { title: '日线多币种回测', bt: regime.backtest1d },
+                ].map(({ title, bt }) => (
+                  <Grid item xs={12} md={6} key={title}>
+                    <Card variant="outlined">
+                      <CardContent>
+                        <Typography variant="subtitle2" gutterBottom>
+                          {title}（{bt?.symbols || 0} 币 / {bt?.episodes || 0} 段）
+                        </Typography>
+                        <Typography variant="body2">
+                          触 EMA20：P50 {fmtNum(bt?.toEMA20?.p50Hours, 1)}h · P80{' '}
+                          {fmtNum(bt?.toEMA20?.p80Hours, 1)}h · n={bt?.toEMA20?.samples || 0} · 成功率{' '}
+                          {fmtNum(bt?.toEMA20?.successRate, 1)}%
+                        </Typography>
+                        <Typography variant="body2">
+                          破低失败：P50 {fmtNum(bt?.toFail?.p50Hours, 1)}h · P80{' '}
+                          {fmtNum(bt?.toFail?.p80Hours, 1)}h · n={bt?.toFail?.samples || 0}
+                        </Typography>
+                        <Typography variant="body2">
+                          全部已结束：P50 {fmtNum(bt?.allClosed?.p50Hours, 1)}h · P80{' '}
+                          {fmtNum(bt?.allClosed?.p80Hours, 1)}h
+                        </Typography>
+                      </CardContent>
+                    </Card>
+                  </Grid>
+                ))}
+              </Grid>
+
+              <Card variant="outlined">
+                <CardContent>
+                  <Typography variant="subtitle2" gutterBottom>
+                    程序标准
+                  </Typography>
+                  <List dense>
+                    {(regime.rules || []).map((r: string, i: number) => (
+                      <ListItem key={i} disableGutters>
+                        <ListItemText primary={`${i + 1}. ${r}`} />
+                      </ListItem>
+                    ))}
+                  </List>
+                  <Typography variant="caption" color="text.secondary">
+                    样本币: {(regime.symbolsUsed || []).join(', ')}
+                  </Typography>
+                </CardContent>
+              </Card>
+            </>
+          )}
         </TabPanel>
       </Box>
     </DashboardLayout>

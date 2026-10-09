@@ -194,6 +194,19 @@ export async function queryAnalysisTrend(
   return response.data;
 }
 
+export async function queryAnalysisRegime(
+  session = 'binance',
+  params?: { symbol?: string },
+) {
+  const response = await axios.get(baseURL + '/api/analysis/regime', {
+    params: {
+      session,
+      symbol: params?.symbol || 'BTCUSDT',
+    },
+  });
+  return response.data;
+}
+
 export async function queryAnalysisGridCalc(params: Record<string, string | number>) {
   const response = await axios.get(baseURL + '/api/analysis/grid-calc', {
     params,
