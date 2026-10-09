@@ -2356,9 +2356,31 @@ export default function AnalysisPage() {
           {prospec && (
             <>
               <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                《专业投机原理》：周/日定势，4h/15m 找点。1-2-3 收盘确认变盘；2B
-                假突破收回；不逆嵌套开仓。可配置策略 ID <code>prospec</code>。
+                《专业投机原理》：周/日定势，4h/15m 找点。做空：停损在进场上方、目标在进场下方；做多相反。策略{' '}
+                <code>prospec</code>。
               </Typography>
+
+              <Accordion sx={{ mb: 2 }}>
+                <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                  <Typography variant="subtitle2">1-2-3 与 2B 详解</Typography>
+                </AccordionSummary>
+                <AccordionDetails>
+                  <Typography variant="body2" gutterBottom>
+                    <strong>1-2-3 转空（升势结束）</strong>
+                    ：①收盘跌破上升结构的最近抬高点(HL) → ②反抽高点不过前高 →
+                    ③收盘再跌破②那段反弹的低点，才算转空确认。进场看③收盘；停损放②高点之上；目标约等于风险 1R（进场价 −
+                    (停损 − 进场价)），必须低于进场价。
+                  </Typography>
+                  <Typography variant="body2" gutterBottom>
+                    <strong>1-2-3 转多</strong>
+                    ：镜像——①收上 LH → ②回踩不破前低 → ③收上②高点。停损在②下，目标在进场上方 1R。
+                  </Typography>
+                  <Typography variant="body2">
+                    <strong>2B</strong>
+                    ：价格刺穿前高/前低后，同一根（或紧随）收盘收回内侧。假上破→试空（停损刺穿极值上）；假下破→试多。必须与大周期嵌套同向；逆嵌套当诱饵不追。
+                  </Typography>
+                </AccordionDetails>
+              </Accordion>
 
               {prospec.primary && (
                 <Card variant="outlined" sx={{ mb: 2, borderColor: 'primary.main' }}>
@@ -2374,7 +2396,11 @@ export default function AnalysisPage() {
                               : 'default'
                         }
                       />
-                      {prospec.primary.aligned && <Chip size="small" color="success" label="嵌套同向" />}
+                      {prospec.primary.aligned ? (
+                        <Chip size="small" color="success" label="嵌套同向" />
+                      ) : (
+                        <Chip size="small" label="嵌套未对齐" />
+                      )}
                       <Chip size="small" label={prospec.primary.kind || 'wait'} />
                     </Box>
                     <Typography variant="body2" color="warning.main">
@@ -2384,11 +2410,48 @@ export default function AnalysisPage() {
                       <Typography variant="caption" display="block" sx={{ mt: 1 }}>
                         参考进场 {fmtNum(prospec.primary.entry, 2)} · 停损{' '}
                         {fmtNum(prospec.primary.stop, 2)} · 目标 {fmtNum(prospec.primary.target, 2)}
+                        {prospec.primary.side === 'short' &&
+                        prospec.primary.target >= prospec.primary.entry
+                          ? ' ⚠ 目标应低于进场'
+                          : ''}
+                        {prospec.primary.side === 'long' &&
+                        prospec.primary.target > 0 &&
+                        prospec.primary.target <= prospec.primary.entry
+                          ? ' ⚠ 目标应高于进场'
+                          : ''}
                       </Typography>
                     )}
                   </CardContent>
                 </Card>
               )}
+
+              <Grid container spacing={2} sx={{ mb: 2 }}>
+                {[
+                  { title: '4h 多币回测', bt: prospec.backtest4h },
+                  { title: '日线多币回测', bt: prospec.backtest1d },
+                ].map(({ title, bt }) => (
+                  <Grid item xs={12} md={6} key={title}>
+                    <Card variant="outlined">
+                      <CardContent>
+                        <Typography variant="subtitle2" gutterBottom>
+                          {title}（{bt?.symbols || 0} 币 · 窗口 {bt?.horizonBars || 0} 根）
+                        </Typography>
+                        <Typography variant="body2">
+                          1-2-3：n={bt?.trades123 || 0} · 胜率 {fmtNum(bt?.winRate123, 1)}% · 均 R{' '}
+                          {fmtNum(bt?.avgR123, 2)}（胜 {bt?.wins123 || 0} / 负 {bt?.losses123 || 0}）
+                        </Typography>
+                        <Typography variant="body2">
+                          2B：n={bt?.trades2B || 0} · 胜率 {fmtNum(bt?.winRate2B, 1)}% · 均 R{' '}
+                          {fmtNum(bt?.avgR2B, 2)}（胜 {bt?.wins2B || 0} / 负 {bt?.losses2B || 0}）
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          {bt?.note}
+                        </Typography>
+                      </CardContent>
+                    </Card>
+                  </Grid>
+                ))}
+              </Grid>
 
               <Grid container spacing={2} sx={{ mb: 2 }}>
                 {[

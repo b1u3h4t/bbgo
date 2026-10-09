@@ -50,6 +50,8 @@ type analysisProspecResp struct {
 	Primary     prospec.Setup    `json:"primary"`
 	Clocks      []regimeClock    `json:"clocks"`
 	Scan        []prospecScanRow `json:"scan,omitempty"`
+	Backtest4h  prospec.BTStats  `json:"backtest4h"`
+	Backtest1d  prospec.BTStats  `json:"backtest1d"`
 	Rules       []string         `json:"rules"`
 	SymbolsUsed []string         `json:"symbolsUsed,omitempty"`
 	KlineSource string           `json:"klineSource"`
@@ -173,6 +175,8 @@ func (s *Server) analysisProspec(c *gin.Context) {
 	if doScan {
 		scan = s.prospecScan(ctx, session, syms)
 	}
+	bt4h := s.prospecBacktestPool(ctx, session, syms, types.Interval4h, 300, 24)
+	bt1d := s.prospecBacktestPool(ctx, session, syms, types.Interval1d, 260, 12)
 
 	srcParts := make([]string, 0, len(srcCount))
 	for k := range srcCount {
@@ -180,29 +184,80 @@ func (s *Server) analysisProspec(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, analysisProspecResp{
-		Symbol:   symbol,
-		AsOf:     now,
-		Timezone: "Asia/Shanghai",
-		Weekly:   weekly,
-		Daily:    daily,
-		H4:       h4,
-		M15:      m15,
-		Primary:  primary,
-		Clocks:   clocks,
-		Scan:     scan,
+		Symbol:     symbol,
+		AsOf:       now,
+		Timezone:   "Asia/Shanghai",
+		Weekly:     weekly,
+		Daily:      daily,
+		H4:         h4,
+		M15:        m15,
+		Primary:    primary,
+		Clocks:     clocks,
+		Scan:       scan,
+		Backtest4h: bt4h,
+		Backtest1d: bt1d,
 		Rules: []string{
 			"《专业投机原理》：大周期定势，小周期找点；不逆势投机。",
 			"周线/日线嵌套：HH+HL 且价在 EMA50 上 = 偏多；LH+LL 且价在 EMA50 下 = 偏空。",
-			"1-2-3 转势：①破结构点 → ②失败反抽/回踩 → ③收盘破②的反应点才确认。",
-			"2B：刺穿前高/前低后收盘收回，停损在刺穿极值外；须与嵌套同向。",
-			"变盘认收盘，不认插针。未完成 1-2-3 前不提前开仓。",
-			"风险：单笔停损由结构决定；15m 仓≤趋势仓 1/3；错了立刻认赔。",
-			"策略 ID：prospec（可在配置里 enable123/enable2B/useNestFilter）。",
+			"1-2-3 转空：①收盘跌破上升结构低点(HL) → ②反抽高点不过前高 → ③收盘再破②的反弹低点。做空停损在②上方，目标约 1R（进场下对称）。",
+			"1-2-3 转多：①收盘升破下降结构高点(LH) → ②回踩低点不破前低 → ③收盘再破②的反弹高点。做多停损在②下方，目标约 1R。",
+			"2B：刺穿前高/前低后同一根收盘收回；空单停损刺穿极值上、目标在进场下方 1R；多单相反。须与嵌套同向。",
+			"变盘认收盘，不认插针。未完成 1-2-3 前不提前开仓。「嵌套同向」仅当大周期 bias 与方向一致。",
+			"回测：多币种 4h/日线，信号收盘进场，1R 停损目标，先触先平。",
+			"策略 ID：prospec（enable123/enable2B/useNestFilter/requireNestAlign）。",
 		},
 		SymbolsUsed: syms,
 		KlineSource: strings.Join(srcParts, ","),
 		TookMs:      time.Since(started).Milliseconds(),
 	})
+}
+
+func (s *Server) prospecBacktestPool(
+	ctx context.Context,
+	session *bbgo.ExchangeSession,
+	symbols []string,
+	iv types.Interval,
+	limit, horizon int,
+) prospec.BTStats {
+	var (
+		mu               sync.Mutex
+		wg               sync.WaitGroup
+		ok               int
+		t123, w123, l123 int
+		sum123           float64
+		t2b, w2b, l2b    int
+		sum2b            float64
+	)
+	sem := make(chan struct{}, 4)
+	for _, sy := range symbols {
+		wg.Add(1)
+		go func(sy string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			ks, _, err := s.queryAnalysisKLines(ctx, session, sy, iv, limit)
+			if err != nil || len(ks) < 80 {
+				return
+			}
+			a, b, c, d := prospec.Backtest123(ks, 3, horizon)
+			e, f, g, h := prospec.Backtest2B(ks, 3, horizon)
+			mu.Lock()
+			defer mu.Unlock()
+			ok++
+			t123 += a
+			w123 += b
+			l123 += c
+			sum123 += d
+			t2b += e
+			w2b += f
+			l2b += g
+			sum2b += h
+		}(sy)
+	}
+	wg.Wait()
+	st := prospec.SummarizeBT(ok, t123, w123, l123, sum123, t2b, w2b, l2b, sum2b, horizon)
+	st.Note = string(iv) + " · " + st.Note
+	return st
 }
 
 func (s *Server) prospecScan(ctx context.Context, session *bbgo.ExchangeSession, symbols []string) []prospecScanRow {

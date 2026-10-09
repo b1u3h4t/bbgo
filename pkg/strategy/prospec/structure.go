@@ -501,45 +501,82 @@ func DetectTwoB(ks []types.KLine, look int, lookbackBars int) *TwoBSignal {
 	return best
 }
 
+// riskGeometryShort: stop above entry, target below by ~1R.
+func riskGeometryShort(entry, stopHint, altStop float64) (stop, target float64) {
+	stop = stopHint
+	if stop <= entry {
+		stop = altStop
+	}
+	if stop <= entry {
+		stop = entry * 1.01
+	}
+	risk := stop - entry
+	if risk <= 0 {
+		risk = entry * 0.01
+		stop = entry + risk
+	}
+	target = entry - risk
+	if target <= 0 {
+		target = entry * 0.99
+	}
+	return round8(stop), round8(target)
+}
+
+// riskGeometryLong: stop below entry, target above by ~1R.
+func riskGeometryLong(entry, stopHint, altStop float64) (stop, target float64) {
+	stop = stopHint
+	if stop >= entry || stop <= 0 {
+		stop = altStop
+	}
+	if stop >= entry || stop <= 0 {
+		stop = entry * 0.99
+	}
+	risk := entry - stop
+	if risk <= 0 {
+		risk = entry * 0.01
+		stop = entry - risk
+	}
+	target = entry + risk
+	return round8(stop), round8(target)
+}
+
 // BuildSetup combines nest + 1-2-3 + 2B into one action plan.
 func BuildSetup(nest NestState, o123 OneTwoThree, twoB *TwoBSignal, last float64) Setup {
 	s := Setup{Kind: "wait", Side: "flat", Label: "等待", Action: "无合格信号"}
 
 	// Confirmed 1-2-3 first
 	if o123.Confirmed {
-		if o123.Direction == "to_bear" && nest.Bias != "bull" {
+		if o123.Direction == "to_bear" {
 			s.Kind = "one_two_three"
 			s.Side = "short"
-			s.Aligned = nest.Bias == "bear" || nest.Bias == "chop"
+			s.Aligned = nest.Bias == "bear"
 			s.Label = "1-2-3 转空"
-			s.Entry = last
-			s.Stop = o123.Stage2Price
-			if s.Stop <= last {
-				s.Stop = o123.PriorExtreme
-			}
-			s.Target = o123.Stage1Price - (s.Stop - o123.Stage1Price)
-			s.Action = "趋势转空确认。停损②高点外；大周期仍多则仓位减半或只观望"
+			s.Entry = round8(last)
+			s.Stop, s.Target = riskGeometryShort(last, o123.Stage2Price, o123.PriorExtreme)
+			s.Action = "①破上升低点→②反抽不过前高→③再破②低点。做空：停损在②高点之上，目标约 1R（对称风险）"
 			if nest.Bias == "bull" {
 				s.Aligned = false
-				s.Action = "日/执行级 1-2-3 转空，但周/嵌套仍多：只当中级修正，不按熊市满仓空"
+				s.Action += "。嵌套仍多：只当中级修正，减仓或观望"
+			} else if nest.Bias == "chop" {
+				s.Aligned = false
+				s.Action += "。嵌套震荡：可小仓，不算同向满仓"
 			}
 			return s
 		}
-		if o123.Direction == "to_bull" && nest.Bias != "bear" {
+		if o123.Direction == "to_bull" {
 			s.Kind = "one_two_three"
 			s.Side = "long"
-			s.Aligned = nest.Bias == "bull" || nest.Bias == "chop"
+			s.Aligned = nest.Bias == "bull"
 			s.Label = "1-2-3 转多"
-			s.Entry = last
-			s.Stop = o123.Stage2Price
-			if s.Stop >= last {
-				s.Stop = o123.PriorExtreme
-			}
-			s.Target = o123.Stage1Price + (o123.Stage1Price - s.Stop)
-			s.Action = "趋势转多确认。停损②低点外"
+			s.Entry = round8(last)
+			s.Stop, s.Target = riskGeometryLong(last, o123.Stage2Price, o123.PriorExtreme)
+			s.Action = "①破下降高点→②回踩不破前低→③再破②高点。做多：停损在②低点之下，目标约 1R"
 			if nest.Bias == "bear" {
 				s.Aligned = false
-				s.Action = "执行级转多但嵌套仍空：当反弹，不按牛市满仓多"
+				s.Action += "。嵌套仍空：当反弹，不按牛市满仓"
+			} else if nest.Bias == "chop" {
+				s.Aligned = false
+				s.Action += "。嵌套震荡：可小仓"
 			}
 			return s
 		}
@@ -551,10 +588,9 @@ func BuildSetup(nest NestState, o123 OneTwoThree, twoB *TwoBSignal, last float64
 			s.Side = "long"
 			s.Aligned = nest.Bias == "bull"
 			s.Label = "2B 试多"
-			s.Entry = last
-			s.Stop = twoB.Pierced * 0.998
-			s.Target = twoB.Level + (twoB.Level - s.Stop)
-			s.Action = twoB.Note + "；停损刺穿极值外，目标看反弹幅度"
+			s.Entry = round8(last)
+			s.Stop, s.Target = riskGeometryLong(last, twoB.Pierced*0.998, twoB.Level*0.995)
+			s.Action = twoB.Note + "。停损刺穿极值下，目标 1R"
 			if nest.Bias == "chop" {
 				s.Action += "；嵌套震荡，仓位宜小"
 			}
@@ -565,18 +601,15 @@ func BuildSetup(nest NestState, o123 OneTwoThree, twoB *TwoBSignal, last float64
 			s.Side = "short"
 			s.Aligned = nest.Bias == "bear"
 			s.Label = "2B 试空"
-			s.Entry = last
-			s.Stop = twoB.Pierced * 1.002
-			s.Target = twoB.Level - (s.Stop - twoB.Level)
-			s.Action = twoB.Note + "；停损刺穿极值外"
+			s.Entry = round8(last)
+			s.Stop, s.Target = riskGeometryShort(last, twoB.Pierced*1.002, twoB.Level*1.005)
+			s.Action = twoB.Note + "。停损刺穿极值上，目标 1R"
 			return s
 		}
-		if twoB != nil {
-			s.Kind = "wait"
-			s.Label = "2B 逆嵌套"
-			s.Action = "出现 2B 但与大周期相反：忽略或极小仓试错"
-			return s
-		}
+		s.Kind = "wait"
+		s.Label = "2B 逆嵌套"
+		s.Action = "出现 2B 但与大周期相反：忽略或极小仓试错"
+		return s
 	}
 
 	if o123.Stage >= 1 {

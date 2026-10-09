@@ -65,6 +65,15 @@ func TestBuildSetup123Bear(t *testing.T) {
 	assert.Equal(t, "short", s.Side)
 	assert.True(t, s.Aligned)
 	assert.Equal(t, "one_two_three", s.Kind)
+	assert.Greater(t, s.Stop, s.Entry, "short stop must be above entry")
+	assert.Less(t, s.Target, s.Entry, "short target must be below entry")
+}
+
+func TestRiskGeometryShortNeverAboveEntry(t *testing.T) {
+	// buggy case: stage1 above stage2 would previously flip target above entry
+	stop, target := riskGeometryShort(82457.9, 84362.3, 84910)
+	assert.Greater(t, stop, 82457.9)
+	assert.Less(t, target, 82457.9)
 }
 
 func TestClassifyNestBullish(t *testing.T) {
