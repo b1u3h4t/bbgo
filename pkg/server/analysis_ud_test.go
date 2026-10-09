@@ -62,6 +62,6 @@ func TestVolumeBiasUpBars(t *testing.T) {
 		ks[i].Volume = fp(10)
 	}
 	bias, ratio := volumeBias(ks, 20)
-	assert.Equal(t, "红肥绿瘦", bias)
+	assert.Equal(t, "绿肥红瘦", bias)
 	assert.Greater(t, ratio, 1.0)
 }

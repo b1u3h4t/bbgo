@@ -37,7 +37,7 @@ type udTFBoxView struct {
 	Phase        string  `json:"phase"` // range | break_up | break_down | no_box
 	KeySupport   float64 `json:"keySupport"`
 	KeyResist    float64 `json:"keyResist"`
-	VolumeBias   string  `json:"volumeBias"` // 红肥绿瘦 | 绿肥红瘦 | 均衡 | 不足
+	VolumeBias   string  `json:"volumeBias"` // 绿肥红瘦 | 红肥绿瘦 | 均衡 | 不足（币圈绿涨红跌）
 	UpDownVol    float64 `json:"upDownVol"`
 	Note         string  `json:"note"`
 }
@@ -117,14 +117,14 @@ func volumeBias(ks []types.KLine, look int) (string, float64) {
 		}
 	}
 	if down <= 0 {
-		return "红肥绿瘦", 99
+		return "绿肥红瘦", 99
 	}
 	ratio := up / down
 	switch {
 	case ratio >= 1.25:
-		return "红肥绿瘦", roundFloat(ratio, 2)
-	case ratio <= 0.8:
 		return "绿肥红瘦", roundFloat(ratio, 2)
+	case ratio <= 0.8:
+		return "红肥绿瘦", roundFloat(ratio, 2)
 	default:
 		return "均衡", roundFloat(ratio, 2)
 	}

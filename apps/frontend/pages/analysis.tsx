@@ -2090,7 +2090,7 @@ export default function AnalysisPage() {
               )}
 
               <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                优道：锁箱 → 沿上做空/沿下做多 → 收盘出箱才变盘。4h 破支撑只出「日线出空预警」，日线再破才看周线。
+                优道：锁箱 → 沿上做空/沿下做多 → 收盘出箱才变盘。4h 破支撑只出「日线出空预警」，日线再破才看周线。量能按币圈绿涨红跌：绿肥红瘦偏多，红肥绿瘦偏空。
               </Typography>
 
               <Grid container spacing={2} sx={{ mb: 2 }}>
