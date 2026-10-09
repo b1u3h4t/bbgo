@@ -32,12 +32,16 @@ type TrendLine struct {
 	Violations int       `json:"violations"`
 	Score      float64   `json:"score"`
 	Tol        float64   `json:"tol"`
-	Y1         float64  `json:"y1"`
-	Y2         float64  `json:"y2"`
-	YNow       float64   `json:"yNow"` // price at last closed bar
+	Y1         float64   `json:"y1"`
+	Y2         float64   `json:"y2"`
+	YNow       float64   `json:"yNow"` // draw-to price (last bar, or break if broken)
 	StartTime  time.Time `json:"startTime,omitempty"`
 	EndTime    time.Time `json:"endTime,omitempty"`
 	NowTime    time.Time `json:"nowTime,omitempty"`
+	Broken     bool      `json:"broken"`
+	BreakIdx   int       `json:"breakIdx,omitempty"`
+	BreakTime  time.Time `json:"breakTime,omitempty"`
+	YBreak     float64   `json:"yBreak,omitempty"`
 	Note       string    `json:"note"`
 }
 
@@ -363,10 +367,24 @@ func stampTrendLine(hist []types.KLine, ln *TrendLine) {
 	}
 	ln.StartTime = hist[ln.StartIdx].StartTime.Time().UTC()
 	ln.EndTime = hist[ln.EndIdx].StartTime.Time().UTC()
-	ln.NowTime = hist[n-1].StartTime.Time().UTC()
-	ln.YNow = round8(ln.PriceAt(n - 1))
 	ln.Y1 = round8(ln.PriceAt(ln.StartIdx))
 	ln.Y2 = round8(ln.PriceAt(ln.EndIdx))
+
+	support := ln.Kind == "support"
+	if idx, ok := firstCloseBreak(hist, ln, support); ok {
+		// Broken: stop drawing at the break bar (do not shoot into empty air).
+		ln.Broken = true
+		ln.BreakIdx = idx
+		ln.BreakTime = hist[idx].StartTime.Time().UTC()
+		ln.YBreak = round8(ln.PriceAt(idx))
+		ln.NowTime = ln.BreakTime
+		ln.YNow = ln.YBreak
+		ln.Note = ln.Note + " ·已破线"
+		return
+	}
+	ln.Broken = false
+	ln.NowTime = hist[n-1].StartTime.Time().UTC()
+	ln.YNow = round8(ln.PriceAt(n - 1))
 }
 
 // firstCloseBreak returns first bar index after line.EndIdx where close breaks the line.

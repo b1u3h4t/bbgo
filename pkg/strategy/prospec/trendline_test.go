@@ -53,6 +53,29 @@ func TestDetectOneTwoThreeMethodHLStillWorks(t *testing.T) {
 	assert.NotEqual(t, "", o.Note)
 }
 
+func TestStampTrendLineStopsAtBreak(t *testing.T) {
+	// Rising support y = 100 + 0.5*i, then price collapses below it.
+	ks := synth(70, func(i int, prev float64) (o, h, l, c float64) {
+		line := 100 + 0.5*float64(i)
+		if i < 50 {
+			c = line + 2
+			return c - 0.2, c + 0.5, line - 0.1, c
+		}
+		c = line - 5 - float64(i-50)
+		return c, c + 0.3, c - 0.3, c
+	})
+	sup := &TrendLine{
+		Method: "ols", Kind: "support",
+		Slope: 0.5, Intercept: 100, Tol: 0.5,
+		StartIdx: 10, EndIdx: 45,
+	}
+	stampTrendLine(ks, sup)
+	require.True(t, sup.Broken, "support should be marked broken")
+	assert.GreaterOrEqual(t, sup.BreakIdx, 50)
+	assert.Equal(t, sup.BreakTime, sup.NowTime)
+	assert.InDelta(t, sup.YBreak, sup.YNow, 1e-6)
+}
+
 func TestCompare123MethodsRuns(t *testing.T) {
 	ks := synth(120, func(i int, prev float64) (o, h, l, c float64) {
 		c = 100 + float64(i%20)*0.5 + float64(i/20)*2

@@ -55,6 +55,8 @@ type analysisProspecResp struct {
 	Weekly      prospecTFView    `json:"weekly"`
 	Daily       prospecTFView    `json:"daily"`
 	H4          prospecTFView    `json:"h4"`
+	H1          prospecTFView    `json:"h1"`
+	M30         prospecTFView    `json:"m30"`
 	M15         prospecTFView    `json:"m15"`
 	Primary     prospec.Setup    `json:"primary"`
 	Clocks      []regimeClock    `json:"clocks"`
@@ -141,6 +143,8 @@ func (s *Server) analysisProspec(c *gin.Context) {
 	}
 	reqs := []tfReq{
 		{types.Interval15m, 200, "15m"},
+		{types.Interval30m, 200, "30m"},
+		{types.Interval1h, 200, "1h"},
 		{types.Interval4h, 200, "4h"},
 		{types.Interval1d, 200, "1d"},
 		{types.Interval1w, 120, "1w"},
@@ -169,6 +173,8 @@ func (s *Server) analysisProspec(c *gin.Context) {
 	weekly := buildProspecTF(types.Interval1w, klineMap["1w"])
 	daily := buildProspecTF(types.Interval1d, klineMap["1d"])
 	h4 := buildProspecTF(types.Interval4h, klineMap["4h"])
+	h1 := buildProspecTF(types.Interval1h, klineMap["1h"])
+	m30 := buildProspecTF(types.Interval30m, klineMap["30m"])
 	m15 := buildProspecTF(types.Interval15m, klineMap["15m"])
 	// rebuild m15/h4 setups under weekly nest for display consistency
 	m15.Setup = prospec.BuildSetup(weekly.Nest, m15.OneTwoThree, m15.TwoB, m15.Last)
@@ -176,6 +182,8 @@ func (s *Server) analysisProspec(c *gin.Context) {
 		m15.Setup = prospec.BuildSetup(daily.Nest, m15.OneTwoThree, m15.TwoB, m15.Last)
 	}
 	h4.Setup = prospec.BuildSetup(weekly.Nest, h4.OneTwoThree, h4.TwoB, h4.Last)
+	h1.Setup = prospec.BuildSetup(daily.Nest, h1.OneTwoThree, h1.TwoB, h1.Last)
+	m30.Setup = prospec.BuildSetup(daily.Nest, m30.OneTwoThree, m30.TwoB, m30.Last)
 
 	primary := pickPrimarySetup(weekly, daily, h4, m15)
 
@@ -208,6 +216,8 @@ func (s *Server) analysisProspec(c *gin.Context) {
 		Weekly:          weekly,
 		Daily:           daily,
 		H4:              h4,
+		H1:              h1,
+		M30:             m30,
 		M15:             m15,
 		Primary:         primary,
 		Clocks:          clocks,
@@ -220,8 +230,9 @@ func (s *Server) analysisProspec(c *gin.Context) {
 			"《专业投机原理》：大周期定势，小周期找点；不逆势投机。",
 			"周线/日线嵌套：HH+HL 且价在 EMA50 上 = 偏多；LH+LL 且价在 EMA50 下 = 偏空。",
 			"1-2-3 ①（默认 ransac）：收盘跌破/升破「摆动点共识趋势线」；备选 ols=全体 pivot 最小二乘，hl=破水平 HL/LH。",
-			"1-2-3 ②③：失败测试极值 → 收盘破中间拐点；做多/空停损在②侧，目标约 1R。",
+			"1-2-3 ②③：失败测试极值 → 收盘破中间拐点；做多/空停损在②侧，目标约 2R。",
 			"2B：刺穿前高/前低后同一根收盘收回；须与嵌套同向。",
+			"趋势线已破则画到破线 K，不再向右空射。K 线优先 MySQL，仅补最近 tip。",
 			"变盘认收盘。TradingView 对照脚本：docs/tradingview/prospec_trendlines.pine",
 			"回测：多币种 4h/日线；methodCompare* 对比 hl/ols/ransac。",
 			"策略 ID：prospec（enable123/enable2B/useNestFilter/requireNestAlign）。",

@@ -434,7 +434,13 @@ export default function AnalysisPage() {
         queryAnalysisKlines({
           symbol: sym,
           interval: prospecChartIv || '1d',
-          limit: prospecChartIv === '4h' ? 200 : 180,
+          limit:
+            prospecChartIv === '15m' ||
+            prospecChartIv === '30m' ||
+            prospecChartIv === '1h' ||
+            prospecChartIv === '4h'
+              ? 200
+              : 180,
         }),
       ]);
       setProspec(p);
@@ -2417,7 +2423,8 @@ export default function AnalysisPage() {
                     }}
                   >
                     <Typography variant="subtitle2">
-                      {prospecSymbol} 趋势线图（绿=RANSAC 支撑 · 红=RANSAC 阻力 · 虚线=OLS）
+                      {prospecSymbol} 趋势线（绿/红=RANSAC · 虚线=OLS · 灰=已破停画）
+                      {prospecChart?.klineSource ? ` · ${prospecChart.klineSource}` : ''}
                     </Typography>
                     <ToggleButtonGroup
                       size="small"
@@ -2427,10 +2434,12 @@ export default function AnalysisPage() {
                         if (!v) return;
                         setProspecChartIv(v);
                         try {
+                          const lim =
+                            v === '15m' || v === '30m' ? 200 : v === '1h' || v === '4h' ? 200 : 180;
                           const kl = await queryAnalysisKlines({
                             symbol: prospecSymbol || 'BTCUSDT',
                             interval: v,
-                            limit: v === '4h' ? 200 : 180,
+                            limit: lim,
                           });
                           setProspecChart({
                             klines: kl?.klines || [],
@@ -2442,8 +2451,11 @@ export default function AnalysisPage() {
                         }
                       }}
                     >
-                      <ToggleButton value="1d">日线</ToggleButton>
+                      <ToggleButton value="15m">15m</ToggleButton>
+                      <ToggleButton value="30m">30m</ToggleButton>
+                      <ToggleButton value="1h">1h</ToggleButton>
                       <ToggleButton value="4h">4h</ToggleButton>
+                      <ToggleButton value="1d">日线</ToggleButton>
                     </ToggleButtonGroup>
                   </Box>
                   {prospecChart?.klines?.length ? (
@@ -2454,8 +2466,17 @@ export default function AnalysisPage() {
                       klineSource={prospecChart.klineSource}
                       height={isMobile ? 280 : 380}
                       trendSegments={(() => {
+                        const iv = prospecChart.interval;
                         const tf =
-                          prospecChart.interval === '4h' ? prospec.h4 : prospec.daily;
+                          iv === '15m'
+                            ? prospec.m15
+                            : iv === '30m'
+                              ? prospec.m30
+                              : iv === '1h'
+                                ? prospec.h1
+                                : iv === '4h'
+                                  ? prospec.h4
+                                  : prospec.daily;
                         const tl = tf?.trendLines || {};
                         const segs: any[] = [];
                         const push = (ln: any, color: string, title: string, dashed?: boolean) => {
@@ -2463,14 +2484,15 @@ export default function AnalysisPage() {
                           const t2 = ln.nowTime || ln.endTime;
                           const p2 = ln.yNow > 0 ? ln.yNow : ln.y2;
                           if (!t2 || !(p2 > 0)) return;
+                          const broken = !!ln.broken;
                           segs.push({
                             t1: ln.startTime,
                             p1: ln.y1,
                             t2,
                             p2,
-                            color,
-                            title,
-                            dashed: !!dashed,
+                            color: broken ? '#9e9e9e' : color,
+                            title: broken ? `${title}·破` : title,
+                            dashed: broken || !!dashed,
                           });
                         };
                         push(tl.ransacSupport, '#2e7d32', 'RANSAC支撑');
@@ -2482,7 +2504,7 @@ export default function AnalysisPage() {
                     />
                   ) : (
                     <Typography variant="body2" color="text.secondary">
-                      暂无 K 线；点刷新加载。部署新版 API 后可画 RANSAC/OLS 斜线。
+                      暂无 K 线；点刷新加载（优先 MySQL，仅补最新 tip）。
                     </Typography>
                   )}
                 </CardContent>

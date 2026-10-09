@@ -80,29 +80,39 @@ func (s *Server) queryAnalysisKLines(
 		}
 	}
 
+	// Prefer MySQL. Only hit the exchange for tip refresh (few bars) or when DB is empty/short.
+	tipOnly := false
 	needExchange := len(dbKlines) == 0
 	if len(dbKlines) > 0 {
 		last := dbKlines[len(dbKlines)-1]
-		// always refresh forming / recent candles from exchange
 		gap := time.Since(last.EndTime.Time())
-		if gap > interval.Duration()/2 || !last.Closed {
+		tipStale := gap > interval.Duration()/2 || !last.Closed
+		// Significantly short history → one-time backfill from exchange.
+		shortHistory := len(dbKlines) < limit*2/3
+		if shortHistory {
 			needExchange = true
-		}
-		if len(dbKlines) < limit {
+		} else if tipStale {
 			needExchange = true
+			tipOnly = true
+		} else {
+			return trimKLinesTail(dbKlines, limit), source, nil
 		}
 	}
 
 	if !needExchange {
-		return dbKlines, source, nil
+		return trimKLinesTail(dbKlines, limit), source, nil
 	}
 
 	exLimit := limit
-	if exLimit < 100 {
-		exLimit = 100
-	}
-	if exLimit > 500 {
-		exLimit = 500
+	if tipOnly {
+		exLimit = 5 // forming bar + a few closed tips
+	} else {
+		if exLimit < 100 {
+			exLimit = 100
+		}
+		if exLimit > 500 {
+			exLimit = 500
+		}
 	}
 	exKlines, err := session.Exchange.QueryKLines(ctx, symbol, interval, types.KLineQueryOptions{Limit: exLimit})
 	if err != nil {
@@ -114,7 +124,11 @@ func (s *Server) queryAnalysisKLines(
 
 	merged := mergeKLinesPreferNewer(dbKlines, exKlines)
 	if len(dbKlines) > 0 {
-		source = "mysql+exchange"
+		if tipOnly {
+			source = "mysql+tip"
+		} else {
+			source = "mysql+exchange"
+		}
 	} else {
 		source = "exchange"
 	}
