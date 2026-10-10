@@ -18,6 +18,8 @@ type FuturesAccountAsset struct {
 	PositionInitialMargin  fixedpoint.Value `json:"positionInitialMargin"`
 	UnrealizedProfit       fixedpoint.Value `json:"unrealizedProfit"`
 	WalletBalance          fixedpoint.Value `json:"walletBalance"`
+	AvailableBalance       fixedpoint.Value `json:"availableBalance"`
+	CrossWalletBalance     fixedpoint.Value `json:"crossWalletBalance"`
 }
 
 // FuturesAccountPosition define account position

@@ -51,4 +51,7 @@ type FuturesUserAsset struct {
 	PositionInitialMargin  fixedpoint.Value `json:"positionInitialMargin"`
 	UnrealizedProfit       fixedpoint.Value `json:"unrealizedProfit"`
 	WalletBalance          fixedpoint.Value `json:"walletBalance"`
+	// AvailableBalance is what Binance Futures App labels as 可用 (same as account.availableBalance for USDT-M).
+	AvailableBalance   fixedpoint.Value `json:"availableBalance"`
+	CrossWalletBalance fixedpoint.Value `json:"crossWalletBalance,omitempty"`
 }

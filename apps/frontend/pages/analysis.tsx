@@ -1111,15 +1111,15 @@ export default function AnalysisPage() {
           {acc && (
             <Grid container spacing={2} sx={{ mb: 3 }}>
               {[
-                ['Wallet', acc.walletBalance],
-                ['Available', acc.availableBalance],
-                ['FreeEst', acc.freeMarginEst],
-                ['Margin Bal', acc.marginBalance],
-                ['uPnL', acc.unrealizedPnL],
-                ['Total IM', acc.totalInitialMargin],
-                ['Pos IM', acc.positionInitialMargin],
-                ['Order IM', acc.openOrderInitialMargin],
-                ['IM Util %', acc.utilInitialMarginPct],
+                ['可用 (App)', acc.availableBalance],
+                ['USDT钱包', acc.usdtWalletBalance ?? acc.walletBalance],
+                ['保证金余额', acc.marginBalance],
+                ['未实现盈亏', acc.unrealizedPnL],
+                ['占用保证金 IM', acc.totalInitialMargin],
+                ['仓位 IM', acc.positionInitialMargin],
+                ['挂单 IM', acc.openOrderInitialMargin],
+                ['IM利用率%', acc.utilInitialMarginPct],
+                ['FreeEst(参考)', acc.freeMarginEst],
               ].map(([k, v]) => (
                 <Grid item xs={6} md={3} key={String(k)}>
                   <Card variant="outlined">
@@ -1131,13 +1131,11 @@ export default function AnalysisPage() {
                         variant="h6"
                         sx={{
                           color:
-                            k === 'uPnL' || k === 'IM Util %'
+                            String(k).includes('盈亏') ||
+                            String(k).includes('利用率')
                               ? pnlColor(Number(v))
-                              : k === 'Available' &&
-                                Number(acc.availableBalance) > 1000 &&
-                                Number(acc.totalInitialMargin) >=
-                                  Number(acc.marginBalance) * 0.9
-                              ? 'warning.main'
+                              : String(k).startsWith('可用')
+                              ? 'success.main'
                               : undefined,
                         }}
                       >
@@ -1150,14 +1148,12 @@ export default function AnalysisPage() {
               ))}
               <Grid item xs={12}>
                 <Typography variant="body2" color="text.secondary">
-                  目标利用率 {acc.targetUtilPct}%（口径: totalInitialMargin /
-                  wallet）。(wallet−avail)/wallet ={' '}
-                  {acc.utilWalletMinusAvailPct}%
+                  App「可用」= fapi availableBalance
                   {acc.availableBalanceSource
-                    ? ` · Available 来源: ${acc.availableBalanceSource}`
+                    ? `（${acc.availableBalanceSource}）`
                     : ''}
-                  。开仓看 Available / FreeEst（≈ MarginBal − Total IM），不要把
-                  Wallet 当可用保证金。
+                  ；「USDT钱包」= assets.USDT.walletBalance（勿与可用混淆）。目标利用率{' '}
+                  {acc.targetUtilPct}%（IM/wallet）。
                 </Typography>
                 <LinearProgress
                   variant="determinate"

@@ -116,20 +116,20 @@ func (s *Server) sessionOrAbort(c *gin.Context) (*bbgo.ExchangeSession, bool) {
 }
 
 type marginPositionRow struct {
-	Symbol            string  `json:"symbol"`
-	PositionAmt       float64 `json:"positionAmt"`
-	EntryPrice        float64 `json:"entryPrice"`
-	MarkPrice         float64 `json:"markPrice"`
-	LiquidationPrice  float64 `json:"liquidationPrice"`
-	BreakEvenPrice    float64 `json:"breakEvenPrice"`
-	Notional          float64 `json:"notional"`
-	UnrealizedPnL     float64 `json:"unrealizedPnL"`
-	ROEPct            float64 `json:"roePct"`
-	Leverage          float64 `json:"leverage"`
-	InitialMarginEst  float64 `json:"initialMarginEst"`
-	MaintMargin       float64 `json:"maintMargin"`
-	Side              string  `json:"side"`
-	MarginType        string  `json:"marginType"`
+	Symbol           string  `json:"symbol"`
+	PositionAmt      float64 `json:"positionAmt"`
+	EntryPrice       float64 `json:"entryPrice"`
+	MarkPrice        float64 `json:"markPrice"`
+	LiquidationPrice float64 `json:"liquidationPrice"`
+	BreakEvenPrice   float64 `json:"breakEvenPrice"`
+	Notional         float64 `json:"notional"`
+	UnrealizedPnL    float64 `json:"unrealizedPnL"`
+	ROEPct           float64 `json:"roePct"`
+	Leverage         float64 `json:"leverage"`
+	InitialMarginEst float64 `json:"initialMarginEst"`
+	MaintMargin      float64 `json:"maintMargin"`
+	Side             string  `json:"side"`
+	MarginType       string  `json:"marginType"`
 }
 
 type marginOrderRow struct {
@@ -240,6 +240,8 @@ func (s *Server) analysisMargin(c *gin.Context) {
 
 	wallet, avail, upnl, marginBal := 0.0, 0.0, 0.0, 0.0
 	posIM, orderIM, totalIM, maintIM := 0.0, 0.0, 0.0, 0.0
+	usdtWallet, usdtCrossWallet, maxWithdraw := 0.0, 0.0, 0.0
+	// Binance Futures App「可用」= availableBalance (fapi/v2/account & balance).
 	availSource := "none"
 
 	if account != nil {
@@ -251,30 +253,24 @@ func (s *Server) analysisMargin(c *gin.Context) {
 			orderIM = fi.TotalOpenOrderInitialMargin.Float64()
 			totalIM = fi.TotalInitialMargin.Float64()
 			maintIM = fi.TotalMaintMargin.Float64()
+			// Exact App field — do not substitute wallet/crossWallet/balance.
 			avail = fi.AvailableBalance.Float64()
-			availSource = "exchange"
+			availSource = "fapi.availableBalance"
+			if a, ok := fi.Assets["USDT"]; ok {
+				usdtWallet = a.WalletBalance.Float64()
+				usdtCrossWallet = a.CrossWalletBalance.Float64()
+				maxWithdraw = a.MaxWithdrawAmount.Float64()
+			}
 		}
-		// Do NOT fall back to account.Balance("USDT") when avail==0.
-		// On futures, AvailableBalance=0 is valid (fully utilized). The old
-		// fallback used wallet Balance and inflated "available" to tens of k.
 		if marginBal == 0 {
 			marginBal = wallet + upnl
 		}
 	}
 
-	// Cross USDT-M: free ≈ max(0, marginBalance - totalInitialMargin).
+	// Reference only (not shown as 可用): max(0, marginBalance - totalIM).
 	freeEst := marginBal - totalIM
 	if freeEst < 0 {
 		freeEst = 0
-	}
-	// If exchange available looks absurd vs margin math (e.g. tens of k free
-	// while IM already consumes nearly all margin balance), prefer derived.
-	if marginBal > 0 && totalIM >= marginBal*0.9 && avail > freeEst+100 {
-		avail = freeEst
-		availSource = "derived_margin_minus_im"
-	}
-	if avail < 0 {
-		avail = 0
 	}
 
 	positions := collectPositions(ctx, session)
@@ -328,9 +324,14 @@ func (s *Server) analysisMargin(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"session": session.Name,
 		"account": gin.H{
-			"walletBalance":           roundFloat(wallet, 2),
-			"availableBalance":        roundFloat(avail, 2),
-			"availableBalanceSource":  availSource,
+			// App「可用」= availableBalance（已与 fapi 对齐，勿与 usdtWalletBalance 混淆）
+			"availableBalance":       roundFloat(avail, 2),
+			"availableBalanceSource": availSource,
+			// App/资产「钱包余额」USDT（曾被误当成可用，约 3 万那档）
+			"usdtWalletBalance":       roundFloat(usdtWallet, 2),
+			"usdtCrossWalletBalance":  roundFloat(usdtCrossWallet, 2),
+			"maxWithdrawAmount":       roundFloat(maxWithdraw, 2),
+			"walletBalance":           roundFloat(wallet, 2), // totalWalletBalance（多资产合计）
 			"freeMarginEst":           roundFloat(freeEst, 2),
 			"marginBalance":           roundFloat(marginBal, 2),
 			"unrealizedPnL":           roundFloat(upnl, 2),
@@ -901,8 +902,9 @@ func parseChartInterval(raw, limitRaw string) (types.Interval, int) {
 }
 
 // buildPinLevels labels pins like an order book with quantity@price:
-//   buys (price <= last): B1 > B2 > … (B1 = highest buy / closest to last)
-//   sells (price > last): S1 < S2 < … (S1 = lowest sell / closest to last)
+//
+//	buys (price <= last): B1 > B2 > … (B1 = highest buy / closest to last)
+//	sells (price > last): S1 < S2 < … (S1 = lowest sell / closest to last)
 func buildPinLevels(pins []float64, last, qty float64) []gin.H {
 	type lv struct {
 		price float64
@@ -1206,7 +1208,8 @@ func (s *Server) analysisTodayPnL(c *gin.Context) {
 
 // analysisAvgDown: careful average-down calculator for underwater longs (stranded grids).
 // Query: session, symbol?, addIm?, addNotional?, addQty?, price? (limit), leverage?,
-//        targetUtil? (default 0.65), reserveAvail? (default 3000), maxUtil? (default 0.70)
+//
+//	targetUtil? (default 0.65), reserveAvail? (default 3000), maxUtil? (default 0.70)
 func (s *Server) analysisAvgDown(c *gin.Context) {
 	session, ok := s.sessionOrAbort(c)
 	if !ok {
@@ -1231,15 +1234,10 @@ func (s *Server) analysisAvgDown(c *gin.Context) {
 	if marginBal == 0 {
 		marginBal = wallet + upnl
 	}
+	// Use exchange availableBalance only (App「可用」); do not derive from wallet/IM.
 	freeEst := marginBal - totalIM
 	if freeEst < 0 {
 		freeEst = 0
-	}
-	if marginBal > 0 && totalIM >= marginBal*0.9 && avail > freeEst+100 {
-		avail = freeEst
-	}
-	if avail < 0 {
-		avail = 0
 	}
 
 	targetUtil, _ := strconv.ParseFloat(c.DefaultQuery("targetUtil", "0.65"), 64)
@@ -1316,21 +1314,21 @@ func (s *Server) analysisAvgDown(c *gin.Context) {
 		"session": session.Name,
 		"warning": "补仓不会立刻减少浮亏；继续下跌会放大亏损。仅建议小额限价，保留网格运行保证金。",
 		"account": gin.H{
-			"walletBalance":   roundFloat(wallet, 2),
-			"availableBalance": roundFloat(avail, 2),
-			"totalInitialMargin": roundFloat(totalIM, 2),
-			"unrealizedPnL":   roundFloat(upnl, 2),
+			"walletBalance":        roundFloat(wallet, 2),
+			"availableBalance":     roundFloat(avail, 2),
+			"totalInitialMargin":   roundFloat(totalIM, 2),
+			"unrealizedPnL":        roundFloat(upnl, 2),
 			"utilInitialMarginPct": roundFloat(totalIM/math.Max(wallet, 1e-9)*100, 2),
-			"targetUtilPct":   roundFloat(targetUtil*100, 1),
-			"maxUtilPct":      roundFloat(maxUtil*100, 1),
-			"reserveAvail":    roundFloat(reserveAvail, 2),
-			"headroomTargetIM": roundFloat(headTarget, 2),
-			"headroomMaxIM":   roundFloat(headMax, 2),
-			"safeBudgetIM":    roundFloat(safeBudget, 2),
-			"safeBudgetNotional": roundFloat(safeBudget*leverage, 2),
+			"targetUtilPct":        roundFloat(targetUtil*100, 1),
+			"maxUtilPct":           roundFloat(maxUtil*100, 1),
+			"reserveAvail":         roundFloat(reserveAvail, 2),
+			"headroomTargetIM":     roundFloat(headTarget, 2),
+			"headroomMaxIM":        roundFloat(headMax, 2),
+			"safeBudgetIM":         roundFloat(safeBudget, 2),
+			"safeBudgetNotional":   roundFloat(safeBudget*leverage, 2),
 		},
-		"leverage":    leverage,
-		"candidates":  candidates,
+		"leverage":   leverage,
+		"candidates": candidates,
 		"presets": []gin.H{
 			{"id": "conservative", "label": "保守合计IM600", "totalAddIm": 600},
 			{"id": "target65", "label": "用满至65%头寸", "totalAddIm": math.Max(0, roundFloat(headTarget, 0))},
@@ -1387,22 +1385,22 @@ func (s *Server) analysisAvgDown(c *gin.Context) {
 		}
 		overBudget := addIm > safeBudget+1e-6
 		resp["scenario"] = gin.H{
-			"symbol":       symbol,
-			"limitPrice":   roundFloat(price, 8),
-			"addQty":       roundFloat(addQty, 6),
-			"addNotional":  roundFloat(addNotional, 2),
-			"addIm":        roundFloat(addIm, 2),
-			"oldEntry":     roundFloat(entry, 8),
-			"newEntry":     roundFloat(newEntry, 8),
-			"entryImprovePct": roundFloat((newEntry/entry-1)*100, 2),
-			"oldAmt":       roundFloat(amt, 6),
-			"newAmt":       roundFloat(newAmt, 6),
-			"uPnLNowAtMark": roundFloat(newUpnl, 2),
-			"ifDrop5Pct":   scenario(mark * 0.95),
-			"ifDrop10Pct":  scenario(mark * 0.90),
+			"symbol":           symbol,
+			"limitPrice":       roundFloat(price, 8),
+			"addQty":           roundFloat(addQty, 6),
+			"addNotional":      roundFloat(addNotional, 2),
+			"addIm":            roundFloat(addIm, 2),
+			"oldEntry":         roundFloat(entry, 8),
+			"newEntry":         roundFloat(newEntry, 8),
+			"entryImprovePct":  roundFloat((newEntry/entry-1)*100, 2),
+			"oldAmt":           roundFloat(amt, 6),
+			"newAmt":           roundFloat(newAmt, 6),
+			"uPnLNowAtMark":    roundFloat(newUpnl, 2),
+			"ifDrop5Pct":       scenario(mark * 0.95),
+			"ifDrop10Pct":      scenario(mark * 0.90),
 			"ifBackToOldEntry": scenario(entry),
-			"overSafeBudget": overBudget,
-			"note":         "限价单成交后均价才会变化；未成交仅占用委托保证金。",
+			"overSafeBudget":   overBudget,
+			"note":             "限价单成交后均价才会变化；未成交仅占用委托保证金。",
 		}
 	}
 

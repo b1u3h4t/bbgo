@@ -76,6 +76,8 @@ func toGlobalFuturesUserAssets(assets []binanceapi.FuturesAccountAsset) (retAsse
 			PositionInitialMargin:  futuresAsset.PositionInitialMargin,
 			UnrealizedProfit:       futuresAsset.UnrealizedProfit,
 			WalletBalance:          futuresAsset.WalletBalance,
+			AvailableBalance:       futuresAsset.AvailableBalance,
+			CrossWalletBalance:     futuresAsset.CrossWalletBalance,
 		}
 	}
 
