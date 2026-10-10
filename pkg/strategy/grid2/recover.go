@@ -145,6 +145,17 @@ func (s *Strategy) recover(ctx context.Context) error {
 		return err
 	}
 
+	// Manual TP/SL/algo (and foreign-group LIMIT) must not block "new strategy"
+	// detection or enter twin-book recovery / unprofitable-cancel paths.
+	gridOpenOrders := s.filterStrategyGridPinOpenOrders(openOrders)
+	if skipped := len(openOrders) - len(gridOpenOrders); skipped > 0 {
+		s.logger.Infof(
+			"[Recover] ignoring %d non-grid open order(s); using %d grid pin(s)",
+			skipped, len(gridOpenOrders),
+		)
+	}
+	openOrders = gridOpenOrders
+
 	// check if it's new strategy or need to recover
 	if len(activeOrders) == 0 && len(openOrders) == 0 && s.GridProfitStats.InitialOrderID == 0 {
 		// even though there is no open orders and initial orderID is 0
@@ -174,6 +185,7 @@ func (s *Strategy) recover(ctx context.Context) error {
 	}
 
 	// Drop closing orders that would lock in a loss (e.g. WLD short: buy above avgCost).
+	// Only grid pins — never cancel the user's manual TP/SL/algo.
 	if err := s.cancelUnprofitableClosingOrders(ctx, openOrders); err != nil {
 		s.logger.WithError(err).Warn("[Recover] cancel unprofitable closing orders failed")
 	} else {
@@ -182,6 +194,7 @@ func (s *Strategy) recover(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		openOrders = s.filterStrategyGridPinOpenOrders(openOrders)
 	}
 
 	if s.getGrid() == nil {
@@ -254,6 +267,15 @@ func (s *Strategy) recover(ctx context.Context) error {
 		// case 2
 		if activeOrderID == 0 {
 			order := openOrder.GetOrder()
+			// Refuse to adopt external / non-pin orders into the active book
+			// (would pollute GridProfitStats when they fill).
+			if !s.isStrategyGridPinOpenOrder(order) {
+				s.logger.Infof(
+					"[Recover] skip open order #%d @ %s %s: not this strategy's grid pin",
+					order.OrderID, order.Side, order.Price.String(),
+				)
+				continue
+			}
 			s.logger.Infof("[Recover] found open order #%d is not in the active orderbook, adding...", order.OrderID)
 
 			if order.UpdateTime.Before(syncBefore) {
@@ -453,6 +475,10 @@ func (s *Strategy) cancelUnprofitableClosingOrders(ctx context.Context, openOrde
 	var toCancel []types.Order
 	base, avg := s.Position.GetBaseAndAverageCost()
 	for _, o := range openOrders {
+		// Never cancel non-grid / foreign-group orders (manual TP/SL/LIMIT).
+		if !s.isStrategyGridPinOpenOrder(o) {
+			continue
+		}
 		if !s.isClosingOrderSide(o.Side) {
 			continue
 		}

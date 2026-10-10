@@ -372,6 +372,30 @@ func filterGridPinOpenOrders(orders []types.Order) []types.Order {
 	return out
 }
 
+// isStrategyGridPinOpenOrder reports whether o is a LIMIT/LIMIT_MAKER pin that
+// belongs to this strategy instance. When the exchange echoes GroupID (e.g. MAX),
+// foreign groups are rejected. GroupID==0 on the order means unknown (common on
+// Binance QueryOpenOrders) — still accept pin LIMIT types.
+func (s *Strategy) isStrategyGridPinOpenOrder(o types.Order) bool {
+	if !isGridPinOpenOrder(o) {
+		return false
+	}
+	if s.OrderGroupID != 0 && o.GroupID != 0 && o.GroupID != s.OrderGroupID {
+		return false
+	}
+	return true
+}
+
+func (s *Strategy) filterStrategyGridPinOpenOrders(orders []types.Order) []types.Order {
+	out := make([]types.Order, 0, len(orders))
+	for _, o := range orders {
+		if s.isStrategyGridPinOpenOrder(o) {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
 func (s *Strategy) Initialize() error {
 	s.filledOrderIDMap = types.NewSyncOrderMap()
 	s.logger = log.WithFields(s.LogFields)
@@ -2441,11 +2465,11 @@ func (s *Strategy) clearOpenOrders(ctx context.Context, session *bbgo.ExchangeSe
 		return err
 	}
 
-	gridOrders := filterGridPinOpenOrders(openOrders)
+	gridOrders := s.filterStrategyGridPinOpenOrders(openOrders)
 	skipped := len(openOrders) - len(gridOrders)
 	if skipped > 0 {
 		s.logger.Infof(
-			"%s: clearOpenOrders: cancelling %d grid pin order(s), keeping %d non-grid order(s) (TP/SL/algo)",
+			"%s: clearOpenOrders: cancelling %d grid pin order(s), keeping %d non-grid order(s) (TP/SL/algo/foreign)",
 			s.Symbol, len(gridOrders), skipped,
 		)
 	}
@@ -2944,11 +2968,20 @@ func (s *Strategy) cancelDuplicatedPriceOpenOrders(ctx context.Context, session 
 		return err
 	}
 
-	if len(openOrders) == 0 {
+	// Only consider this strategy's grid pin LIMIT orders. Manual TP/SL/algo or
+	// foreign-group LIMIT must not be treated as grid duplicates (87c5a56dd).
+	gridOrders := s.filterStrategyGridPinOpenOrders(openOrders)
+	if skipped := len(openOrders) - len(gridOrders); skipped > 0 {
+		s.logger.Infof(
+			"%s: cancelDuplicatedPriceOpenOrders: scanning %d grid pin(s), ignoring %d non-grid order(s)",
+			s.Symbol, len(gridOrders), skipped,
+		)
+	}
+	if len(gridOrders) == 0 {
 		return nil
 	}
 
-	dupOrders := s.findDuplicatedPriceOpenOrders(openOrders)
+	dupOrders := s.findDuplicatedPriceOpenOrders(gridOrders)
 
 	if len(dupOrders) > 0 {
 		s.debugOrders("DUPLICATED ORDERS", dupOrders)
@@ -2963,7 +2996,9 @@ func (s *Strategy) findDuplicatedPriceOpenOrders(openOrders []types.Order) (dupO
 	orderBook := bbgo.NewActiveOrderBook(s.Symbol)
 	for _, openOrder := range openOrders {
 		existingOrder := orderBook.Lookup(func(o types.Order) bool {
-			return o.Price.Compare(openOrder.Price) == 0
+			// Same pin price can hold buy and sell across twin levels; duplicates
+			// are same price AND same side.
+			return o.Price.Compare(openOrder.Price) == 0 && o.Side == openOrder.Side
 		})
 
 		if existingOrder != nil {
@@ -2971,7 +3006,7 @@ func (s *Strategy) findDuplicatedPriceOpenOrders(openOrders []types.Order) (dupO
 			// compare creation time and remove the latest created order
 			// if the creation time equals, then we can just cancel one of them
 			s.debugOrders(
-				fmt.Sprintf("found duplicated order at price %s, comparing orders", openOrder.Price.String()),
+				fmt.Sprintf("found duplicated order at price %s %s, comparing orders", openOrder.Side, openOrder.Price.String()),
 				[]types.Order{*existingOrder, openOrder})
 
 			dupOrder := *existingOrder

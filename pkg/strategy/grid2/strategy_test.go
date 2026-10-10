@@ -925,6 +925,51 @@ func TestStrategy_findDuplicatedPriceOpenOrders(t *testing.T) {
 		})
 		assert.Len(t, dupOrders, 1)
 	})
+
+	t.Run("same price different side is not duplicate", func(t *testing.T) {
+		s := newTestStrategy()
+		s.grid = s.newGrid()
+
+		dupOrders := s.findDuplicatedPriceOpenOrders([]types.Order{
+			newTestOrder(number(1900.0), number(0.1), types.SideTypeBuy),
+			newTestOrder(number(1900.0), number(0.1), types.SideTypeSell),
+		})
+		assert.Empty(t, dupOrders)
+	})
+}
+
+func TestStrategy_isStrategyGridPinOpenOrder(t *testing.T) {
+	s := newTestStrategy()
+	s.OrderGroupID = 42
+
+	pin := newTestOrder(number(1900.0), number(0.1), types.SideTypeSell)
+	assert.True(t, s.isStrategyGridPinOpenOrder(pin), "GroupID=0 pin still accepted")
+
+	pin.GroupID = 42
+	assert.True(t, s.isStrategyGridPinOpenOrder(pin))
+
+	pin.GroupID = 99
+	assert.False(t, s.isStrategyGridPinOpenOrder(pin), "foreign group rejected")
+
+	tp := pin
+	tp.GroupID = 42
+	tp.Type = types.OrderTypeTakeProfitMarket
+	assert.False(t, s.isStrategyGridPinOpenOrder(tp))
+
+	filtered := s.filterStrategyGridPinOpenOrders([]types.Order{
+		newTestOrder(number(1900.0), number(0.1), types.SideTypeSell),
+		func() types.Order {
+			o := newTestOrder(number(1800.0), number(0.1), types.SideTypeBuy)
+			o.Type = types.OrderTypeStopMarket
+			return o
+		}(),
+		func() types.Order {
+			o := newTestOrder(number(1700.0), number(0.1), types.SideTypeSell)
+			o.GroupID = 99
+			return o
+		}(),
+	})
+	assert.Len(t, filtered, 1)
 }
 
 func TestStrategy_handleOrderFilled(t *testing.T) {
