@@ -115,6 +115,8 @@ func (s *Strategy) filterGridSubmitOrders(orders []types.SubmitOrder, lastPrice 
 // submitGridOrders submits all orders, optionally in batches (Hummingbot max_orders_per_batch).
 // A failed batch does not abort the rest: later pins still attempt so a far-pin -2019
 // cannot leave the nearer/farther ladder empty (DOT/AVAX/XRP style gap).
+// Before each batch, drop pins already occupied so a reverse/repair during OrderFrequency
+// sleep cannot leave two live orders on the same price.
 func (s *Strategy) submitGridOrders(ctx context.Context, orders []types.SubmitOrder) (types.OrderSlice, error) {
 	if len(orders) == 0 {
 		return nil, nil
@@ -122,6 +124,10 @@ func (s *Strategy) submitGridOrders(ctx context.Context, orders []types.SubmitOr
 
 	batchSize := s.MaxOrdersPerBatch
 	if batchSize <= 0 || batchSize >= len(orders) {
+		orders = s.dropOccupiedSubmitOrders(ctx, orders)
+		if len(orders) == 0 {
+			return nil, nil
+		}
 		return s.orderExecutor.SubmitOrders(ctx, orders...)
 	}
 
@@ -133,24 +139,58 @@ func (s *Strategy) submitGridOrders(ctx context.Context, orders []types.SubmitOr
 		if end > len(orders) {
 			end = len(orders)
 		}
-		batch := orders[i:end]
-		s.logger.Infof("submitting grid order batch %d-%d / %d", i+1, end, len(orders))
-		part, err := s.orderExecutor.SubmitOrders(ctx, batch...)
-		created = append(created, part...)
-		if err != nil {
-			if firstErr == nil {
-				firstErr = err
+		batch := s.dropOccupiedSubmitOrders(ctx, orders[i:end])
+		if len(batch) == 0 {
+			s.logger.Infof("grid order batch %d-%d / %d: all pins occupied, skip", i+1, end, len(orders))
+		} else {
+			s.logger.Infof("submitting grid order batch %d-%d / %d (%d after occupancy filter)", i+1, end, len(orders), len(batch))
+			part, err := s.orderExecutor.SubmitOrders(ctx, batch...)
+			created = append(created, part...)
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				s.logger.WithError(err).Warnf(
+					"grid batch %d-%d failed (%d created in batch); continuing remaining pins",
+					i+1, end, len(part),
+				)
 			}
-			s.logger.WithError(err).Warnf(
-				"grid batch %d-%d failed (%d created in batch); continuing remaining pins",
-				i+1, end, len(part),
-			)
 		}
 		if end < len(orders) && freq > 0 && !bbgo.IsBackTesting {
 			time.Sleep(freq)
 		}
 	}
 	return created, firstErr
+}
+
+func (s *Strategy) dropOccupiedSubmitOrders(_ context.Context, orders []types.SubmitOrder) []types.SubmitOrder {
+	if len(orders) == 0 {
+		return orders
+	}
+	// Active book only — callers may already hold writeMutex; do not QueryOpenOrders here.
+	var active []types.Order
+	if s.orderExecutor != nil {
+		active = s.orderExecutor.ActiveMakerOrders().Orders()
+	}
+	occupied := collectOccupiedPinPrices(active)
+	filtered, skipped := filterSubmitOrdersByOccupiedPins(orders, occupied)
+	if skipped > 0 {
+		s.logger.Warnf("dropOccupiedSubmitOrders: skipped %d/%d orders on occupied pins", skipped, len(orders))
+	}
+	// Also reserve prices within this batch so two submits at the same price in one
+	// slice cannot both pass (defensive; generateGridOrders should not emit dups).
+	seen := make(map[string]struct{}, len(filtered))
+	out := make([]types.SubmitOrder, 0, len(filtered))
+	for _, o := range filtered {
+		k := o.Price.String()
+		if _, ok := seen[k]; ok {
+			s.logger.Warnf("dropOccupiedSubmitOrders: drop in-batch duplicate pin %s %s", o.Side, k)
+			continue
+		}
+		seen[k] = struct{}{}
+		out = append(out, o)
+	}
+	return out
 }
 
 func (s *Strategy) applyAutoBollinger(session *bbgo.ExchangeSession) error {

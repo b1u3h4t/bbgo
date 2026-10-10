@@ -396,6 +396,90 @@ func (s *Strategy) filterStrategyGridPinOpenOrders(orders []types.Order) []types
 	return out
 }
 
+// collectOccupiedPinPrices returns pin prices that already have a live LIMIT pin.
+// A grid pin may hold at most one order (buy or sell); stacking same-price qty
+// doubles exposure (NEAR-style over-long/short).
+func collectOccupiedPinPrices(orders ...[]types.Order) map[string]struct{} {
+	out := make(map[string]struct{})
+	for _, list := range orders {
+		for _, o := range list {
+			if !isGridPinOpenOrder(o) {
+				continue
+			}
+			if o.Price.IsZero() {
+				continue
+			}
+			out[o.Price.String()] = struct{}{}
+		}
+	}
+	return out
+}
+
+func filterSubmitOrdersByOccupiedPins(
+	orders []types.SubmitOrder, occupied map[string]struct{},
+) (kept []types.SubmitOrder, skipped int) {
+	if len(orders) == 0 || len(occupied) == 0 {
+		return orders, 0
+	}
+	kept = make([]types.SubmitOrder, 0, len(orders))
+	for _, o := range orders {
+		if _, ok := occupied[o.Price.String()]; ok {
+			skipped++
+			continue
+		}
+		kept = append(kept, o)
+	}
+	return kept, skipped
+}
+
+// occupiedPinPriceSet merges the local active maker book with exchange open orders.
+func (s *Strategy) occupiedPinPriceSet(ctx context.Context) (map[string]struct{}, error) {
+	var active []types.Order
+	if s.orderExecutor != nil {
+		active = s.orderExecutor.ActiveMakerOrders().Orders()
+	}
+
+	var open []types.Order
+	if s.session != nil && s.session.Exchange != nil {
+		oo, err := s.session.Exchange.QueryOpenOrders(ctx, s.Symbol)
+		if err != nil {
+			// Still return active-book occupancy so reverse/repair can avoid local stacks.
+			return collectOccupiedPinPrices(active), err
+		}
+		open = s.filterStrategyGridPinOpenOrders(oo)
+	}
+	return collectOccupiedPinPrices(active, open), nil
+}
+
+func (s *Strategy) activeBookHasPinPrice(price fixedpoint.Value) bool {
+	if s.orderExecutor == nil || price.IsZero() {
+		return false
+	}
+	existing := s.orderExecutor.ActiveMakerOrders().Lookup(func(o types.Order) bool {
+		return isGridPinOpenOrder(o) && o.Price.Compare(price) == 0
+	})
+	return existing != nil
+}
+
+// exchangeHasPinPrice reports whether the exchange already has a grid pin at price.
+// Must not be called while holding writeMutex (network I/O).
+func (s *Strategy) exchangeHasPinPrice(ctx context.Context, price fixedpoint.Value) bool {
+	if s.session == nil || s.session.Exchange == nil || price.IsZero() {
+		return false
+	}
+	oo, err := s.session.Exchange.QueryOpenOrders(ctx, s.Symbol)
+	if err != nil {
+		s.logger.WithError(err).Warnf("exchangeHasPinPrice: query open orders failed for %s", price.String())
+		return false
+	}
+	for _, o := range s.filterStrategyGridPinOpenOrders(oo) {
+		if o.Price.Compare(price) == 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Strategy) Initialize() error {
 	s.filledOrderIDMap = types.NewSyncOrderMap()
 	s.logger = log.WithFields(s.LogFields)
@@ -1050,8 +1134,27 @@ func (s *Strategy) processFilledOrder(o types.Order) {
 	s.logger.Infof("SUBMIT GRID REVERSE ORDER: %s reduceOnly=%v", orderForm.String(), orderForm.ReduceOnly)
 
 	writeCtx := s.getWriteContext()
+	// Query exchange before taking writeMutex (avoid deadlock with order callbacks).
+	exchangeOccupied := s.exchangeHasPinPrice(writeCtx, newPrice)
+
 	s.lockWriteOrders()
 	defer s.unlockWriteOrders()
+
+	// One pin → one order. Re-check active book under lock so a prior reverse that
+	// just submitted is visible; stacking qty caused NEAR multi-unit shorts.
+	if exchangeOccupied || s.activeBookHasPinPrice(newPrice) {
+		s.logger.Warnf(
+			"skip GRID REVERSE ORDER %s @ %s qty=%s: pin already occupied (avoid stacked exposure from filled #%d)",
+			newSide, newPrice.String(), newQuantity.String(), o.OrderID,
+		)
+		if profit != nil {
+			s.consumeOrderProfitAccumulators(o.OrderID)
+		} else {
+			s.discardOrderProfitAccumulators(o.OrderID)
+		}
+		return
+	}
+
 	createdOrders, err := s.orderExecutor.SubmitOrders(writeCtx, orderForm)
 	if err != nil {
 		s.logger.WithError(err).Errorf("GRID REVERSE ORDER SUBMISSION ERROR: order: %s", orderForm.String())
@@ -1574,15 +1677,6 @@ func (s *Strategy) repairMissingReverseOrders(ctx context.Context) error {
 		return nil
 	}
 
-	openOrders, err := retry.QueryOpenOrdersUntilSuccessfulLite(ctx, s.session.Exchange, s.Symbol)
-	if err != nil {
-		return fmt.Errorf("repair missing reverse: query open orders: %w", err)
-	}
-	occupied := make(map[string]bool, len(openOrders))
-	for _, o := range openOrders {
-		occupied[o.Price.String()] = true
-	}
-
 	lastPrice, err := s.getLastTradePrice(ctx, s.session)
 	if err != nil || lastPrice.IsZero() {
 		return err
@@ -1594,6 +1688,28 @@ func (s *Strategy) repairMissingReverseOrders(ctx context.Context) error {
 	gridQty := s.QuantityOrAmount.Quantity
 	if gridQty.IsZero() {
 		return nil
+	}
+
+	writeCtx := s.getWriteContext(ctx)
+	// Exchange query must happen before writeMutex (network I/O / callback deadlock).
+	occupied, occErr := s.occupiedPinPriceSet(writeCtx)
+	if occErr != nil {
+		s.logger.WithError(occErr).Warn("repairMissingReverseOrders: occupancy query partial; using active book")
+	}
+
+	// Hold the write lock across active-book refresh + submit so a concurrent
+	// processFilledOrder reverse cannot race into the same pin (TOCTOU).
+	s.lockWriteOrders()
+	defer s.unlockWriteOrders()
+
+	if s.orderExecutor != nil {
+		for k := range collectOccupiedPinPrices(s.orderExecutor.ActiveMakerOrders().Orders()) {
+			occupied[k] = struct{}{}
+		}
+	}
+	occupiedBool := make(map[string]bool, len(occupied))
+	for k := range occupied {
+		occupiedBool[k] = true
 	}
 
 	var toSubmit []types.SubmitOrder
@@ -1609,7 +1725,7 @@ func (s *Strategy) repairMissingReverseOrders(ctx context.Context) error {
 	for i := 1; i < len(pins); i++ {
 		sellPrice := fixedpoint.Value(pins[i])
 		buyPrice := fixedpoint.Value(pins[i-1])
-		if occupied[sellPrice.String()] || occupied[buyPrice.String()] {
+		if occupiedBool[sellPrice.String()] || occupiedBool[buyPrice.String()] {
 			continue // twin already has a live order
 		}
 		n := pinNeed{sellPrice: sellPrice, buyPrice: buyPrice}
@@ -1627,6 +1743,9 @@ func (s *Strategy) repairMissingReverseOrders(ctx context.Context) error {
 		if !s.shouldPlaceGridOrder(side, price) {
 			return
 		}
+		if occupiedBool[price.String()] {
+			return
+		}
 		o := s.newGridLimitOrder(side, price, qty)
 		o.ReduceOnly = reduceOnly
 		if reduceOnly {
@@ -1636,6 +1755,8 @@ func (s *Strategy) repairMissingReverseOrders(ctx context.Context) error {
 			}
 		}
 		toSubmit = append(toSubmit, o)
+		// Reserve so later pins in this same repair pass cannot stack.
+		occupiedBool[price.String()] = true
 	}
 
 	switch {
@@ -1695,9 +1816,6 @@ func (s *Strategy) repairMissingReverseOrders(ctx context.Context) error {
 	}
 
 	s.logger.Infof("repairMissingReverseOrders: submitting %d orders (base=%s last=%s)", len(toSubmit), base.String(), lastPrice.String())
-	writeCtx := s.getWriteContext(ctx)
-	s.lockWriteOrders()
-	defer s.unlockWriteOrders()
 	created, err := s.submitGridOrders(writeCtx, toSubmit)
 	if err != nil {
 		return fmt.Errorf("repair missing reverse submit: %w", err)
@@ -2540,7 +2658,7 @@ func (s *Strategy) setGrid(grid *grid2types.Grid) {
 }
 
 // excludeOccupiedPinOrders drops submit orders whose price already has an open
-// order on the exchange, so a mistaken openGrid cannot stack duplicate pins.
+// order on the exchange or in the local active book, so openGrid cannot stack pins.
 func (s *Strategy) excludeOccupiedPinOrders(
 	ctx context.Context, session *bbgo.ExchangeSession, orders []types.SubmitOrder,
 ) ([]types.SubmitOrder, error) {
@@ -2548,28 +2666,26 @@ func (s *Strategy) excludeOccupiedPinOrders(
 		return orders, nil
 	}
 
+	var active []types.Order
+	if s.orderExecutor != nil {
+		active = s.orderExecutor.ActiveMakerOrders().Orders()
+	}
+
 	openOrders, err := session.Exchange.QueryOpenOrders(ctx, s.Symbol)
 	if err != nil {
-		return orders, err
-	}
-	if len(openOrders) == 0 {
-		return orders, nil
-	}
-
-	occupied := make(map[string]struct{}, len(openOrders))
-	for _, o := range openOrders {
-		occupied[o.Price.String()] = struct{}{}
-	}
-
-	filtered := make([]types.SubmitOrder, 0, len(orders))
-	skipped := 0
-	for _, o := range orders {
-		if _, ok := occupied[o.Price.String()]; ok {
-			skipped++
-			continue
+		occupied := collectOccupiedPinPrices(active)
+		filtered, skipped := filterSubmitOrdersByOccupiedPins(orders, occupied)
+		if skipped > 0 {
+			s.logger.Warnf(
+				"skipping %d/%d openGrid submit orders that collide with active-book pins (exchange query failed)",
+				skipped, len(orders),
+			)
 		}
-		filtered = append(filtered, o)
+		return filtered, err
 	}
+
+	occupied := collectOccupiedPinPrices(active, s.filterStrategyGridPinOpenOrders(openOrders))
+	filtered, skipped := filterSubmitOrdersByOccupiedPins(orders, occupied)
 	if skipped > 0 {
 		s.logger.Warnf(
 			"skipping %d/%d openGrid submit orders that collide with existing open order prices",

@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
 
+	"github.com/c9s/bbgo/pkg/bbgo"
 	"github.com/c9s/bbgo/pkg/core"
 	"github.com/c9s/bbgo/pkg/fixedpoint"
 	"github.com/c9s/bbgo/pkg/strategy/grid2/grid2types"
@@ -1019,6 +1020,7 @@ func TestStrategy_handleOrderFilled(t *testing.T) {
 		}
 
 		orderExecutor := gridmocks.NewMockOrderExecutor(mockCtrl)
+		orderExecutor.EXPECT().ActiveMakerOrders().Return(bbgo.NewActiveOrderBook("BTCUSDT")).AnyTimes()
 		orderExecutor.EXPECT().SubmitOrders(ctx, gomock.Any()).DoAndReturn(func(
 			ctx context.Context, order types.SubmitOrder,
 		) (types.OrderSlice, error) {
@@ -1089,6 +1091,7 @@ func TestStrategy_handleOrderFilled(t *testing.T) {
 		}
 
 		orderExecutor := gridmocks.NewMockOrderExecutor(mockCtrl)
+		orderExecutor.EXPECT().ActiveMakerOrders().Return(bbgo.NewActiveOrderBook("BTCUSDT")).AnyTimes()
 		orderExecutor.EXPECT().SubmitOrders(ctx, gomock.Any()).DoAndReturn(func(
 			ctx context.Context, order types.SubmitOrder,
 		) (types.OrderSlice, error) {
@@ -1168,6 +1171,7 @@ func TestStrategy_handleOrderFilled(t *testing.T) {
 		s.orderQueryService = mockService
 
 		orderExecutor := gridmocks.NewMockOrderExecutor(mockCtrl)
+		orderExecutor.EXPECT().ActiveMakerOrders().Return(bbgo.NewActiveOrderBook("BTCUSDT")).AnyTimes()
 
 		expectedSubmitOrder := types.SubmitOrder{
 			Symbol:      "BTCUSDT",
@@ -1297,6 +1301,7 @@ func TestStrategy_handleOrderFilled(t *testing.T) {
 		}
 
 		orderExecutor := gridmocks.NewMockOrderExecutor(mockCtrl)
+		orderExecutor.EXPECT().ActiveMakerOrders().Return(bbgo.NewActiveOrderBook("BTCUSDT")).AnyTimes()
 		orderExecutor.EXPECT().SubmitOrders(ctx, gomock.Any()).DoAndReturn(func(
 			ctx context.Context, order types.SubmitOrder,
 		) (types.OrderSlice, error) {
