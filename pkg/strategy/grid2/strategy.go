@@ -285,6 +285,12 @@ type Strategy struct {
 	// quantumZoneState caches the last quantum allocation zone.
 	quantumZoneState QuantumZone
 
+	// pinSideLastFill blocks REARM/ORPHAN: same side+price must not be re-placed
+	// until the twin opposite fill rearms it (or TTL expires for repair/openGrid).
+	pinSideMu       sync.Mutex
+	pinSideLastFill map[string]time.Time // key: "BUY|price" / "SELL|price"
+	pinSideRearmTTL time.Duration        // repair/openGrid cooldown; 0 → default 3m
+
 	// this ensures that bbgo.Sync to lock the object
 	sync.Mutex
 }
@@ -478,6 +484,73 @@ func (s *Strategy) exchangeHasPinPrice(ctx context.Context, price fixedpoint.Val
 		}
 	}
 	return false
+}
+
+func pinSideKey(side types.SideType, price fixedpoint.Value) string {
+	return string(side) + "|" + price.String()
+}
+
+func (s *Strategy) pinRearmTTL() time.Duration {
+	if s.pinSideRearmTTL > 0 {
+		return s.pinSideRearmTTL
+	}
+	return 3 * time.Minute
+}
+
+func (s *Strategy) notePinSideFilled(side types.SideType, price fixedpoint.Value, when time.Time) {
+	if price.IsZero() || when.IsZero() {
+		return
+	}
+	s.pinSideMu.Lock()
+	defer s.pinSideMu.Unlock()
+	if s.pinSideLastFill == nil {
+		s.pinSideLastFill = make(map[string]time.Time)
+	}
+	s.pinSideLastFill[pinSideKey(side, price)] = when
+}
+
+func (s *Strategy) clearPinSideFilled(side types.SideType, price fixedpoint.Value) {
+	s.pinSideMu.Lock()
+	defer s.pinSideMu.Unlock()
+	if s.pinSideLastFill == nil {
+		return
+	}
+	delete(s.pinSideLastFill, pinSideKey(side, price))
+}
+
+// isPinSideCooling reports whether side@price was filled recently (repair/openGrid guard).
+func (s *Strategy) isPinSideCooling(side types.SideType, price fixedpoint.Value) bool {
+	s.pinSideMu.Lock()
+	defer s.pinSideMu.Unlock()
+	if s.pinSideLastFill == nil {
+		return false
+	}
+	t, ok := s.pinSideLastFill[pinSideKey(side, price)]
+	if !ok {
+		return false
+	}
+	return time.Since(t) < s.pinRearmTTL()
+}
+
+// shouldSkipReverseAfterPinConsumed skips reverse when the destination pin already
+// completed a same-side fill after this source order was created (duplicate sibling
+// fill trying to REARM an already-consumed pin).
+func (s *Strategy) shouldSkipReverseAfterPinConsumed(fill types.Order, newSide types.SideType, newPrice fixedpoint.Value) bool {
+	s.pinSideMu.Lock()
+	defer s.pinSideMu.Unlock()
+	if s.pinSideLastFill == nil {
+		return false
+	}
+	t, ok := s.pinSideLastFill[pinSideKey(newSide, newPrice)]
+	if !ok {
+		return false
+	}
+	created := fill.CreationTime.Time()
+	if created.IsZero() {
+		return false
+	}
+	// Destination pin filled at/after this order existed ⇒ cycle already done.
+	return !t.Before(created)
 }
 
 func (s *Strategy) Initialize() error {
@@ -1140,11 +1213,12 @@ func (s *Strategy) processFilledOrder(o types.Order) {
 	s.lockWriteOrders()
 	defer s.unlockWriteOrders()
 
-	// One pin → one order. Re-check active book under lock so a prior reverse that
-	// just submitted is visible; stacking qty caused NEAR multi-unit shorts.
-	if exchangeOccupied || s.activeBookHasPinPrice(newPrice) {
+	// One pin → one order. Also reject REARM when destination pin already completed
+	// a same-side fill after this source order was created (duplicate sibling fill).
+	if exchangeOccupied || s.activeBookHasPinPrice(newPrice) ||
+		s.shouldSkipReverseAfterPinConsumed(o, newSide, newPrice) {
 		s.logger.Warnf(
-			"skip GRID REVERSE ORDER %s @ %s qty=%s: pin already occupied (avoid stacked exposure from filled #%d)",
+			"skip GRID REVERSE ORDER %s @ %s qty=%s: pin occupied or already consumed (avoid stacked exposure from filled #%d)",
 			newSide, newPrice.String(), newQuantity.String(), o.OrderID,
 		)
 		if profit != nil {
@@ -1152,8 +1226,14 @@ func (s *Strategy) processFilledOrder(o types.Order) {
 		} else {
 			s.discardOrderProfitAccumulators(o.OrderID)
 		}
+		// Still record the filled pin so repair/openGrid cools down.
+		s.notePinSideFilled(o.Side, o.Price, o.UpdateTime.Time())
 		return
 	}
+
+	// Twin progress: block re-placing the pin we filled; rearm reverse destination.
+	s.notePinSideFilled(o.Side, o.Price, o.UpdateTime.Time())
+	s.clearPinSideFilled(newSide, newPrice)
 
 	createdOrders, err := s.orderExecutor.SubmitOrders(writeCtx, orderForm)
 	if err != nil {
@@ -1744,6 +1824,14 @@ func (s *Strategy) repairMissingReverseOrders(ctx context.Context) error {
 			return
 		}
 		if occupiedBool[price.String()] {
+			return
+		}
+		// Avoid ORPHAN/REARM: do not re-place same side@price shortly after it filled.
+		if s.isPinSideCooling(side, price) {
+			s.logger.Infof(
+				"repairMissingReverseOrders: skip %s @ %s — pin side still cooling after recent fill",
+				side, price.String(),
+			)
 			return
 		}
 		o := s.newGridLimitOrder(side, price, qty)

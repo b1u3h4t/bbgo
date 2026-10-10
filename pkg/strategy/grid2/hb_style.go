@@ -181,14 +181,22 @@ func (s *Strategy) dropOccupiedSubmitOrders(_ context.Context, orders []types.Su
 	// slice cannot both pass (defensive; generateGridOrders should not emit dups).
 	seen := make(map[string]struct{}, len(filtered))
 	out := make([]types.SubmitOrder, 0, len(filtered))
+	cooling := 0
 	for _, o := range filtered {
 		k := o.Price.String()
 		if _, ok := seen[k]; ok {
 			s.logger.Warnf("dropOccupiedSubmitOrders: drop in-batch duplicate pin %s %s", o.Side, k)
 			continue
 		}
+		if s.isPinSideCooling(o.Side, o.Price) {
+			cooling++
+			continue
+		}
 		seen[k] = struct{}{}
 		out = append(out, o)
+	}
+	if cooling > 0 {
+		s.logger.Warnf("dropOccupiedSubmitOrders: skipped %d orders on cooling pin sides (REARM guard)", cooling)
 	}
 	return out
 }
