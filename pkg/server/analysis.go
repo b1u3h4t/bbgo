@@ -240,6 +240,7 @@ func (s *Server) analysisMargin(c *gin.Context) {
 
 	wallet, avail, upnl, marginBal := 0.0, 0.0, 0.0, 0.0
 	posIM, orderIM, totalIM, maintIM := 0.0, 0.0, 0.0, 0.0
+	availSource := "none"
 
 	if account != nil {
 		if fi := account.FuturesInfo; fi != nil {
@@ -251,15 +252,29 @@ func (s *Server) analysisMargin(c *gin.Context) {
 			totalIM = fi.TotalInitialMargin.Float64()
 			maintIM = fi.TotalMaintMargin.Float64()
 			avail = fi.AvailableBalance.Float64()
+			availSource = "exchange"
 		}
-		if avail == 0 {
-			if bal, ok := account.Balance("USDT"); ok {
-				avail = bal.Available.Float64()
-			}
-		}
+		// Do NOT fall back to account.Balance("USDT") when avail==0.
+		// On futures, AvailableBalance=0 is valid (fully utilized). The old
+		// fallback used wallet Balance and inflated "available" to tens of k.
 		if marginBal == 0 {
 			marginBal = wallet + upnl
 		}
+	}
+
+	// Cross USDT-M: free ≈ max(0, marginBalance - totalInitialMargin).
+	freeEst := marginBal - totalIM
+	if freeEst < 0 {
+		freeEst = 0
+	}
+	// If exchange available looks absurd vs margin math (e.g. tens of k free
+	// while IM already consumes nearly all margin balance), prefer derived.
+	if marginBal > 0 && totalIM >= marginBal*0.9 && avail > freeEst+100 {
+		avail = freeEst
+		availSource = "derived_margin_minus_im"
+	}
+	if avail < 0 {
+		avail = 0
 	}
 
 	positions := collectPositions(ctx, session)
@@ -315,6 +330,8 @@ func (s *Server) analysisMargin(c *gin.Context) {
 		"account": gin.H{
 			"walletBalance":           roundFloat(wallet, 2),
 			"availableBalance":        roundFloat(avail, 2),
+			"availableBalanceSource":  availSource,
+			"freeMarginEst":           roundFloat(freeEst, 2),
 			"marginBalance":           roundFloat(marginBal, 2),
 			"unrealizedPnL":           roundFloat(upnl, 2),
 			"totalInitialMargin":      roundFloat(totalIM, 2),
@@ -1201,14 +1218,28 @@ func (s *Server) analysisAvgDown(c *gin.Context) {
 	if err != nil {
 		account = session.GetAccount()
 	}
-	wallet, avail, totalIM, upnl := 0.0, 0.0, 0.0, 0.0
+	wallet, avail, totalIM, upnl, marginBal := 0.0, 0.0, 0.0, 0.0, 0.0
 	if account != nil {
 		if fi := account.FuturesInfo; fi != nil {
 			wallet = fi.TotalWalletBalance.Float64()
 			avail = fi.AvailableBalance.Float64()
 			totalIM = fi.TotalInitialMargin.Float64()
 			upnl = fi.TotalUnrealizedProfit.Float64()
+			marginBal = fi.TotalMarginBalance.Float64()
 		}
+	}
+	if marginBal == 0 {
+		marginBal = wallet + upnl
+	}
+	freeEst := marginBal - totalIM
+	if freeEst < 0 {
+		freeEst = 0
+	}
+	if marginBal > 0 && totalIM >= marginBal*0.9 && avail > freeEst+100 {
+		avail = freeEst
+	}
+	if avail < 0 {
+		avail = 0
 	}
 
 	targetUtil, _ := strconv.ParseFloat(c.DefaultQuery("targetUtil", "0.65"), 64)

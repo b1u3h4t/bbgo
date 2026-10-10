@@ -157,23 +157,28 @@ func (e *Exchange) QueryFuturesAccount(ctx context.Context) (*types.Account, err
 	var balances = map[string]types.Balance{}
 	for _, b := range accountBalances {
 		// The futures account balance is much different from the spot balance:
-		// - Balance is the actual balance of the asset
-		// - AvailableBalance is the available margin balance (can be used as notional)
-		// - CrossWalletBalance (this will be meaningful when using isolated margin)
+		// - Balance is the actual wallet balance of the asset
+		// - AvailableBalance is the available margin for new orders (not withdrawable cash)
+		// - CrossWalletBalance is meaningful with isolated margin
+		//
+		// IMPORTANT: Balance.Available must be AvailableBalance, not Balance.
+		// Using Balance here made analysis/order-sizing treat ~wallet as "free"
+		// when FuturesInfo.AvailableBalance was 0 (fully utilized).
+		locked := b.Balance.Sub(b.AvailableBalance)
+		if locked.Sign() < 0 {
+			locked = fixedpoint.Zero
+		}
 		bal := types.Balance{
 			Currency:          b.Asset,
-			Available:         b.Balance,
-			Locked:            fixedpoint.Zero, // futures do not have locked balance, the locked balance is calculated by (Balance - AvailableBalance)
+			Available:         b.AvailableBalance,
+			Locked:            locked,
 			MaxWithdrawAmount: &b.MaxWithdrawAmount,
 		}
 
 		if b.Asset == "USDT" {
-			// AvailableBalance here is the available margin, like how much quantity/notional you can SHORT/LONG, not what you can withdraw
+			// AvailableBalance is the available margin for SHORT/LONG, not withdrawable amount.
 			bal.LongAvailableCredit = b.AvailableBalance.Add(b.CrossUnPnl)
 			bal.ShortAvailableCredit = b.AvailableBalance.Add(b.CrossUnPnl)
-
-			// AvailableBalance is the available margin balance, it could be re-calculated by the current formula.
-			// bal.Locked = b.Balance.Sub(b.AvailableBalance.Sub(b.CrossUnPnl))
 		}
 
 		balances[b.Asset] = bal

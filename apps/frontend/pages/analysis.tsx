@@ -1113,6 +1113,7 @@ export default function AnalysisPage() {
               {[
                 ['Wallet', acc.walletBalance],
                 ['Available', acc.availableBalance],
+                ['FreeEst', acc.freeMarginEst],
                 ['Margin Bal', acc.marginBalance],
                 ['uPnL', acc.unrealizedPnL],
                 ['Total IM', acc.totalInitialMargin],
@@ -1132,6 +1133,11 @@ export default function AnalysisPage() {
                           color:
                             k === 'uPnL' || k === 'IM Util %'
                               ? pnlColor(Number(v))
+                              : k === 'Available' &&
+                                Number(acc.availableBalance) > 1000 &&
+                                Number(acc.totalInitialMargin) >=
+                                  Number(acc.marginBalance) * 0.9
+                              ? 'warning.main'
                               : undefined,
                         }}
                       >
@@ -1147,6 +1153,11 @@ export default function AnalysisPage() {
                   目标利用率 {acc.targetUtilPct}%（口径: totalInitialMargin /
                   wallet）。(wallet−avail)/wallet ={' '}
                   {acc.utilWalletMinusAvailPct}%
+                  {acc.availableBalanceSource
+                    ? ` · Available 来源: ${acc.availableBalanceSource}`
+                    : ''}
+                  。开仓看 Available / FreeEst（≈ MarginBal − Total IM），不要把
+                  Wallet 当可用保证金。
                 </Typography>
                 <LinearProgress
                   variant="determinate"
