@@ -26,7 +26,7 @@ jobs:
     runs-on: [self-hosted, bbgo]
     timeout-minutes: 45
     # Runner host may export GOTOOLCHAIN=local; that blocks go from fetching
-    # a newer toolchain when go.mod requires >= 1.27.1.
+    # a newer toolchain when go.mod requires a patch newer than setup-go.
     env:
       GOTOOLCHAIN: auto
     steps:
@@ -42,7 +42,8 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version: "1.27.1"
+          # Must match go.mod (upstream bumped to 1.27.2).
+          go-version: "1.27.2"
 
       # Self-hosted runners run as github-runner (no sudo). Do not apt-install Node.
       # Do not set cache: yarn here — setup-node requires yarn on PATH before install.
@@ -60,11 +61,15 @@ jobs:
 
       - name: Build SPA + deploy binary to Tokyo
         env:
+          # Re-assert: self-hosted runner .env may still inject GOTOOLCHAIN=local
+          # into the step even when the job sets auto.
+          GOTOOLCHAIN: auto
           BBGO_SSH_HOST: bbgo
           BBGO_HOME: /home/admin/bbgo
           GITHUB_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
+          go version
           chmod +x scripts/deploy-prod.sh scripts/deploy-prod-remote.sh
           ssh -o BatchMode=yes -o ConnectTimeout=10 bbgo 'echo ssh_ok; systemctl is-active bbgo'
           scripts/deploy-prod.sh
