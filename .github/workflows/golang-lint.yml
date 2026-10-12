@@ -14,13 +14,15 @@ jobs:
     name: lint
     # Public repo: PRs on GitHub-hosted; push on dedicated bbgo runner
     runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || fromJSON('["self-hosted","bbgo"]') }}
+    env:
+      GOTOOLCHAIN: auto
     steps:
       - uses: actions/checkout@v7
       - name: Per-run tmpdir (scoped; safe on shared runners)
         run: bash scripts/ci-bbgo-tmpdir.sh setup
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.27'
+          go-version: '1.27.2'
           cache: ${{ github.event_name == 'pull_request' }}
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
