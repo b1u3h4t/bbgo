@@ -2145,6 +2145,16 @@ func (s *Strategy) openGrid(ctx context.Context, session *bbgo.ExchangeSession) 
 
 	grid := s.newGrid()
 	s.grid = grid
+	// Any failure before orders are live must clear s.grid; otherwise the
+	// "if s.grid != nil { return nil }" guard blocks every later reopen and
+	// leaves a naked exchange position after deploy cancel+failed open.
+	abortOpen := func(err error) error {
+		s.grid = nil
+		if err != nil {
+			s.EmitGridError(err)
+		}
+		return err
+	}
 	s.logger.Info("OPENING GRID: ", s.grid.String())
 
 	if s.BaseGridNum > 0 {
@@ -2170,39 +2180,50 @@ func (s *Strategy) openGrid(ctx context.Context, session *bbgo.ExchangeSession) 
 	// if the buy order is filled, then we will submit another sell order at the higher grid.
 	if s.isCoinM() {
 		if err2 := s.validateCoinM(); err2 != nil {
-			s.EmitGridError(err2)
-			return err2
+			return abortOpen(err2)
 		}
 		// Prefer BaseInvestment as margin budget when configured.
 		marginBudget := totalBase
 		if !s.BaseInvestment.IsZero() {
 			if s.BaseInvestment.Compare(totalBase) > 0 {
-				err2 := fmt.Errorf("coin-m baseInvestment %f > available base %f %s",
-					s.BaseInvestment.Float64(), totalBase.Float64(), s.Market.BaseCurrency)
-				s.EmitGridError(err2)
-				return err2
+				return abortOpen(fmt.Errorf("coin-m baseInvestment %f > available base %f %s",
+					s.BaseInvestment.Float64(), totalBase.Float64(), s.Market.BaseCurrency))
 			}
 			marginBudget = s.BaseInvestment
 		}
 		if _, err2 := s.checkRequiredInvestmentByQuantityCoinM(
 			marginBudget, s.QuantityOrAmount.Quantity, lastPrice, s.grid.Pins,
 		); err2 != nil {
-			s.EmitGridError(err2)
-			return err2
+			return abortOpen(err2)
 		}
 		totalBase = marginBudget
 	} else if s.QuantityOrAmount.IsSet() {
 		if quantity := s.QuantityOrAmount.Quantity; !quantity.IsZero() {
 			if _, _, err2 := s.checkRequiredInvestmentByQuantity(totalBase, totalQuote, s.QuantityOrAmount.Quantity, lastPrice, s.grid.Pins); err2 != nil {
-				s.logger.WithError(err2).Errorf("grid investment check failed")
-				s.EmitGridError(err2)
-				return err2
+				// USDT-M: existing position already locks margin; generateUSDTMGridOrders
+				// can still place a partial book within available. Hard-failing here
+				// after deploy cancel left DOGE naked with 0 orders.
+				if s.isUSDTMFutures() {
+					s.logger.WithError(err2).Warnf(
+						"grid investment check failed; continuing with available-margin pin placement (avail quote=%s)",
+						totalQuote.String(),
+					)
+				} else {
+					s.logger.WithError(err2).Errorf("grid investment check failed")
+					return abortOpen(err2)
+				}
 			}
 		}
 		if amount := s.QuantityOrAmount.Amount; !amount.IsZero() {
 			if _, _, err2 := s.checkRequiredInvestmentByAmount(totalBase, totalQuote, amount, lastPrice, s.grid.Pins); err2 != nil {
-				s.EmitGridError(err2)
-				return err2
+				if s.isUSDTMFutures() {
+					s.logger.WithError(err2).Warnf(
+						"grid amount investment check failed; continuing with available-margin pin placement (avail quote=%s)",
+						totalQuote.String(),
+					)
+				} else {
+					return abortOpen(err2)
+				}
 			}
 		}
 	} else {
@@ -2210,8 +2231,7 @@ func (s *Strategy) openGrid(ctx context.Context, session *bbgo.ExchangeSession) 
 		if !s.BaseInvestment.IsZero() {
 			quantity, err2 := s.calculateBaseQuoteInvestmentQuantity(s.QuoteInvestment, s.BaseInvestment, lastPrice, s.grid.Pins)
 			if err2 != nil {
-				s.EmitGridError(err2)
-				return err2
+				return abortOpen(err2)
 			}
 
 			s.QuantityOrAmount.Quantity = quantity
@@ -2219,8 +2239,7 @@ func (s *Strategy) openGrid(ctx context.Context, session *bbgo.ExchangeSession) 
 		} else if !s.QuoteInvestment.IsZero() {
 			quantity, err2 := s.calculateQuoteInvestmentQuantity(s.QuoteInvestment, lastPrice, s.grid.Pins)
 			if err2 != nil {
-				s.EmitGridError(err2)
-				return err2
+				return abortOpen(err2)
 			}
 
 			s.QuantityOrAmount.Quantity = quantity
@@ -2231,14 +2250,10 @@ func (s *Strategy) openGrid(ctx context.Context, session *bbgo.ExchangeSession) 
 	// investment configuration is valid with the current balances
 	if !s.isCoinM() && !s.BaseInvestment.IsZero() && !s.QuoteInvestment.IsZero() {
 		if s.BaseInvestment.Compare(totalBase) > 0 {
-			err2 := fmt.Errorf("baseInvestment setup %f is greater than the total base balance %f", s.BaseInvestment.Float64(), totalBase.Float64())
-			s.EmitGridError(err2)
-			return err2
+			return abortOpen(fmt.Errorf("baseInvestment setup %f is greater than the total base balance %f", s.BaseInvestment.Float64(), totalBase.Float64()))
 		}
 		if s.QuoteInvestment.Compare(totalQuote) > 0 {
-			err2 := fmt.Errorf("quoteInvestment setup %f is greater than the total quote balance %f", s.QuoteInvestment.Float64(), totalQuote.Float64())
-			s.EmitGridError(err2)
-			return err2
+			return abortOpen(fmt.Errorf("quoteInvestment setup %f is greater than the total quote balance %f", s.QuoteInvestment.Float64(), totalQuote.Float64()))
 		}
 	}
 
@@ -2254,14 +2269,19 @@ func (s *Strategy) openGrid(ctx context.Context, session *bbgo.ExchangeSession) 
 
 	if err != nil {
 		s.logger.WithError(err).Errorf("generateGridOrders failed")
-		s.EmitGridError(err)
-		return err
+		return abortOpen(err)
+	}
+	if len(submitOrders) == 0 {
+		return abortOpen(fmt.Errorf("generateGridOrders produced 0 orders (avail quote=%s); not marking grid open", totalQuote.String()))
 	}
 
 	if s.QuantumAllocator != nil {
 		submitOrders = s.filterQuantumSideBias(submitOrders, lastPrice)
 	}
 	submitOrders = s.filterGridSubmitOrders(submitOrders, lastPrice)
+	if len(submitOrders) == 0 {
+		return abortOpen(fmt.Errorf("no grid orders left after filters (avail quote=%s); not marking grid open", totalQuote.String()))
+	}
 	if !s.TakeProfitRatio.IsZero() {
 		// Prefer live mid when inside the band; otherwise use grid midpoint so a
 		// below-band open does not immediately trip a small takeProfitRatio.
