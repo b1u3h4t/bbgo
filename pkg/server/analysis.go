@@ -29,6 +29,7 @@ func (s *Server) registerAnalysisRoutes(r *gin.Engine) {
 	r.GET("/api/analysis/pnl/today", s.analysisTodayPnL)
 	r.GET("/api/analysis/pnl", s.analysisTodayPnL) // ?period=today|7d|30d|90d (+ daily series)
 	r.GET("/api/analysis/klines", s.analysisKlines)
+	r.GET("/api/analysis/cvd", s.analysisCVD)
 	r.GET("/api/analysis/avg-down", s.analysisAvgDown)
 	s.startAnalysisKlineSync()
 }
@@ -806,9 +807,11 @@ func (s *Server) analysisGridCalc(c *gin.Context) {
 	chartInterval, chartLimit := parseChartInterval(c.DefaultQuery("interval", "1h"), c.DefaultQuery("limit", ""))
 	klinesPayload := serializeKlines(nil)
 	klineSource := "exchange"
+	var cvdSummary cvdAnalysisResp
 	if klChart, src, err := s.queryAnalysisKLines(ctx, session, symbol, chartInterval, chartLimit); err == nil {
 		klinesPayload = serializeKlines(klChart)
 		klineSource = src
+		cvdSummary = buildCVDAnalysis(klChart, false)
 	}
 
 	allPos := collectPositions(ctx, session)
@@ -851,24 +854,14 @@ func (s *Server) analysisGridCalc(c *gin.Context) {
 		"klineSource":         klineSource,
 		"klines":              klinesPayload,
 		"klines1h":            klinesPayload, // backward-compatible alias
+		"cvd":                 cvdSummary,
 		"positions":           allPos,
 		"position":            symbolPos,
 	})
 }
 
 func serializeKlines(klines []types.KLine) []gin.H {
-	out := make([]gin.H, 0, len(klines))
-	for _, k := range klines {
-		out = append(out, gin.H{
-			"t": k.StartTime.Time().UTC().Format(time.RFC3339),
-			"o": roundFloat(k.Open.Float64(), 8),
-			"h": roundFloat(k.High.Float64(), 8),
-			"l": roundFloat(k.Low.Float64(), 8),
-			"c": roundFloat(k.Close.Float64(), 8),
-			"v": roundFloat(k.Volume.Float64(), 8),
-		})
-	}
-	return out
+	return serializeKlinesWithTaker(klines)
 }
 
 // allowed chart intervals for Analysis overlays (incl. Binance 8h).
@@ -1016,6 +1009,7 @@ func (s *Server) analysisKlines(c *gin.Context) {
 		"quantity":    roundFloat(qty, 8),
 		"klineSource": klineSource,
 		"klines":      serializeKlines(klines),
+		"cvd":         buildCVDAnalysis(klines, false),
 		"pins":        pins,
 		"pinLevels":   buildPinLevels(pins, last, qty),
 		"band": gin.H{

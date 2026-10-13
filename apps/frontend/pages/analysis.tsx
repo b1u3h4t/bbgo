@@ -334,6 +334,7 @@ export default function AnalysisPage() {
     klines: any[];
     klineSource?: string;
     interval: string;
+    cvd?: any;
   } | null>(null);
   const [prospecChartIv, setProspecChartIv] = useState('1d');
   const [avgSymbol, setAvgSymbol] = useState('DOGEUSDT');
@@ -430,6 +431,7 @@ export default function AnalysisPage() {
         klines: kl?.klines || [],
         klineSource: kl?.klineSource,
         interval: prospecChartIv || '1d',
+        cvd: kl?.cvd,
       });
     } catch (e: any) {
       setError(e?.response?.data?.error || e?.message || 'failed to load prospec');
@@ -453,6 +455,7 @@ export default function AnalysisPage() {
           klines: kl?.klines || [],
           klineSource: kl?.klineSource,
           interval: v,
+          cvd: kl?.cvd,
         });
       } catch {
         /* keep previous chart */
@@ -515,6 +518,7 @@ export default function AnalysisPage() {
                 last: data.last ?? prev.last,
                 klines: data.klines || [],
                 klines1h: data.klines || [],
+                cvd: data.cvd,
                 // prefer calc pins; recolor with latest last
                 pinLevels: buildOrderBookPinLevels(
                   prev.pins || [],
@@ -939,6 +943,7 @@ export default function AnalysisPage() {
                   upper={marketChart.band?.upper}
                   interval={marketChart.interval || marketInterval}
                   klineSource={marketChart.klineSource}
+                  cvd={marketChart.cvd}
                   position={
                     marketChart.position ||
                     findPosition(margin?.positions, marketChart.symbol)
@@ -1297,6 +1302,7 @@ export default function AnalysisPage() {
                       upper={grid.band?.upper}
                       interval={grid.interval || gridInterval}
                       klineSource={grid.klineSource}
+                      cvd={grid.cvd}
                       position={
                         grid.position ||
                         findPosition(
@@ -1538,6 +1544,7 @@ export default function AnalysisPage() {
                   upper={pnlChart.band?.upper}
                   interval={pnlChart.interval || pnlInterval}
                   klineSource={pnlChart.klineSource}
+                  cvd={pnlChart.cvd}
                   position={
                     pnlChart.position ||
                     findPosition(
@@ -2426,6 +2433,7 @@ export default function AnalysisPage() {
                       klines={prospecChart.klines}
                       interval={prospecChart.interval || prospecChartIv}
                       klineSource={prospecChart.klineSource}
+                      cvd={prospecChart.cvd}
                       height={isMobile ? 280 : 380}
                       intervalOptions={PROSPEC_INTERVALS}
                       onIntervalChange={changeProspecChartIv}

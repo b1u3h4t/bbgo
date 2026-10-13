@@ -255,6 +255,23 @@ export async function queryAnalysisKlines(params: {
   return response.data;
 }
 
+export async function queryAnalysisCVD(params: {
+  symbol: string;
+  interval?: string;
+  limit?: number;
+  session?: string;
+}) {
+  const response = await axios.get(baseURL + '/api/analysis/cvd', {
+    params: {
+      session: params.session || 'binance',
+      symbol: params.symbol,
+      interval: params.interval || '1h',
+      limit: params.limit || 72,
+    },
+  });
+  return response.data;
+}
+
 export async function queryAnalysisAvgDown(params: {
   session?: string;
   symbol?: string;

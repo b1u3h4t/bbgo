@@ -49,6 +49,8 @@ export type KlineBar = {
   l: number;
   c: number;
   v?: number;
+  /** taker buy base volume (Binance kline) */
+  tb?: number;
 };
 export { buildOrderBookPinLevels };
 
@@ -61,6 +63,18 @@ export type ChartPosition = {
   unrealizedPnL?: number;
   roePct?: number;
   leverage?: number;
+};
+
+/** Server-side CVD summary from /api/analysis/klines or /cvd */
+export type CvdAnalysis = {
+  available?: boolean;
+  note?: string;
+  slopeLabel?: string;
+  slopeBars?: number;
+  buyPctAvg?: number;
+  buyPctLast?: number;
+  divergence?: string;
+  divergenceNote?: string;
 };
 
 /** Diagonal trendline segment (Sperandeo / RANSAC overlays). */
@@ -95,6 +109,10 @@ type Props = {
   onIntervalChange?: (interval: string) => void;
   /** Disable interval toggles while parent reloads klines */
   intervalLoading?: boolean;
+  /** Optional CVD analysis blurb (from API) */
+  cvd?: CvdAnalysis | null;
+  /** Auto-add CVD oscillator when taker-buy data is present (default true) */
+  autoCvd?: boolean;
 };
 
 type Ohlcv = {
@@ -188,8 +206,20 @@ function toCandles(klines: KlineBar[]): CandlePoint[] {
       low: k.l,
       close: k.c,
       volume: Number(k.v) || 0,
+      takerBuy: Number(k.tb) || 0,
     }))
     .sort((a, b) => (a.time as number) - (b.time as number));
+}
+
+function klinesHaveTakerBuy(klines: KlineBar[] | undefined): boolean {
+  if (!klines?.length) return false;
+  return klines.some((k) => Number(k.tb) > 0);
+}
+
+function cvdSlopeColor(label?: string): string {
+  if (label === 'rising') return '#2e7d32';
+  if (label === 'falling') return '#c62828';
+  return '#616161';
 }
 
 /**
@@ -213,6 +243,8 @@ export default function PinKlineChart({
   intervalOptions,
   onIntervalChange,
   intervalLoading = false,
+  cvd = null,
+  autoCvd = true,
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -227,12 +259,28 @@ export default function PinKlineChart({
   const inputRef = useRef<HTMLInputElement | null>(null);
   /** Reset fitContent only when symbol/interval changes so user pan is kept. */
   const fittedKeyRef = useRef('');
+  const autoCvdKeyRef = useRef('');
 
   const [indicators, setIndicators] = useState<ActiveIndicator[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerQuery, setPickerQuery] = useState('');
   const [fullscreen, setFullscreen] = useState(false);
   const [viewportH, setViewportH] = useState(0);
+
+  // Auto-enable CVD oscillator when taker-buy volumes are present.
+  useEffect(() => {
+    if (!autoCvd || !klinesHaveTakerBuy(klines)) return;
+    const key = `${symbol}|${interval}`;
+    if (autoCvdKeyRef.current === key) return;
+    autoCvdKeyRef.current = key;
+    const preset = filterPresets('cvd').find((p) => p.kind === 'cvd');
+    if (!preset) return;
+    setIndicators((prev) => {
+      if (prev.some((p) => p.kind === 'cvd')) return prev;
+      const withoutOsc = prev.filter((p) => p.pane !== 'oscillator');
+      return [...withoutOsc, createActiveFromPreset(preset, withoutOsc.length)];
+    });
+  }, [autoCvd, klines, symbol, interval]);
 
   const lastBar = useMemo(() => {
     if (!klines?.length) return null;
@@ -912,6 +960,72 @@ export default function PinKlineChart({
               }}
             />
           ))}
+        </Box>
+      )}
+
+      {(cvd?.available || cvd?.note) && (
+        <Box
+          sx={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            alignItems: 'center',
+            gap: 0.75,
+            mb: 0.75,
+            px: 1,
+            py: 0.75,
+            borderRadius: 1,
+            bgcolor: 'rgba(21, 101, 192, 0.06)',
+            border: '1px solid rgba(21, 101, 192, 0.18)',
+          }}
+        >
+          <Chip
+            size="small"
+            label="CVD"
+            sx={{ height: 22, bgcolor: '#1565c0', color: '#fff' }}
+          />
+          {cvd?.slopeLabel && (
+            <Chip
+              size="small"
+              label={
+                cvd.slopeLabel === 'rising'
+                  ? '斜率↑'
+                  : cvd.slopeLabel === 'falling'
+                    ? '斜率↓'
+                    : '斜率平'
+              }
+              sx={{
+                height: 22,
+                color: '#fff',
+                bgcolor: cvdSlopeColor(cvd.slopeLabel),
+              }}
+            />
+          )}
+          {cvd?.divergence === 'bullish' && (
+            <Chip
+              size="small"
+              color="success"
+              variant="outlined"
+              label="底背离"
+              sx={{ height: 22 }}
+            />
+          )}
+          {cvd?.divergence === 'bearish' && (
+            <Chip
+              size="small"
+              color="error"
+              variant="outlined"
+              label="顶背离"
+              sx={{ height: 22 }}
+            />
+          )}
+          {typeof cvd?.buyPctAvg === 'number' && cvd.available && (
+            <Typography variant="caption" color="text.secondary">
+              主动买 {(cvd.buyPctAvg * 100).toFixed(0)}%
+            </Typography>
+          )}
+          <Typography variant="caption" color="text.secondary" sx={{ flex: 1 }}>
+            {cvd?.note || '—'}
+          </Typography>
         </Box>
       )}
 

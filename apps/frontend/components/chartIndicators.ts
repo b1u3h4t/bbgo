@@ -7,6 +7,8 @@ export type CandlePoint = {
   low: number;
   close: number;
   volume: number;
+  /** Binance-style taker buy base volume (optional; needed for CVD). */
+  takerBuy?: number;
 };
 
 export type LinePoint = { time: Time; value: number };
@@ -19,7 +21,8 @@ export type IndicatorKind =
   | 'rsi'
   | 'macd'
   | 'vwap'
-  | 'udbox';
+  | 'udbox'
+  | 'cvd';
 
 export type IndicatorPane = 'overlay' | 'oscillator';
 
@@ -190,6 +193,15 @@ export const INDICATOR_PRESETS: IndicatorPreset[] = [
     defaults: { window: 40, minWidthPct: 0.02, maxWidthPct: 0.08 },
     description: 'UD箱体（短周期常用 window=40）',
   },
+  {
+    kind: 'cvd',
+    name: 'Cumulative Volume Delta',
+    short: 'CVD',
+    pane: 'oscillator',
+    keywords: ['cvd', 'delta', 'taker', '主动买卖', '累积成交量差'],
+    defaults: {},
+    description: '近似 CVD：Σ(taker买−taker卖)；副图线+Delta柱',
+  },
 ];
 
 let idSeq = 0;
@@ -212,6 +224,7 @@ export function createActiveFromPreset(
   else if (preset.kind === 'vwap') label = 'VWAP';
   else if (preset.kind === 'udbox')
     label = `UDBox ${preset.defaults.window || 20}`;
+  else if (preset.kind === 'cvd') label = 'CVD';
 
   return {
     id: newIndicatorId(preset.kind),
@@ -485,6 +498,49 @@ export function computeIndicator(
           pane: 'oscillator',
           data: toLine(candles, dea),
           lineWidth: 1,
+        },
+      ];
+    }
+    case 'cvd': {
+      const hist: HistPoint[] = [];
+      const cvdLine: (number | null)[] = new Array(candles.length).fill(null);
+      let cvd = 0;
+      let hasTB = false;
+      for (let i = 0; i < candles.length; i++) {
+        const vol = candles[i].volume || 0;
+        const tb = Number(candles[i].takerBuy);
+        if (Number.isFinite(tb) && tb > 0) hasTB = true;
+        const buy = Number.isFinite(tb) && tb >= 0 ? Math.min(tb, vol || tb) : 0;
+        const sell = Math.max(vol - buy, 0);
+        const delta = buy - sell;
+        cvd += delta;
+        cvdLine[i] = cvd;
+        hist.push({
+          time: candles[i].time,
+          value: delta,
+          color:
+            delta >= 0
+              ? 'rgba(46, 125, 50, 0.45)'
+              : 'rgba(198, 40, 40, 0.45)',
+        });
+      }
+      if (!hasTB) return [];
+      return [
+        {
+          type: 'hist',
+          id: `${ind.id}-delta`,
+          title: 'Delta',
+          pane: 'oscillator',
+          data: hist,
+        },
+        {
+          type: 'line',
+          id: `${ind.id}-cvd`,
+          title: 'CVD',
+          color: '#1565c0',
+          pane: 'oscillator',
+          data: toLine(candles, cvdLine),
+          lineWidth: 2,
         },
       ];
     }
