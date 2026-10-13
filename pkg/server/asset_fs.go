@@ -4,9 +4,12 @@ package server
 
 import (
 	"net/http"
+	"regexp"
 
 	"github.com/gin-gonic/gin"
 )
+
+var pageRoutePattern = regexp.MustCompile("/[a-z]+$")
 
 func (s *Server) assetsHandler(c *gin.Context) {
 	// redirect to .html page if the page exists
