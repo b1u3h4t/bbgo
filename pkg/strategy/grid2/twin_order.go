@@ -51,23 +51,6 @@ func (t *TwinOrder) SetOrder(order types.Order) {
 
 type TwinOrderMap map[fixedpoint.Value]TwinOrder
 
-func findTwinOrderMapKey(grid *grid2types.Grid, order types.Order) (fixedpoint.Value, error) {
-	if order.Side == types.SideTypeSell {
-		return order.Price, nil
-	}
-
-	if order.Side == types.SideTypeBuy {
-		pin, ok := grid.NextHigherPin(order.Price)
-		if !ok {
-			return fixedpoint.Zero, fmt.Errorf("there is no next higher price for this order (%d, price: %s)", order.OrderID, order.Price)
-		}
-
-		return fixedpoint.Value(pin), nil
-	}
-
-	return fixedpoint.Zero, fmt.Errorf("unsupported side: %s of this order (%d)", order.Side, order.OrderID)
-}
-
 func (m TwinOrderMap) AscendingOrders() []types.Order {
 	var orders []types.Order
 	for _, twinOrder := range m {

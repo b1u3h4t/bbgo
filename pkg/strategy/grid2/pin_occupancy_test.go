@@ -1,6 +1,7 @@
 package grid2
 
 import (
+	"context"
 	"io"
 	"testing"
 
@@ -64,7 +65,7 @@ func TestDropOccupiedSubmitOrdersInBatchDedup(t *testing.T) {
 		{Side: types.SideTypeSell, Price: fixedpoint.NewFromFloat(1900), Quantity: fixedpoint.NewFromFloat(1)},
 		{Side: types.SideTypeBuy, Price: fixedpoint.NewFromFloat(1800), Quantity: fixedpoint.NewFromFloat(1)},
 	}
-	got := s.dropOccupiedSubmitOrders(nil, orders)
+	got := s.dropOccupiedSubmitOrders(context.TODO(), orders)
 	assert.Len(t, got, 2)
 	assert.Equal(t, fixedpoint.NewFromFloat(1900), got[0].Price)
 	assert.Equal(t, fixedpoint.NewFromFloat(1800), got[1].Price)

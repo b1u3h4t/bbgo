@@ -145,7 +145,7 @@ func buildCVDAnalysis(klines []types.KLine, includeBars bool) cvdAnalysisResp {
 	resp.Divergence = div
 	resp.DivergenceNote = divNote
 
-	resp.Note = formatCVDNote(resp)
+	resp.Note = formatCVDNote(&resp)
 
 	if includeBars {
 		bars := make([]cvdBar, 0, n)
@@ -163,7 +163,7 @@ func buildCVDAnalysis(klines []types.KLine, includeBars bool) cvdAnalysisResp {
 	return resp
 }
 
-func formatCVDNote(a cvdAnalysisResp) string {
+func formatCVDNote(a *cvdAnalysisResp) string {
 	slopeCN := map[string]string{
 		"rising":  "上升",
 		"falling": "下降",

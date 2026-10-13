@@ -331,7 +331,6 @@ func TestENAUSDT_FixtureKlines_RoundProfitNotify(t *testing.T) {
 	}
 	spread := (upper.Float64() - lower.Float64()) / float64(gridNum-1)
 
-	var last float64
 	var lastPinIdx = -1
 	var orderID uint64 = 5000
 	var closed int
@@ -351,17 +350,14 @@ func TestENAUSDT_FixtureKlines_RoundProfitNotify(t *testing.T) {
 
 	for _, c := range closes {
 		if c < lower.Float64() || c > upper.Float64() {
-			last = c
 			continue
 		}
 		idx := nearestPin(c)
 		if lastPinIdx < 0 {
 			lastPinIdx = idx
-			last = c
 			continue
 		}
 		if idx == lastPinIdx {
-			last = c
 			continue
 		}
 		// step across each pin between lastPinIdx and idx
@@ -431,8 +427,6 @@ func TestENAUSDT_FixtureKlines_RoundProfitNotify(t *testing.T) {
 			}
 		}
 		lastPinIdx = idx
-		last = c
-		_ = last
 	}
 
 	t.Logf("fixture klines=%d band=[%s,%s] closed_rounds=%d realizedCum=%s twinCum=%s",

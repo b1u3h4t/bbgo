@@ -9,6 +9,12 @@ export type CandlePoint = {
   volume: number;
   /** Binance-style taker buy base volume (optional; needed for CVD). */
   takerBuy?: number;
+  /** L2 OBI in [-1,1] (optional; from /api/analysis depth samples). */
+  obi?: number;
+  /** Cont-style OFI delta for the bar (optional). */
+  ofiDelta?: number;
+  /** Cumulative approximate OFI (optional). */
+  ofi?: number;
 };
 
 export type LinePoint = { time: Time; value: number };
@@ -22,7 +28,8 @@ export type IndicatorKind =
   | 'macd'
   | 'vwap'
   | 'udbox'
-  | 'cvd';
+  | 'cvd'
+  | 'obi';
 
 export type IndicatorPane = 'overlay' | 'oscillator' | 'subplot';
 
@@ -202,6 +209,23 @@ export const INDICATOR_PRESETS: IndicatorPreset[] = [
     defaults: {},
     description: '近似 CVD：底部附图（Delta 柱类似成交量 + CVD 线）',
   },
+  {
+    kind: 'obi',
+    name: 'Order Book Imbalance / OFI',
+    short: 'OBI',
+    pane: 'subplot',
+    keywords: [
+      'obi',
+      'ofi',
+      'orderbook',
+      'imbalance',
+      '盘口',
+      '订单流',
+      '附图',
+    ],
+    defaults: {},
+    description: 'Binance L2：OBI 线 + Cont 近似 OFI Δ柱 / 累积线',
+  },
 ];
 
 let idSeq = 0;
@@ -225,6 +249,7 @@ export function createActiveFromPreset(
   else if (preset.kind === 'udbox')
     label = `UDBox ${preset.defaults.window || 20}`;
   else if (preset.kind === 'cvd') label = 'CVD';
+  else if (preset.kind === 'obi') label = 'OBI/OFI';
 
   return {
     id: newIndicatorId(preset.kind),
@@ -542,6 +567,63 @@ export function computeIndicator(
           pane: 'subplot',
           data: toLine(candles, cvdLine),
           lineWidth: 2,
+        },
+      ];
+    }
+    case 'obi': {
+      const hist: HistPoint[] = [];
+      const obiLine: (number | null)[] = new Array(candles.length).fill(null);
+      const ofiLine: (number | null)[] = new Array(candles.length).fill(null);
+      let has = false;
+      for (let i = 0; i < candles.length; i++) {
+        const obi = Number(candles[i].obi);
+        const ofi = Number(candles[i].ofi);
+        const d = Number(candles[i].ofiDelta);
+        if (Number.isFinite(obi)) {
+          obiLine[i] = obi;
+          has = true;
+        }
+        if (Number.isFinite(ofi)) {
+          ofiLine[i] = ofi;
+          has = true;
+        }
+        const delta = Number.isFinite(d) ? d : 0;
+        hist.push({
+          time: candles[i].time,
+          value: delta,
+          color:
+            delta >= 0
+              ? 'rgba(46, 125, 50, 0.45)'
+              : 'rgba(198, 40, 40, 0.45)',
+        });
+      }
+      if (!has) return [];
+      return [
+        {
+          type: 'hist',
+          id: `${ind.id}-ofi-delta`,
+          title: 'OFI Δ',
+          pane: 'subplot',
+          data: hist,
+        },
+        {
+          type: 'line',
+          id: `${ind.id}-ofi`,
+          title: 'OFI',
+          color: '#00695c',
+          pane: 'subplot',
+          data: toLine(candles, ofiLine),
+          lineWidth: 2,
+        },
+        {
+          type: 'line',
+          id: `${ind.id}-obi`,
+          title: 'OBI',
+          color: '#ef6c00',
+          pane: 'subplot',
+          data: toLine(candles, obiLine),
+          lineWidth: 1,
+          lineStyle: 2,
         },
       ];
     }

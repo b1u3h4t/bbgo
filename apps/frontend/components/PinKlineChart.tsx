@@ -77,6 +77,26 @@ export type CvdAnalysis = {
   divergenceNote?: string;
 };
 
+/** Server-side L2 OBI / Cont-OFI from depth samples */
+export type ObiAnalysis = {
+  available?: boolean;
+  note?: string;
+  levels?: number;
+  obi?: number;
+  ofiDelta?: number;
+  cumOFI?: number;
+  sampleCount?: number;
+  slopeLabel?: string;
+  imbalanceLabel?: string;
+  bars?: {
+    t: string;
+    obi: number;
+    ofiDelta: number;
+    ofi: number;
+    valid?: boolean;
+  }[];
+};
+
 /** Diagonal trendline segment (Sperandeo / RANSAC overlays). */
 export type TrendSegment = {
   t1: string;
@@ -113,6 +133,10 @@ type Props = {
   cvd?: CvdAnalysis | null;
   /** Auto-add CVD oscillator when taker-buy data is present (default true) */
   autoCvd?: boolean;
+  /** Optional OBI/OFI analysis from L2 depth */
+  obi?: ObiAnalysis | null;
+  /** Auto-add OBI subplot when depth samples exist and CVD is absent (default true) */
+  autoObi?: boolean;
 };
 
 type Ohlcv = {
@@ -197,17 +221,37 @@ function barToOhlcv(k: KlineBar): Ohlcv {
   };
 }
 
-function toCandles(klines: KlineBar[]): CandlePoint[] {
+function toCandles(
+  klines: KlineBar[],
+  obi?: ObiAnalysis | null,
+): CandlePoint[] {
+  const byT = new Map<number, { obi: number; ofiDelta: number; ofi: number }>();
+  for (const b of obi?.bars || []) {
+    if (!b?.t) continue;
+    if (b.valid === false) continue;
+    byT.set(toChartTime(b.t) as number, {
+      obi: Number(b.obi),
+      ofiDelta: Number(b.ofiDelta),
+      ofi: Number(b.ofi),
+    });
+  }
   return klines
-    .map((k) => ({
-      time: toChartTime(k.t),
-      open: k.o,
-      high: k.h,
-      low: k.l,
-      close: k.c,
-      volume: Number(k.v) || 0,
-      takerBuy: Number(k.tb) || 0,
-    }))
+    .map((k) => {
+      const time = toChartTime(k.t);
+      const o = byT.get(time as number);
+      return {
+        time,
+        open: k.o,
+        high: k.h,
+        low: k.l,
+        close: k.c,
+        volume: Number(k.v) || 0,
+        takerBuy: Number(k.tb) || 0,
+        ...(o && Number.isFinite(o.obi)
+          ? { obi: o.obi, ofiDelta: o.ofiDelta, ofi: o.ofi }
+          : {}),
+      };
+    })
     .sort((a, b) => (a.time as number) - (b.time as number));
 }
 
@@ -216,9 +260,23 @@ function klinesHaveTakerBuy(klines: KlineBar[] | undefined): boolean {
   return klines.some((k) => Number(k.tb) > 0);
 }
 
+function obiHasPlotData(obi?: ObiAnalysis | null): boolean {
+  if (!obi?.available) return false;
+  if ((obi.sampleCount || 0) >= 2) return true;
+  return (obi.bars || []).some(
+    (b) => Number.isFinite(b.obi) || Number.isFinite(b.ofi),
+  );
+}
+
 function cvdSlopeColor(label?: string): string {
   if (label === 'rising') return '#2e7d32';
   if (label === 'falling') return '#c62828';
+  return '#616161';
+}
+
+function obiImbalanceColor(label?: string): string {
+  if (label === 'bid') return '#2e7d32';
+  if (label === 'ask') return '#c62828';
   return '#616161';
 }
 
@@ -245,6 +303,8 @@ export default function PinKlineChart({
   intervalLoading = false,
   cvd = null,
   autoCvd = true,
+  obi = null,
+  autoObi = true,
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -260,6 +320,7 @@ export default function PinKlineChart({
   /** Reset fitContent only when symbol/interval changes so user pan is kept. */
   const fittedKeyRef = useRef('');
   const autoCvdKeyRef = useRef('');
+  const autoObiKeyRef = useRef('');
 
   const [indicators, setIndicators] = useState<ActiveIndicator[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -280,6 +341,21 @@ export default function PinKlineChart({
       return [...prev, createActiveFromPreset(preset, prev.length)];
     });
   }, [autoCvd, klines, symbol, interval]);
+
+  // Auto-enable OBI subplot when depth samples exist and CVD subplot is not active.
+  useEffect(() => {
+    if (!autoObi || !obiHasPlotData(obi)) return;
+    if (klinesHaveTakerBuy(klines) && autoCvd) return; // CVD owns subplot
+    const key = `${symbol}|${interval}|obi`;
+    if (autoObiKeyRef.current === key) return;
+    autoObiKeyRef.current = key;
+    const preset = filterPresets('obi').find((p) => p.kind === 'obi');
+    if (!preset) return;
+    setIndicators((prev) => {
+      if (prev.some((p) => p.kind === 'obi' || p.kind === 'cvd')) return prev;
+      return [...prev, createActiveFromPreset(preset, prev.length)];
+    });
+  }, [autoObi, autoCvd, obi, klines, symbol, interval]);
 
   const lastBar = useMemo(() => {
     if (!klines?.length) return null;
@@ -322,8 +398,15 @@ export default function PinKlineChart({
       if (preset.pane === 'oscillator') {
         next = prev.filter((p) => p.pane !== 'oscillator');
       }
-      if (preset.pane === 'subplot' || preset.kind === 'cvd') {
-        next = next.filter((p) => p.pane !== 'subplot' && p.kind !== 'cvd');
+      if (
+        preset.pane === 'subplot' ||
+        preset.kind === 'cvd' ||
+        preset.kind === 'obi'
+      ) {
+        next = next.filter(
+          (p) =>
+            p.pane !== 'subplot' && p.kind !== 'cvd' && p.kind !== 'obi',
+        );
       }
       return [...next, createActiveFromPreset(preset, next.length)];
     });
@@ -565,7 +648,7 @@ export default function PinKlineChart({
     const chart = chartRef.current;
     if (!series || !chart || !klines?.length) return;
 
-    const sorted = toCandles(klines);
+    const sorted = toCandles(klines, obi);
     series.setData(
       sorted.map(({ time, open, high, low, close }) => ({
         time,
@@ -690,6 +773,7 @@ export default function PinKlineChart({
     }
   }, [
     klines,
+    obi,
     pins,
     pinLevels,
     lastProp,
@@ -701,7 +785,7 @@ export default function PinKlineChart({
     interval,
   ]);
 
-  // indicators — layout stacks: candles | (osc) | (cvd subplot≈volume) | volume
+  // indicators — layout stacks: candles | (osc) | (cvd/obi subplot≈volume) | volume
   useEffect(() => {
     const chart = chartRef.current;
     const candle = seriesRef.current;
@@ -709,7 +793,7 @@ export default function PinKlineChart({
 
     const hasOsc = indicators.some((i) => i.pane === 'oscillator');
     const hasCvd = indicators.some(
-      (i) => i.pane === 'subplot' || i.kind === 'cvd',
+      (i) => i.pane === 'subplot' || i.kind === 'cvd' || i.kind === 'obi',
     );
 
     // Vertical bands (fractions from top). Keep CVD looking like a volume strip.
@@ -789,7 +873,7 @@ export default function PinKlineChart({
     }
     indicatorLinesRef.current = [];
 
-    const candles = toCandles(klines);
+    const candles = toCandles(klines, obi);
     const payloads: IndicatorSeriesPayload[] = [];
     for (const ind of indicators) {
       payloads.push(...computeIndicator(ind, candles));
@@ -840,7 +924,7 @@ export default function PinKlineChart({
         );
       }
     }
-  }, [indicators, klines]);
+  }, [indicators, klines, obi]);
 
   // diagonal trendlines (RANSAC / OLS)
   useEffect(() => {
@@ -931,6 +1015,7 @@ export default function PinKlineChart({
           {symbol} {ivLabel}
           {src} · TradingView Lightweight Charts · qty@price · 成交量
           {indicators.some((i) => i.kind === 'cvd') ? ' · CVD附图' : ''}
+          {indicators.some((i) => i.kind === 'obi') ? ' · OBI附图' : ''}
           {hasPos && (
             <Box
               component="span"
@@ -1084,6 +1169,79 @@ export default function PinKlineChart({
           )}
           <Typography variant="caption" color="text.secondary" sx={{ flex: 1 }}>
             {cvd?.note || '—'}
+          </Typography>
+        </Box>
+      )}
+
+      {(obi?.available || obi?.note) && (
+        <Box
+          sx={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            alignItems: 'center',
+            gap: 0.75,
+            mb: 0.75,
+            px: 1,
+            py: 0.75,
+            borderRadius: 1,
+            bgcolor: 'rgba(239, 108, 0, 0.06)',
+            border: '1px solid rgba(239, 108, 0, 0.2)',
+          }}
+        >
+          <Chip
+            size="small"
+            label="OBI"
+            sx={{ height: 22, bgcolor: '#ef6c00', color: '#fff' }}
+          />
+          {typeof obi?.obi === 'number' && obi.available && (
+            <Chip
+              size="small"
+              label={`OBI ${obi.obi >= 0 ? '+' : ''}${obi.obi.toFixed(2)}`}
+              sx={{
+                height: 22,
+                color: '#fff',
+                bgcolor: obiImbalanceColor(obi.imbalanceLabel),
+              }}
+            />
+          )}
+          {obi?.imbalanceLabel && (
+            <Chip
+              size="small"
+              label={
+                obi.imbalanceLabel === 'bid'
+                  ? '买盘厚'
+                  : obi.imbalanceLabel === 'ask'
+                    ? '卖盘厚'
+                    : '均衡'
+              }
+              sx={{ height: 22 }}
+              variant="outlined"
+            />
+          )}
+          {obi?.slopeLabel && (
+            <Chip
+              size="small"
+              label={
+                obi.slopeLabel === 'rising'
+                  ? 'OFI↑'
+                  : obi.slopeLabel === 'falling'
+                    ? 'OFI↓'
+                    : 'OFI平'
+              }
+              sx={{
+                height: 22,
+                color: '#fff',
+                bgcolor: cvdSlopeColor(obi.slopeLabel),
+              }}
+            />
+          )}
+          {typeof obi?.sampleCount === 'number' && (
+            <Typography variant="caption" color="text.secondary">
+              样本 {obi.sampleCount}
+            </Typography>
+          )}
+          <Typography variant="caption" color="text.secondary" sx={{ flex: 1 }}>
+            {obi?.note || '—'}
           </Typography>
         </Box>
       )}

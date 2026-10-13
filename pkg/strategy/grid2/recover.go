@@ -245,7 +245,7 @@ func (s *Strategy) recover(ctx context.Context) error {
 		openOrder := openOrdersInTwinOrderBook.GetTwinOrder(v)
 		if activeOrder == nil || openOrder == nil {
 			s.mu.Unlock()
-			return fmt.Errorf("this pin (%s) is invalid. Please check it.", v.String())
+			return fmt.Errorf("this pin (%s) is invalid; please check it", v.String())
 		}
 
 		var activeOrderID uint64 = 0

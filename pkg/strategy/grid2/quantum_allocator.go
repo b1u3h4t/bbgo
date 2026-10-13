@@ -240,8 +240,6 @@ func (s *Strategy) applyQuantumAllocatorRange(session *bbgo.ExchangeSession, mid
 			lowerMul = tp
 			upperMul = sl.Mul(fixedpoint.NewFromInt(2))
 		} else {
-			lowerMul = fixedpoint.NewFromFloat(0.5)
-			upperMul = fixedpoint.NewFromFloat(0.5)
 			// use symmetric half of gridRange on each side when flat
 			half := gridRange
 			s.LowerPrice = s.Market.TruncatePrice(mid.Mul(fixedpoint.One.Sub(half)))

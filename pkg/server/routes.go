@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"regexp"
 	"strconv"
 	"time"
 
@@ -526,8 +525,6 @@ func (s *Server) setupSaveConfig(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"success": true})
 }
-
-var pageRoutePattern = regexp.MustCompile("/[a-z]+$")
 
 func moveFileToBackup(filename string) error {
 	stat, err := os.Stat(filename)

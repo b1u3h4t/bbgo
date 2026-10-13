@@ -62,6 +62,4 @@ func resolveBind(a []string) string {
 	default:
 		panic("too many parameters for binding")
 	}
-
-	return ""
 }

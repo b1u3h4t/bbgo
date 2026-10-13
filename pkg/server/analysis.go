@@ -30,6 +30,7 @@ func (s *Server) registerAnalysisRoutes(r *gin.Engine) {
 	r.GET("/api/analysis/pnl", s.analysisTodayPnL) // ?period=today|7d|30d|90d (+ daily series)
 	r.GET("/api/analysis/klines", s.analysisKlines)
 	r.GET("/api/analysis/cvd", s.analysisCVD)
+	r.GET("/api/analysis/obi", s.analysisOBI)
 	r.GET("/api/analysis/avg-down", s.analysisAvgDown)
 	s.startAnalysisKlineSync()
 }
@@ -808,11 +809,15 @@ func (s *Server) analysisGridCalc(c *gin.Context) {
 	klinesPayload := serializeKlines(nil)
 	klineSource := "exchange"
 	var cvdSummary cvdAnalysisResp
-	if klChart, src, err := s.queryAnalysisKLines(ctx, session, symbol, chartInterval, chartLimit); err == nil {
+	var obiSummary obiAnalysisResp
+	var klChart []types.KLine
+	if ks, src, err := s.queryAnalysisKLines(ctx, session, symbol, chartInterval, chartLimit); err == nil {
+		klChart = ks
 		klinesPayload = serializeKlines(klChart)
 		klineSource = src
 		cvdSummary = buildCVDAnalysis(klChart, false)
 	}
+	obiSummary = s.sampleAndBuildOBIOnce(ctx, session.Exchange, symbol, obiDefaultLevels, klChart, true)
 
 	allPos := collectPositions(ctx, session)
 	var symbolPos *marginPositionRow
@@ -855,6 +860,7 @@ func (s *Server) analysisGridCalc(c *gin.Context) {
 		"klines":              klinesPayload,
 		"klines1h":            klinesPayload, // backward-compatible alias
 		"cvd":                 cvdSummary,
+		"obi":                 obiSummary,
 		"positions":           allPos,
 		"position":            symbolPos,
 	})
@@ -1010,6 +1016,7 @@ func (s *Server) analysisKlines(c *gin.Context) {
 		"klineSource": klineSource,
 		"klines":      serializeKlines(klines),
 		"cvd":         buildCVDAnalysis(klines, false),
+		"obi":         s.sampleAndBuildOBIOnce(ctx, session.Exchange, symbol, obiDefaultLevels, klines, true),
 		"pins":        pins,
 		"pinLevels":   buildPinLevels(pins, last, qty),
 		"band": gin.H{
@@ -1228,11 +1235,7 @@ func (s *Server) analysisAvgDown(c *gin.Context) {
 	if marginBal == 0 {
 		marginBal = wallet + upnl
 	}
-	// Use exchange availableBalance only (App「可用」); do not derive from wallet/IM.
-	freeEst := marginBal - totalIM
-	if freeEst < 0 {
-		freeEst = 0
-	}
+	// Use exchange availableBalance only (App「可用」); do not derive freeEst from wallet/IM.
 
 	targetUtil, _ := strconv.ParseFloat(c.DefaultQuery("targetUtil", "0.65"), 64)
 	if targetUtil > 1 {
@@ -1310,6 +1313,7 @@ func (s *Server) analysisAvgDown(c *gin.Context) {
 		"account": gin.H{
 			"walletBalance":        roundFloat(wallet, 2),
 			"availableBalance":     roundFloat(avail, 2),
+			"marginBalance":        roundFloat(marginBal, 2),
 			"totalInitialMargin":   roundFloat(totalIM, 2),
 			"unrealizedPnL":        roundFloat(upnl, 2),
 			"utilInitialMarginPct": roundFloat(totalIM/math.Max(wallet, 1e-9)*100, 2),

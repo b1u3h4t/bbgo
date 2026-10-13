@@ -272,6 +272,25 @@ export async function queryAnalysisCVD(params: {
   return response.data;
 }
 
+export async function queryAnalysisOBI(params: {
+  symbol: string;
+  interval?: string;
+  limit?: number;
+  levels?: number;
+  session?: string;
+}) {
+  const response = await axios.get(baseURL + '/api/analysis/obi', {
+    params: {
+      session: params.session || 'binance',
+      symbol: params.symbol,
+      interval: params.interval || '1h',
+      limit: params.limit || 72,
+      levels: params.levels || 10,
+    },
+  });
+  return response.data;
+}
+
 export async function queryAnalysisAvgDown(params: {
   session?: string;
   symbol?: string;
