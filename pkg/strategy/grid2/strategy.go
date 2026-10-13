@@ -2253,6 +2253,7 @@ func (s *Strategy) openGrid(ctx context.Context, session *bbgo.ExchangeSession) 
 	}
 
 	if err != nil {
+		s.logger.WithError(err).Errorf("generateGridOrders failed")
 		s.EmitGridError(err)
 		return err
 	}
@@ -2585,8 +2586,12 @@ func (s *Strategy) generateUSDTMGridOrders(totalQuote, totalBase, lastPrice fixe
 			}
 			nextPrice := fixedpoint.Value(pins[sp.idx-1])
 			bq := qtyAt(nextPrice)
+			quoteQuantity := bq.Mul(nextPrice)
+			if s.Leverage.Sign() > 0 {
+				quoteQuantity = quoteQuantity.Div(s.leverageOrOne())
+			}
+			usedQuote = usedQuote.Add(quoteQuantity.Round(s.Market.PricePrecision, fixedpoint.Up))
 			buys = append(buys, s.newGridLimitOrder(types.SideTypeBuy, nextPrice, bq))
-			usedQuote = usedQuote.Add(bq.Mul(nextPrice).Round(s.Market.PricePrecision, fixedpoint.Up))
 		}
 	} else {
 		// Two-sided: full-size maker sells (no ReduceOnly), nearest-first.
@@ -2633,17 +2638,17 @@ func (s *Strategy) generateUSDTMGridOrders(totalQuote, totalBase, lastPrice fixe
 		price := fixedpoint.Value(pins[i])
 		q := qtyAt(price)
 		quoteQuantity := q.Mul(price)
+		// Match sell-side / checkRequiredInvestmentByQuantity: available is margin, not notional.
+		if s.Leverage.Sign() > 0 {
+			quoteQuantity = quoteQuantity.Div(s.leverageOrOne())
+		}
 		roundUpQuoteQuantity := quoteQuantity.Round(s.Market.PricePrecision, fixedpoint.Up)
 		if usedQuote.Add(roundUpQuoteQuantity).Compare(totalQuote) > 0 {
-			if i > 0 {
-				return nil, fmt.Errorf("used quote %f > total quote %f, this should not happen", usedQuote.Add(quoteQuantity).Float64(), totalQuote.Float64())
-			}
-			restQuote := totalQuote.Sub(usedQuote)
-			q = restQuote.Div(price).Round(s.Market.VolumePrecision, fixedpoint.Down)
-			if s.Market.MinQuantity.Compare(q) > 0 {
-				return nil, fmt.Errorf("the round down quantity (%s) is less than min quantity (%s), we cannot place this order", q, s.Market.MinQuantity)
-			}
-			roundUpQuoteQuantity = q.Mul(price).Round(s.Market.PricePrecision, fixedpoint.Up)
+			s.logger.Warnf(
+				"usdt-m: skip buy @ %s qty=%s (quote margin %s + %s > available %s)",
+				price.String(), q.String(), usedQuote.String(), roundUpQuoteQuantity.String(), totalQuote.String(),
+			)
+			continue
 		}
 		buys = append(buys, s.newGridLimitOrder(types.SideTypeBuy, price, q))
 		usedQuote = usedQuote.Add(roundUpQuoteQuantity)

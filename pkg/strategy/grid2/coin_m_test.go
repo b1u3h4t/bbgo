@@ -215,6 +215,40 @@ func TestStrategy_generateGridOrders_USDTM_noBase(t *testing.T) {
 	}
 }
 
+// Regression: buy pins must budget quote as margin (notional/leverage), same as sells.
+// Without that, a ~4000U / 3x book fails openGrid with "used quote > total quote".
+func TestStrategy_generateGridOrders_USDTM_buyBudgetUsesLeverage(t *testing.T) {
+	s := newUSDTMTestStrategy()
+	s.UpperPrice = number(0.08559)
+	s.LowerPrice = number(0.07941)
+	s.GridNum = 10
+	s.QuantityOrAmount.Quantity = number(16161)
+	s.Leverage = number(3)
+	s.Market.TickSize = number(0.00001)
+	s.Market.StepSize = number(1)
+	s.Market.PricePrecision = 5
+	s.Market.VolumePrecision = 0
+	s.grid = grid2types.NewGrid(s.LowerPrice, s.UpperPrice, fixedpoint.NewFromInt(s.GridNum), s.Market.TickSize)
+	s.grid.CalculateArithmeticPins()
+	s.Position = types.NewPositionFromMarket(s.Market)
+
+	lastPrice := number(0.0825)
+	// Available margin just above required ~4001; must not hard-fail on buy pins.
+	orders, err := s.generateGridOrders(number(4200), number(0), lastPrice)
+	assert.NoError(t, err)
+	var buys, sells int
+	for _, o := range orders {
+		switch o.Side {
+		case types.SideTypeBuy:
+			buys++
+		case types.SideTypeSell:
+			sells++
+		}
+	}
+	assert.GreaterOrEqual(t, sells, 4, "expected upper-ladder sells")
+	assert.GreaterOrEqual(t, buys, 3, "expected lower-ladder buys with leveraged margin")
+}
+
 func TestStrategy_generateGridOrders_USDTM_twoSided_noReduceOnlyNearestFirst(t *testing.T) {
 	s := newUSDTMTestStrategy()
 	s.UpperPrice = number(1.1591)
