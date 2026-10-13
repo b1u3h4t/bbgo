@@ -277,8 +277,7 @@ export default function PinKlineChart({
     if (!preset) return;
     setIndicators((prev) => {
       if (prev.some((p) => p.kind === 'cvd')) return prev;
-      const withoutOsc = prev.filter((p) => p.pane !== 'oscillator');
-      return [...withoutOsc, createActiveFromPreset(preset, withoutOsc.length)];
+      return [...prev, createActiveFromPreset(preset, prev.length)];
     });
   }, [autoCvd, klines, symbol, interval]);
 
@@ -318,10 +317,13 @@ export default function PinKlineChart({
 
   const addIndicator = useCallback((preset: IndicatorPreset) => {
     setIndicators((prev) => {
-      // only one oscillator pane at a time
       let next = prev;
+      // only one oscillator (RSI/MACD) at a time; CVD subplot is independent
       if (preset.pane === 'oscillator') {
         next = prev.filter((p) => p.pane !== 'oscillator');
+      }
+      if (preset.pane === 'subplot' || preset.kind === 'cvd') {
+        next = next.filter((p) => p.pane !== 'subplot' && p.kind !== 'cvd');
       }
       return [...next, createActiveFromPreset(preset, next.length)];
     });
@@ -699,25 +701,72 @@ export default function PinKlineChart({
     interval,
   ]);
 
-  // indicators
+  // indicators — layout stacks: candles | (osc) | (cvd subplot≈volume) | volume
   useEffect(() => {
     const chart = chartRef.current;
     const candle = seriesRef.current;
     if (!chart || !candle || !klines?.length) return;
 
     const hasOsc = indicators.some((i) => i.pane === 'oscillator');
-    candle.priceScale().applyOptions({
-      scaleMargins: hasOsc
-        ? { top: 0.06, bottom: 0.42 }
-        : { top: 0.08, bottom: 0.24 },
-    });
-    chart.priceScale('volume').applyOptions({
-      scaleMargins: { top: 0.82, bottom: 0 },
-      borderVisible: false,
-    });
-    if (hasOsc) {
+    const hasCvd = indicators.some(
+      (i) => i.pane === 'subplot' || i.kind === 'cvd',
+    );
+
+    // Vertical bands (fractions from top). Keep CVD looking like a volume strip.
+    if (hasOsc && hasCvd) {
+      candle.priceScale().applyOptions({
+        scaleMargins: { top: 0.04, bottom: 0.52 },
+      });
+      chart.priceScale('osc').applyOptions({
+        scaleMargins: { top: 0.5, bottom: 0.34 },
+        borderVisible: false,
+      });
+      chart.priceScale('cvd').applyOptions({
+        scaleMargins: { top: 0.68, bottom: 0.14 },
+        borderVisible: false,
+      });
+      chart.priceScale('cvdline').applyOptions({
+        scaleMargins: { top: 0.68, bottom: 0.14 },
+        borderVisible: false,
+      });
+      chart.priceScale('volume').applyOptions({
+        scaleMargins: { top: 0.88, bottom: 0 },
+        borderVisible: false,
+      });
+    } else if (hasCvd) {
+      candle.priceScale().applyOptions({
+        scaleMargins: { top: 0.06, bottom: 0.38 },
+      });
+      chart.priceScale('cvd').applyOptions({
+        scaleMargins: { top: 0.64, bottom: 0.14 },
+        borderVisible: false,
+      });
+      chart.priceScale('cvdline').applyOptions({
+        scaleMargins: { top: 0.64, bottom: 0.14 },
+        borderVisible: false,
+      });
+      chart.priceScale('volume').applyOptions({
+        scaleMargins: { top: 0.88, bottom: 0 },
+        borderVisible: false,
+      });
+    } else if (hasOsc) {
+      candle.priceScale().applyOptions({
+        scaleMargins: { top: 0.06, bottom: 0.42 },
+      });
       chart.priceScale('osc').applyOptions({
         scaleMargins: { top: 0.58, bottom: 0.2 },
+        borderVisible: false,
+      });
+      chart.priceScale('volume').applyOptions({
+        scaleMargins: { top: 0.82, bottom: 0 },
+        borderVisible: false,
+      });
+    } else {
+      candle.priceScale().applyOptions({
+        scaleMargins: { top: 0.08, bottom: 0.24 },
+      });
+      chart.priceScale('volume').applyOptions({
+        scaleMargins: { top: 0.78, bottom: 0 },
         borderVisible: false,
       });
     }
@@ -748,21 +797,30 @@ export default function PinKlineChart({
 
     for (const p of payloads) {
       if (p.type === 'line') {
+        const scaleId =
+          p.pane === 'subplot'
+            ? 'cvdline' // own scale so cumulative CVD doesn't crush Δ bars
+            : p.pane === 'oscillator'
+              ? 'osc'
+              : 'right';
         const s = chart.addLineSeries({
           color: p.color,
           lineWidth: (p.lineWidth || 1) as any,
           lineStyle: p.lineStyle ?? 0,
-          priceScaleId: p.pane === 'oscillator' ? 'osc' : 'right',
+          priceScaleId: scaleId,
           title: p.title,
-          lastValueVisible: true,
+          lastValueVisible: p.pane === 'subplot',
           priceLineVisible: false,
           crosshairMarkerVisible: false,
         });
         s.setData(p.data);
         indicatorSeriesRef.current.set(p.id, s);
       } else if (p.type === 'hist') {
+        const scaleId = p.pane === 'subplot' ? 'cvd' : 'osc';
         const s = chart.addHistogramSeries({
-          priceScaleId: 'osc',
+          priceFormat:
+            p.pane === 'subplot' ? { type: 'volume' } : { type: 'price' },
+          priceScaleId: scaleId,
           title: p.title,
           lastValueVisible: false,
           priceLineVisible: false,
@@ -872,6 +930,7 @@ export default function PinKlineChart({
         <Typography variant="caption" color="text.secondary">
           {symbol} {ivLabel}
           {src} · TradingView Lightweight Charts · qty@price · 成交量
+          {indicators.some((i) => i.kind === 'cvd') ? ' · CVD附图' : ''}
           {hasPos && (
             <Box
               component="span"

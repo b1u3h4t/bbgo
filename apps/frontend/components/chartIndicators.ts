@@ -24,7 +24,7 @@ export type IndicatorKind =
   | 'udbox'
   | 'cvd';
 
-export type IndicatorPane = 'overlay' | 'oscillator';
+export type IndicatorPane = 'overlay' | 'oscillator' | 'subplot';
 
 export type IndicatorPreset = {
   kind: IndicatorKind;
@@ -197,10 +197,10 @@ export const INDICATOR_PRESETS: IndicatorPreset[] = [
     kind: 'cvd',
     name: 'Cumulative Volume Delta',
     short: 'CVD',
-    pane: 'oscillator',
-    keywords: ['cvd', 'delta', 'taker', '主动买卖', '累积成交量差'],
+    pane: 'subplot',
+    keywords: ['cvd', 'delta', 'taker', '主动买卖', '累积成交量差', '附图'],
     defaults: {},
-    description: '近似 CVD：Σ(taker买−taker卖)；副图线+Delta柱',
+    description: '近似 CVD：底部附图（Delta 柱类似成交量 + CVD 线）',
   },
 ];
 
@@ -515,13 +515,14 @@ export function computeIndicator(
         const delta = buy - sell;
         cvd += delta;
         cvdLine[i] = cvd;
+        // Match volume-bar opacity / palette so the subplot reads like volume.
         hist.push({
           time: candles[i].time,
           value: delta,
           color:
             delta >= 0
-              ? 'rgba(46, 125, 50, 0.45)'
-              : 'rgba(198, 40, 40, 0.45)',
+              ? 'rgba(46, 125, 50, 0.55)'
+              : 'rgba(198, 40, 40, 0.55)',
         });
       }
       if (!hasTB) return [];
@@ -529,8 +530,8 @@ export function computeIndicator(
         {
           type: 'hist',
           id: `${ind.id}-delta`,
-          title: 'Delta',
-          pane: 'oscillator',
+          title: 'Δ',
+          pane: 'subplot',
           data: hist,
         },
         {
@@ -538,7 +539,7 @@ export function computeIndicator(
           id: `${ind.id}-cvd`,
           title: 'CVD',
           color: '#1565c0',
-          pane: 'oscillator',
+          pane: 'subplot',
           data: toLine(candles, cvdLine),
           lineWidth: 2,
         },
