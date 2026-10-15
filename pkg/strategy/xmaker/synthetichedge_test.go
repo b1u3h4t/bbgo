@@ -186,6 +186,9 @@ func TestSyntheticHedge_MarketOrderHedge(t *testing.T) {
 	err := syn.initialize(strategy)
 	assert.NoError(t, err)
 
+	err = syn.initializeSourcePosition()
+	assert.NoError(t, err)
+
 	// the connectivity waiting is blocking, so we need to run it in a goroutine
 
 	go func() {
@@ -400,6 +403,9 @@ func TestSyntheticHedge_CounterpartyOrderHedge(t *testing.T) {
 		forward:          true,
 	}
 	err := syn.initialize(strategy)
+	assert.NoError(t, err)
+
+	err = syn.initializeSourcePosition()
 	assert.NoError(t, err)
 
 	// the connectivity waiting is blocking, so we need to run it in a goroutine
