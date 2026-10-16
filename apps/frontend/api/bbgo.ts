@@ -169,6 +169,14 @@ export async function queryAnalysisMargin(session = 'binance') {
   return response.data;
 }
 
+/** Binance USDT-M position brackets: MMR / cum / tier1 cap */
+export async function queryAnalysisBrackets(session = 'binance') {
+  const response = await axios.get(baseURL + '/api/analysis/brackets', {
+    params: { session },
+  });
+  return response.data;
+}
+
 export async function queryAnalysisMarket(
   session = 'binance',
   symbols?: string,

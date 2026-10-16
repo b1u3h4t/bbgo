@@ -21,6 +21,7 @@ import (
 
 func (s *Server) registerAnalysisRoutes(r *gin.Engine) {
 	r.GET("/api/analysis/margin", s.analysisMargin)
+	r.GET("/api/analysis/brackets", s.analysisBrackets)
 	r.GET("/api/analysis/market", s.analysisMarket)
 	r.GET("/api/analysis/trend", s.analysisTrend)
 	r.GET("/api/analysis/regime", s.analysisRegime)

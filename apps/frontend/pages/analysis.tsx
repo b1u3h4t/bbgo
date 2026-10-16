@@ -38,6 +38,7 @@ import { useTheme } from '@mui/material/styles';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import {
   queryAnalysisAvgDown,
+  queryAnalysisBrackets,
   queryAnalysisGridCalc,
   queryAnalysisKlines,
   queryAnalysisMargin,
@@ -316,6 +317,7 @@ export default function AnalysisPage() {
   const [error, setError] = useState('');
 
   const [margin, setMargin] = useState<any>(null);
+  const [brackets, setBrackets] = useState<any>(null);
   const [market, setMarket] = useState<any>(null);
   const [pnl, setPnl] = useState<any>(null);
   const [grid, setGrid] = useState<any>(null);
@@ -361,6 +363,18 @@ export default function AnalysisPage() {
       setMargin(await queryAnalysisMargin());
     } catch (e: any) {
       setError(e?.message || 'failed to load margin');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const loadBrackets = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      setBrackets(await queryAnalysisBrackets());
+    } catch (e: any) {
+      setError(e?.message || 'failed to load brackets');
     } finally {
       setLoading(false);
     }
@@ -664,15 +678,17 @@ export default function AnalysisPage() {
           value={tab}
           onChange={(_, v) => {
             setTab(v);
-            if (v === 1 || v === 2) loadMargin();
-            if (v === 3) {
+            if (v === 1) loadMargin();
+            if (v === 2) loadBrackets();
+            if (v === 3) loadMargin();
+            if (v === 4) {
               loadPnl();
               loadMargin();
             }
-            if (v === 4) loadAvgDown();
-            if (v === 5) loadTrend();
-            if (v === 6) loadRegime();
-            if (v === 7) loadProspec();
+            if (v === 5) loadAvgDown();
+            if (v === 6) loadTrend();
+            if (v === 7) loadRegime();
+            if (v === 8) loadProspec();
           }}
           variant="scrollable"
           scrollButtons="auto"
@@ -681,6 +697,7 @@ export default function AnalysisPage() {
         >
           <Tab label="行情分析" />
           <Tab label="保证金" />
+          <Tab label="维持档位" />
           <Tab label="网格计算" />
           <Tab label="盈亏" />
           <Tab label="慎重补仓" />
@@ -1208,6 +1225,231 @@ export default function AnalysisPage() {
         </TabPanel>
 
         <TabPanel value={tab} index={2}>
+          <Box sx={{ display: 'flex', gap: 1, mb: 2, flexWrap: 'wrap', alignItems: 'center' }}>
+            <Button variant="contained" onClick={loadBrackets} size={isMobile ? 'small' : 'medium'}>
+              刷新
+            </Button>
+            {brackets?.summary && (
+              <>
+                <Chip
+                  size="small"
+                  label={`名义合计 ${fmtNum(brackets.summary.sumNotional, 0)}`}
+                />
+                <Chip
+                  size="small"
+                  label={`MM合计 ${fmtNum(brackets.summary.sumMaintMargin, 2)}`}
+                />
+                <Chip
+                  size="small"
+                  color={brackets.summary.overTier1 > 0 ? 'warning' : 'success'}
+                  label={`第1档内 ${brackets.summary.inCum0Tier} / 越档 ${brackets.summary.overTier1}`}
+                />
+              </>
+            )}
+          </Box>
+
+          <Accordion defaultExpanded sx={{ mb: 2 }}>
+            <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+              <Typography variant="subtitle2">
+                {brackets?.rules?.title || 'MMR / cum 定位规则'}
+              </Typography>
+            </AccordionSummary>
+            <AccordionDetails>
+              <Typography variant="body2" sx={{ mb: 1, fontFamily: 'monospace' }}>
+                {brackets?.rules?.formula ||
+                  brackets?.formula ||
+                  'MM = notional × MMR − cum'}
+              </Typography>
+              <List dense disablePadding>
+                {(
+                  brackets?.rules?.items || [
+                    '名义价值 Notional = |仓位数量| × 标记价格；按币种分别落档，再汇总账户 MM。',
+                    '定位当前档：notionalFloor ≤ Notional ≤ notionalCap；边界重叠时取更高档（靠 cum 保持 MM 连续）。',
+                    'MMR：该档维持保证金率，与所选杠杆无关；仓越大通常 MMR 越高。',
+                    'cum：维持保证金速算额。第1档多为 0；更高档 cum>0，避免跨档时 MM 突变。',
+                    'cum=0 档通常即第1档；「第1档上限」= 该档 notionalCap。',
+                  ]
+                ).map((line: string, i: number) => (
+                  <ListItem key={i} sx={{ py: 0.25, alignItems: 'flex-start' }}>
+                    <ListItemText
+                      primaryTypographyProps={{ variant: 'body2' }}
+                      primary={`${i + 1}. ${line}`}
+                    />
+                  </ListItem>
+                ))}
+              </List>
+              {brackets?.rules?.source && (
+                <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>
+                  官方档位表：{brackets.rules.source}
+                </Typography>
+              )}
+            </AccordionDetails>
+          </Accordion>
+
+          <Typography variant="subtitle1" gutterBottom>
+            当前持仓落档
+          </Typography>
+          <ScrollTable>
+            <Table size="small">
+              <TableHead>
+                <TableRow>
+                  <TableCell>币</TableCell>
+                  <TableCell align="right">第1档上限</TableCell>
+                  <TableCell align="right">名义</TableCell>
+                  <TableCell align="right">当前档</TableCell>
+                  <TableCell align="right">MMR</TableCell>
+                  <TableCell align="right">cum</TableCell>
+                  <TableCell align="right">单币 MM</TableCell>
+                  <TableCell align="center">cum=0 档</TableCell>
+                  <TableCell align="right">越档</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {(brackets?.positions || []).map((r: any) => (
+                  <TableRow
+                    key={r.symbol}
+                    hover
+                    sx={{
+                      bgcolor: r.inCum0Tier ? undefined : 'action.hover',
+                    }}
+                  >
+                    <TableCell>
+                      {String(r.symbol || '').replace(/USDT$/, '')}{' '}
+                      <Typography component="span" variant="caption" color="text.secondary">
+                        {r.side === 'SHORT' ? '空' : '多'}
+                      </Typography>
+                    </TableCell>
+                    <TableCell align="right">{fmtNum(r.tier1Cap, 0)}</TableCell>
+                    <TableCell align="right">{fmtNum(r.notional, 2)}</TableCell>
+                    <TableCell align="right">{r.currentBracket}</TableCell>
+                    <TableCell align="right">{fmtNum(r.mmrPct, 2)}%</TableCell>
+                    <TableCell align="right">{fmtNum(r.cum, 2)}</TableCell>
+                    <TableCell align="right">{fmtNum(r.maintMargin, 2)}</TableCell>
+                    <TableCell align="center">
+                      <Chip
+                        size="small"
+                        label={r.inCum0Tier ? '是' : '否'}
+                        color={r.inCum0Tier ? 'success' : 'warning'}
+                        variant="outlined"
+                      />
+                    </TableCell>
+                    <TableCell align="right">
+                      {Number(r.overTier1By) > 0 ? fmtNum(r.overTier1By, 0) : '—'}
+                    </TableCell>
+                  </TableRow>
+                ))}
+                {brackets?.summary && (
+                  <TableRow>
+                    <TableCell sx={{ fontWeight: 600 }}>合计</TableCell>
+                    <TableCell />
+                    <TableCell align="right" sx={{ fontWeight: 600 }}>
+                      {fmtNum(brackets.summary.sumNotional, 2)}
+                    </TableCell>
+                    <TableCell colSpan={3} />
+                    <TableCell align="right" sx={{ fontWeight: 600 }}>
+                      {fmtNum(brackets.summary.sumMaintMargin, 2)}
+                    </TableCell>
+                    <TableCell colSpan={2} />
+                  </TableRow>
+                )}
+                {!brackets?.positions?.length && (
+                  <TableRow>
+                    <TableCell colSpan={9}>
+                      <Typography variant="body2" color="text.secondary">
+                        无持仓或尚未加载，点击刷新
+                      </Typography>
+                    </TableCell>
+                  </TableRow>
+                )}
+              </TableBody>
+            </Table>
+          </ScrollTable>
+
+          <Typography variant="subtitle1" sx={{ mt: 3, mb: 1 }}>
+            持仓币种全部档位配置
+          </Typography>
+          <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>
+            来自币安 leverageBracket；高亮行为当前名义所在档。MM = 名义 × MMR − cum。
+          </Typography>
+          <Grid container spacing={2}>
+            {(brackets?.positions || []).map((r: any) => (
+              <Grid item xs={12} md={6} key={`tiers-${r.symbol}`}>
+                <Card variant="outlined">
+                  <CardContent sx={{ pb: 1 }}>
+                    <Box
+                      sx={{
+                        display: 'flex',
+                        flexWrap: 'wrap',
+                        alignItems: 'center',
+                        gap: 1,
+                        mb: 1,
+                      }}
+                    >
+                      <Typography variant="subtitle2">
+                        {r.symbol}{' '}
+                        <Typography component="span" variant="caption" color="text.secondary">
+                          {r.side === 'SHORT' ? '空' : '多'} · 名义 {fmtNum(r.notional, 0)} · 当前档{' '}
+                          {r.currentBracket}
+                        </Typography>
+                      </Typography>
+                    </Box>
+                    <ScrollTable>
+                      <Table size="small">
+                        <TableHead>
+                          <TableRow>
+                            <TableCell>档</TableCell>
+                            <TableCell align="right">名义区间</TableCell>
+                            <TableCell align="right">最高杠杆</TableCell>
+                            <TableCell align="right">MMR</TableCell>
+                            <TableCell align="right">cum</TableCell>
+                          </TableRow>
+                        </TableHead>
+                        <TableBody>
+                          {(r.tiers || []).map((t: any) => {
+                            const active = Number(t.bracket) === Number(r.currentBracket);
+                            return (
+                              <TableRow
+                                key={`${r.symbol}-${t.bracket}`}
+                                sx={{
+                                  bgcolor: active ? 'action.selected' : undefined,
+                                  fontWeight: active ? 600 : undefined,
+                                }}
+                              >
+                                <TableCell>
+                                  {t.bracket}
+                                  {active ? ' ←' : ''}
+                                </TableCell>
+                                <TableCell align="right">
+                                  {fmtNum(t.notionalFloor, 0)} ~ {fmtNum(t.notionalCap, 0)}
+                                </TableCell>
+                                <TableCell align="right">{t.maxLeverage}x</TableCell>
+                                <TableCell align="right">
+                                  {fmtNum(Number(t.maintMarginRatio) * 100, 2)}%
+                                </TableCell>
+                                <TableCell align="right">{fmtNum(t.cum, 2)}</TableCell>
+                              </TableRow>
+                            );
+                          })}
+                          {!(r.tiers || []).length && (
+                            <TableRow>
+                              <TableCell colSpan={5}>
+                                <Typography variant="caption" color="text.secondary">
+                                  无档位数据
+                                </Typography>
+                              </TableCell>
+                            </TableRow>
+                          )}
+                        </TableBody>
+                      </Table>
+                    </ScrollTable>
+                  </CardContent>
+                </Card>
+              </Grid>
+            ))}
+          </Grid>
+        </TabPanel>
+
+        <TabPanel value={tab} index={3}>
           <PositionsPanel
             positions={grid?.positions || margin?.positions}
             highlightSymbol={symbol}
@@ -1388,7 +1630,7 @@ export default function AnalysisPage() {
           )}
         </TabPanel>
 
-        <TabPanel value={tab} index={3}>
+        <TabPanel value={tab} index={4}>
           <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, mb: 2, alignItems: 'center' }}>
             <ToggleButtonGroup
               exclusive
@@ -1614,7 +1856,7 @@ export default function AnalysisPage() {
           </ScrollTable>
         </TabPanel>
 
-        <TabPanel value={tab} index={4}>
+        <TabPanel value={tab} index={5}>
           <Typography variant="body2" color="warning.main" sx={{ mb: 2 }}>
             被套网格 / 裸多慎重补仓计算器：补仓不立刻减少浮亏，续跌会放大亏损。
             建议合计 IM 不超过 safeBudget，并保留 avail≥3000 给运行中网格。仅计算，不自动下单。
@@ -1851,7 +2093,7 @@ export default function AnalysisPage() {
           )}
         </TabPanel>
 
-        <TabPanel value={tab} index={5}>
+        <TabPanel value={tab} index={6}>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
             按成交额筛活跃合约，对每标的用本地 15m K 线 walk-forward 回测（EMA+RSI 回踩）；仅期望&gt;0
             且样本足够才给多空与入场。
@@ -2084,7 +2326,7 @@ export default function AnalysisPage() {
           </ScrollTable>
         </TabPanel>
 
-        <TabPanel value={tab} index={6}>
+        <TabPanel value={tab} index={7}>
           <Box
             sx={{
               display: 'flex',
@@ -2368,7 +2610,7 @@ export default function AnalysisPage() {
           )}
         </TabPanel>
 
-        <TabPanel value={tab} index={7}>
+        <TabPanel value={tab} index={8}>
           <Box
             sx={{
               display: 'flex',
