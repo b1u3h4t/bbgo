@@ -50,6 +50,29 @@ var log = logrus.WithField("strategy", ID)
 
 var raiseWarningLevelLimiter = rate.NewLimiter(rate.Every(3*time.Second), 1)
 
+// instanceRegistryMu and instanceRegistry enforce that only one xmaker
+// instance runs per Symbol within this process. See registerInstance.
+var (
+	instanceRegistryMu sync.Mutex
+	instanceRegistry   = make(map[string]*Strategy)
+)
+
+// registerInstance claims the given Symbol for s, returning an error if
+// another instance already claimed it. Re-registering the same instance
+// (same pointer) is a no-op so that Validate can be called more than once
+// on the same Strategy without false-positives.
+func registerInstance(s *Strategy) error {
+	instanceRegistryMu.Lock()
+	defer instanceRegistryMu.Unlock()
+
+	if existing, ok := instanceRegistry[s.Symbol]; ok && existing != s {
+		return fmt.Errorf("another xmaker instance is already running for symbol %s (only one xmaker instance per symbol is allowed)", s.Symbol)
+	}
+
+	instanceRegistry[s.Symbol] = s
+	return nil
+}
+
 func nopCover(v fixedpoint.Value) {}
 
 type cancelOrdersBySymbolSide interface {
@@ -246,6 +269,8 @@ type StrategyConfig struct {
 	CircuitBreaker *circuitbreaker.BasicCircuitBreaker `json:"circuitBreaker"`
 
 	NoBorrowableCooldown types.Duration `json:"noBorrowableCooldown,omitempty"`
+
+	ConnectionDelay types.Duration `json:"connectionDelay,omitempty"`
 }
 
 type Strategy struct {
@@ -2604,6 +2629,10 @@ func (s *Strategy) Validate() error {
 		}
 	}
 
+	if err := registerInstance(s); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -2986,11 +3015,6 @@ func (s *Strategy) CrossRun(
 
 	s.hedgeSession.UserDataStream.OnTradeUpdate(s.priceSolver.UpdateFromTrade)
 
-	s.accountValueCalculator = s.hedgeSession.GetAccountValueCalculator()
-	if err := s.accountValueCalculator.UpdatePrices(ctx); err != nil {
-		return err
-	}
-
 	updateFeeTokenPrice(s.makerSession, s.priceSolver, s.Position)
 	if s.SplitHedge != nil && s.SplitHedge.Enabled {
 		for sessionName := range s.SplitHedge.HedgeMarkets {
@@ -3279,6 +3303,17 @@ func (s *Strategy) CrossRun(
 			hedgeMarket.session,
 			market,
 		)
+	}
+	// setup done, start establishing connectivity and workers
+	delayDuration := s.ConnectionDelay.Duration()
+	if delayDuration > 0 {
+		s.logger.Infof("delaying for %s before establishing connectivity...", delayDuration)
+		time.Sleep(delayDuration)
+	}
+
+	s.accountValueCalculator = s.hedgeSession.GetAccountValueCalculator()
+	if err := s.accountValueCalculator.UpdatePrices(ctx); err != nil {
+		return err
 	}
 
 	s.sourceUserDataConnectivity = s.hedgeSession.UserDataConnectivity
