@@ -29,12 +29,22 @@ jobs:
       - name: Per-run tmpdir (scoped; safe on shared runners)
         run: bash scripts/ci-bbgo-tmpdir.sh setup
 
+      - name: Check helm is installed
+        # Helm is provisioned on the runners by the operator (sudo install into
+        # /usr/local/bin). Fail fast with an actionable message instead of
+        # letting the old get-helm-3 fallback try sudo, which the runner user
+        # is not permitted to use ("sudo: I'm sorry ... can't do that").
+        run: |
+          set -euo pipefail
+          if ! command -v helm >/dev/null 2>&1; then
+            echo "::error::helm is not installed on runner ${RUNNER_NAME}; install it with: curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | sudo bash"
+            exit 1
+          fi
+          helm version --short
+
       - name: Package and push chart to Harbor (OCI)
         run: |
           set -euo pipefail
-          command -v helm >/dev/null || {
-            curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-          }
           helm version --short
           helm_out="${TMPDIR}/bbgo-helm"
           mkdir -p "${helm_out}"
@@ -46,6 +56,7 @@ jobs:
           candidates = [
               Path.home() / ".harbor-bbgo.env",
               Path("/home/github-runner/.harbor-bbgo.env"),
+              Path("/home/runner/.harbor-bbgo.env"),
           ]
           env_path = next((p for p in candidates if p.is_file()), None)
           data = {}
@@ -63,7 +74,12 @@ jobs:
                   "HARBOR_PASSWORD": os.environ.get("HARBOR_PASSWORD", ""),
               }
           if not data.get("HARBOR_USERNAME") or not data.get("HARBOR_PASSWORD"):
-              sys.exit("Harbor credentials not found")
+              checked = ", ".join(str(p) for p in candidates)
+              sys.exit(
+                  "Harbor credentials not found. Set the HARBOR_USERNAME / "
+                  "HARBOR_PASSWORD repository secrets, or place a "
+                  ".harbor-bbgo.env on the runner. Checked: " + checked
+              )
 
           registry = data.get("HARBOR_REGISTRY", "harbor.deepflood.xyz")
           project = data.get("HARBOR_PROJECT", "bbgo")
