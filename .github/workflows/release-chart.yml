@@ -9,8 +9,15 @@ on:
     - ".github/workflows/release-chart.yml"
   workflow_dispatch:
 
+# Publishing to the chart repository is not safe to interrupt part-way.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 jobs:
   releaseChart:
+    permissions:
+      contents: write
     runs-on: [self-hosted, bbgo]
     timeout-minutes: 20
     steps:

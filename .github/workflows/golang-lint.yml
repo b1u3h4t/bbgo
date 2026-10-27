@@ -4,6 +4,10 @@ on:
     branches: [ main ]
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   pull-requests: read
@@ -14,6 +18,7 @@ jobs:
     name: lint
     # Public repo: PRs on GitHub-hosted; push on dedicated bbgo runner
     runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-latest' || fromJSON('["self-hosted","bbgo"]') }}
+    timeout-minutes: 15
     env:
       GOTOOLCHAIN: auto
     steps:
@@ -23,8 +28,16 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: '1.27.2'
+          # golangci-lint-action manages its own analysis cache; this is just
+          # the module cache for the build it has to do first. Skip it on the
+          # self-hosted push run, which keeps its own warm module cache.
           cache: ${{ github.event_name == 'pull_request' }}
       - name: golangci-lint
+        # NOTE: .golangci.yml sets `issues-exit-code: 0`, so this step reports
+        # findings but cannot fail. The green check it produces on every pull
+        # request is therefore unconditional. Flipping that to 1 is a separate
+        # decision, because the size of the existing backlog has not been
+        # measured against the pinned v2.13.
         uses: golangci/golangci-lint-action@v9
         with:
           version: 'v2.13'

@@ -6,6 +6,19 @@ on:
     - "main"
   pull_request:
 
+# Cancel an in-progress run when the branch is pushed again. Without this every
+# push to a pull request starts another full ~8 minute run alongside the one it
+# supersedes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  # The revive step reports through github-pr-review.
+  pull-requests: write
+  checks: write
+
 jobs:
   build:
     # Public repo: never run untrusted fork PRs on self-hosted hardware.
@@ -265,9 +278,14 @@ jobs:
         go version
 
     - name: Install Migration Tool
+      # Pinned rather than @latest, so an upstream release cannot break this
+      # repository's CI without a commit here. Kept at the same version as the
+      # rockhopper/v2 require in go.mod, so the tool applying the migrations and
+      # the library reading them do not drift apart. Dependabot's gomod updates
+      # will not touch this line, so it needs bumping alongside go.mod.
       run: |
         if ! command -v rockhopper >/dev/null 2>&1; then
-          go install github.com/c9s/rockhopper/v2/cmd/rockhopper@latest
+          go install github.com/c9s/rockhopper/v2/cmd/rockhopper@v2.5.1
         fi
         rockhopper version || true
 
@@ -278,8 +296,7 @@ jobs:
         rockhopper --config /tmp/rockhopper_mysql_ci.yaml up
 
     - name: Test Migration SQL Files For SQLite
-      run: |
-        rockhopper --config rockhopper_sqlite.yaml up
+      run: rockhopper --config rockhopper_sqlite.yaml up
 
     - name: Test Migration SQL Files For PostgreSQL
       run: |
@@ -380,11 +397,11 @@ jobs:
         files: ./coverage.txt,./coverage_dnum.txt,./coverage_pg.txt
       continue-on-error: true
 
-    - name: Create dotenv file
-      run: |
-        echo "DB_DRIVER=mysql" >> .env.local
-        echo "DB_DSN=root:root@tcp(127.0.0.1:${MYSQL_HOST_PORT})/bbgo" >> .env.local
-        echo "POSTGRES_DSN=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_HOST_PORT}/${CI_PG_DB}?sslmode=disable" >> .env.local
+    # Upstream dropped the trailing "Create dotenv file" step: it ran after the
+    # test steps, so nothing ever read it, and the DB-backed tests skip
+    # themselves on os.LookupEnv("DB_DSN") rather than reading .env.local.
+    # The Test / TestDnum / Test PostgreSQL steps above export DB_DRIVER and
+    # DB_DSN inline, which is what actually reaches those tests.
 
     - name: Cleanup CI containers
       if: always() && github.event_name != 'pull_request'
