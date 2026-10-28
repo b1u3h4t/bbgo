@@ -26,7 +26,9 @@ permissions:
 
 jobs:
   sync:
-    runs-on: ubuntu-latest
+    # 自托管：本任务只做 git fetch/merge/push，不执行外部 PR 代码，
+    # 且仅由 schedule / workflow_dispatch 触发，放到 self-hosted 无安全风险。
+    runs-on: [self-hosted, bbgo]
     timeout-minutes: 15
     steps:
       - name: Checkout
