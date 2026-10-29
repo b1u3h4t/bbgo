@@ -18,10 +18,14 @@ permissions:
 jobs:
   release:
     name: Create Release
-    # macOS, not ubuntu: `make dist` builds the darwin binaries, and those need
-    # CGO for github.com/mattn/go-sqlite3, which does not cross-compile from
-    # Linux without a macOS toolchain.
-    runs-on: macos-latest
+    # Linux self-hosted, not macOS. The darwin binaries still need CGO for
+    # github.com/mattn/go-sqlite3, but zig's clang plus a macOS SDK builds them
+    # on Linux just fine (see .github/scripts/build-darwin-cross.sh), which
+    # keeps this job off the metered macOS runners entirely.
+    #
+    # The `macos-cross` label marks the runners carrying that toolchain, so the
+    # job cannot land on a runner that would fail at the first cgo file.
+    runs-on: [self-hosted, bbgo, macos-cross]
     timeout-minutes: 60
 
     env:
@@ -69,21 +73,32 @@ jobs:
         # `go mod download` rather than `go get github.com/mattn/go-sqlite3`:
         # the dependency is already required by go.mod, and `go get` would
         # rewrite it during a release build.
+        #
+        # `make dist` is deliberately not used: it ends with `desktop`, which
+        # builds a macOS .app through cmd/bbgo-webview and runs codesign —
+        # impossible on Linux, and never uploaded anyway, since only
+        # dist/<version>/*.tar.gz is attached to the release. Splitting it into
+        # its parts skips that step without touching the Makefile.
         run: |
           go mod download
           npm install --global yarn
-          make dist VERSION="${VERSION}"
+          make static
+          make dist-bbgo-linux
+          bash .github/scripts/build-darwin-cross.sh
         shell: bash
 
       - name: Verify assets
         # The upload below globs, so a build that silently produced nothing
-        # would otherwise create an empty release.
+        # would otherwise create an empty release. The exact count is checked
+        # because a half-finished build — one platform missing — would still
+        # upload successfully and only be noticed by whoever downloads it.
         run: |
+          expected=16   # 8 linux + 8 darwin
           count=$(find "dist/${VERSION}" -name '*.tar.gz' | wc -l | tr -d ' ')
-          echo "found ${count} archives in dist/${VERSION}"
+          echo "found ${count} archives in dist/${VERSION} (expected ${expected})"
           find "dist/${VERSION}" -name '*.tar.gz' -exec basename {} \; | sort
-          if [ "${count}" -eq 0 ]; then
-            echo "::error::make dist produced no archives"
+          if [ "${count}" -lt "${expected}" ]; then
+            echo "::error::expected ${expected} archives, found ${count}"
             exit 1
           fi
 

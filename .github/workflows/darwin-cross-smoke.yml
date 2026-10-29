@@ -1,0 +1,65 @@
+name: Darwin cross-compile smoke test
+
+# The release job builds the darwin artifacts on a self-hosted Linux runner
+# instead of a macOS one (see .github/scripts/build-darwin-cross.sh). That
+# toolchain — zig, a macOS SDK, llvm's dsymutil/strip — lives outside the
+# repository, so an OS or package upgrade can break it without any change here.
+#
+# Run this before pushing a v* tag. A release that fails halfway is expensive:
+# it has already created the GitHub release by the time the upload step runs.
+#
+# On demand only. Nothing here is triggered by a push, so it costs nothing
+# until someone asks for it.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  darwin-cross:
+    name: Build darwin artifacts
+    # Same label set as the release job, so this doubles as a check that the
+    # toolchain runner is online and that the label still matches it.
+    runs-on: [self-hosted, bbgo, macos-cross]
+    timeout-minutes: 45
+
+    env:
+      VERSION: smoke
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Install Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.2"
+          cache: true
+
+      - name: Install Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+
+      # Same sequence as the release job, so a green run here means the release
+      # build will get through these steps too.
+      - name: Build darwin artifacts
+        run: |
+          go mod download
+          npm install --global yarn
+          make static
+          bash .github/scripts/build-darwin-cross.sh
+        shell: bash
+
+      - name: Verify artifacts
+        run: |
+          expected=8
+          count=$(find "dist/${VERSION}" -name '*.tar.gz' | wc -l | tr -d ' ')
+          echo "found ${count} darwin archives (expected ${expected})"
+          find "dist/${VERSION}" -name '*.tar.gz' -exec basename {} \; | sort
+          if [ "${count}" -lt "${expected}" ]; then
+            echo "::error::expected ${expected} darwin archives, found ${count}"
+            exit 1
+          fi
