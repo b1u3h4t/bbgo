@@ -44,7 +44,13 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Fetch upstream
+        # Self-hosted runners reuse the workspace directory across jobs, and
+        # actions/checkout only resets origin — so the `upstream` remote added
+        # by an earlier run is still there, and a plain `git remote add` exits 3
+        # with "remote upstream already exists". Removing first keeps the step
+        # idempotent and also repairs a remote left pointing at the wrong URL.
         run: |
+          git remote remove upstream 2>/dev/null || true
           git remote add upstream https://github.com/c9s/bbgo.git
           git fetch --no-tags upstream main
           echo "local=$(git rev-parse HEAD)"
