@@ -12,8 +12,12 @@ OSX_APP_CONTENTS_DIR = $(OSX_APP_DIR)/Contents
 OSX_APP_RESOURCES_DIR = $(OSX_APP_CONTENTS_DIR)/Resources
 OSX_APP_CODESIGN_IDENTITY ?=
 
-# OSX_APP_GUI ?= lorca
-OSX_APP_GUI ?= webview
+# lorca, not webview: cmd/bbgo-webview no longer exists (upstream kept only
+# cmd/bbgo-lorca), and the old default made `make desktop` die with
+# "stat .../cmd/bbgo-webview: directory not found" — which is also what killed
+# `make dist` at its last step. lorca additionally compiles on Linux, which is
+# what lets the .app be cross-compiled here instead of on a macOS runner.
+OSX_APP_GUI ?= lorca
 
 FRONTEND_EXPORT_DIR = apps/frontend/out
 
@@ -131,10 +135,12 @@ $(OSX_APP_CONTENTS_DIR)/MacOS/bbgo-desktop: $(OSX_APP_CONTENTS_DIR)/MacOS .FORCE
 	go build -tags web -o $@ ./cmd/bbgo-$(OSX_APP_GUI)
 
 desktop-osx: $(OSX_APP_CONTENTS_DIR)/MacOS/bbgo-desktop $(OSX_APP_CONTENTS_DIR)/Info.plist $(OSX_APP_RESOURCES_DIR)/icon.icns
-	if [[ -n "$(OSX_APP_CODESIGN_IDENTITY)" ]] ; then codesign --deep --force --verbose --sign "$(OSX_APP_CODESIGN_IDENTITY)" $(OSX_APP_DIR) \
+	if [ -n "$(OSX_APP_CODESIGN_IDENTITY)" ] ; then codesign --deep --force --verbose --sign "$(OSX_APP_CODESIGN_IDENTITY)" $(OSX_APP_DIR) \
 		&& codesign --verify -vvvv $(OSX_APP_DIR) ; fi
 
-desktop: desktop-osx
+# The GUI embeds the built frontend, so it cannot compile under -tags web
+# without pkg/server/assets.go; depend on it instead of failing halfway.
+desktop: pkg/server/assets.go desktop-osx
 
 $(DIST_DIR)/$(VERSION):
 	mkdir -p $(DIST_DIR)/$(VERSION)

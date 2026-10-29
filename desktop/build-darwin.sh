@@ -2,7 +2,9 @@
 APP="BBGO.app"
 APP_DIR=build/$APP
 
-go build -o $APP_DIR/Contents/MacOS/bbgo-desktop ./cmd/bbgo-desktop
+# cmd/bbgo-desktop was removed upstream; cmd/bbgo-lorca is the only GUI entry
+# left. Same for cmd/bbgo-webview, which is why the Makefile defaults to lorca.
+go build -o $APP_DIR/Contents/MacOS/bbgo-desktop ./cmd/bbgo-lorca
 
 cat > $APP_DIR/Contents/Info.plist << EOF
 <?xml version="1.0" encoding="UTF-8"?>
