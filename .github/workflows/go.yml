@@ -34,8 +34,8 @@ jobs:
         redis-version:
         - "6.2"
         go-version:
-        # Pin patch: self-hosted tool-cache may keep older 1.27.x, and go.mod needs >= 1.27.2.
-        - "1.27.2"
+        # Pin patch: self-hosted tool-cache may keep older 1.27.x, and go.mod needs >= 1.27.3.
+        - "1.27.3"
     env:
       # Self-hosted runner .env often sets GOTOOLCHAIN=local, which blocks toolchain fetch.
       GOTOOLCHAIN: auto
