@@ -252,6 +252,7 @@ func (s *Server) newEngine(ctx context.Context) *gin.Engine {
 	r.GET("/api/strategies/metrics", s.listStrategiesMetrics)
 
 	s.registerAnalysisRoutes(r)
+	s.registerBracketRoutes(r)
 
 	r.NoRoute(s.assetsHandler)
 	return r

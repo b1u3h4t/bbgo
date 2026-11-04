@@ -319,3 +319,63 @@ export async function queryAnalysisAvgDown(params: {
   });
   return response.data;
 }
+
+/** Futures entry + deferred reduce-only TP/SL job (bracket daemon). */
+export interface BracketJob {
+  id: string;
+  state: string;
+  symbol: string;
+  side: string;
+  quantity: number | string;
+  entryPrice?: number | string;
+  tpPrice: number | string;
+  slPrice: number | string;
+  entryOrderID?: number;
+  tpOrderID?: number;
+  slOrderID?: number;
+  executedQuantity?: number | string;
+  lastError?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export async function queryBracketHealth(): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const response = await axios.get(baseURL + '/api/brackets-health', {
+      validateStatus: () => true,
+    });
+    if (response.status >= 200 && response.status < 300) {
+      return { ok: true };
+    }
+    return {
+      ok: false,
+      error: response.data?.error || `HTTP ${response.status}`,
+    };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || String(e) };
+  }
+}
+
+export async function queryBrackets(): Promise<BracketJob[]> {
+  const response = await axios.get(baseURL + '/api/brackets');
+  const data = response.data;
+  return Array.isArray(data) ? data : [];
+}
+
+export async function createBracket(body: {
+  symbol: string;
+  side: string;
+  quantity: string;
+  price?: string;
+  market?: boolean;
+  tp: string;
+  sl?: string;
+}): Promise<BracketJob> {
+  const response = await axios.post(baseURL + '/api/brackets', body);
+  return response.data;
+}
+
+export async function cancelBracket(id: string): Promise<BracketJob> {
+  const response = await axios.delete(baseURL + `/api/brackets/${id}`);
+  return response.data;
+}

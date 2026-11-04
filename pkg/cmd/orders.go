@@ -200,6 +200,11 @@ var submitOrderCmd = &cobra.Command{
 			return fmt.Errorf("can not get quantity: %w", err)
 		}
 
+		reduceOnly, err := cmd.Flags().GetBool("reduce-only")
+		if err != nil {
+			return err
+		}
+
 		environ := bbgo.NewEnvironment()
 		if err := environ.ConfigureExchangeSessions(userConfig); err != nil {
 			return err
@@ -226,6 +231,7 @@ var submitOrderCmd = &cobra.Command{
 			Quantity:         fixedpoint.MustNewFromString(quantity),
 			Market:           market,
 			MarginSideEffect: types.MarginOrderSideEffectType(marginOrderSideEffect),
+			ReduceOnly:       reduceOnly,
 		}
 
 		if asMarketOrder {
@@ -266,6 +272,7 @@ func init() {
 	submitOrderCmd.Flags().String("quantity", "", "the trading quantity")
 	submitOrderCmd.Flags().Bool("market", false, "submit order as a market order")
 	submitOrderCmd.Flags().String("margin-side-effect", "", "margin order side effect")
+	submitOrderCmd.Flags().Bool("reduce-only", false, "futures reduce-only order")
 
 	RootCmd.AddCommand(listOrdersCmd)
 	RootCmd.AddCommand(getOrderCmd)

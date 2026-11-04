@@ -826,14 +826,11 @@ func (s *Stream) listenKeyKeepAlive(ctx context.Context, listenKey string) {
 	keepAliveTicker := time.NewTicker(listenKeyKeepAliveInterval)
 	defer keepAliveTicker.Stop()
 
-	// if we exit, we should invalidate the existing listen key
-	defer func() {
-		if err := s.closeListenKey(context.Background(), listenKey); err != nil {
-			log.WithError(err).Warnf("close listen key error: %v key: %s", err, util.MaskKey(listenKey))
-		}
-	}()
-
-	log.Debugf("starting listen key keep alive worker with interval %s, listen key = %s", listenKeyKeepAliveInterval, util.MaskKey(listenKey))
+	// Do not DELETE the listenKey on exit. Futures allow only one listenKey per
+	// API key; bbgo and bbgo-bracket share it. Closing it here drops every other
+	// websocket that is still using the key. PUT keepalive is enough; Binance
+	// expires the key ~60 minutes after the last PUT.
+	log.Infof("starting listen key keep alive worker with interval %s, listen key = %s (will not close on exit)", listenKeyKeepAliveInterval, util.MaskKey(listenKey))
 
 	for {
 		select {

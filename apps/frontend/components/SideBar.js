@@ -9,6 +9,7 @@ import ListItemText from '@mui/material/ListItemText';
 import ListIcon from '@mui/icons-material/List';
 import TrendingUpIcon from '@mui/icons-material/TrendingUp';
 import AssessmentIcon from '@mui/icons-material/Assessment';
+import CallSplitIcon from '@mui/icons-material/CallSplit';
 import React from 'react';
 import { makeStyles } from '@mui/styles';
 import useMediaQuery from '@mui/material/useMediaQuery';
@@ -46,6 +47,7 @@ const navSecondary = [
   { href: '/trades', label: 'Trades', icon: <ListIcon /> },
   { href: '/strategies', label: 'Strategies', icon: <TrendingUpIcon /> },
   { href: '/analysis', label: 'Analysis', icon: <AssessmentIcon /> },
+  { href: '/brackets', label: 'Brackets', icon: <CallSplitIcon /> },
 ];
 
 export default function SideBar({ mobileOpen = false, onClose }) {
