@@ -116,7 +116,10 @@ func TestLinReg_LegacyCompatible(t *testing.T) {
 	assert.Equal(t, types.Direction(types.DirectionUp), lr.GetSignal())
 }
 
-func TestDoubleDema_LegacyCompatible(t *testing.T) {
+func TestDoubleDema_RegimeCompatible(t *testing.T) {
+	// Signal expectations match getDemaSignal's regime filter (close vs both DEMAs),
+	// not the upstream intra-bar crossover snapshot. Fast DEMA values below are still
+	// the legacy indicator.DEMA series captured before the v2 migration.
 	kLines := syntheticKLines(80, 7)
 
 	closePrices := types.NewFloat64Series()
@@ -132,10 +135,10 @@ func TestDoubleDema_LegacyCompatible(t *testing.T) {
 	}
 
 	expected := []types.Direction{
-		0, 1, -1, -1, 0, 1, 0, 1, 1, -1, 1, -1, 1, -1, 0, 1, 1, 0, 0, 1,
+		0, 1, -1, -1, 0, 1, 1, 1, 1, -1, 1, -1, 1, -1, -1, 1, 1, 0, 0, 1,
 		1, 1, 1, 0, 1, 1, 0, 0, -1, -1, 0, 1, 1, 0, -1, 0, -1, 1, -1, 1,
-		-1, 0, -1, 0, -1, 0, 1, 1, 0, 1, 1, 1, 0, 0, 0, 0, 1, 1, -1, -1,
-		0, -1, 0, -1, 0, -1, 1, 0, 1, 1, -1, 1, 0, -1, 1, 1, 1, -1, 0, -1,
+		-1, -1, -1, 0, -1, 0, 1, 1, 1, 1, 1, 1, 0, 0, -1, -1, 1, 1, -1, -1,
+		0, -1, 0, -1, 0, -1, 1, 1, 1, 1, -1, 1, 0, -1, 1, 1, 1, -1, 0, -1,
 	}
 	assert.Equal(t, expected, signals)
 
