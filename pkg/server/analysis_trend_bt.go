@@ -215,9 +215,12 @@ func summarizeSide(trades []trendBTTrade, side int) trendSideStats {
 	if losses > 0 {
 		st.AvgLossPct = roundFloat(lossSum/float64(losses), 3)
 	}
-	if lossesAbs > 1e-12 {
+	if lossesAbs > 1e-8 {
 		st.ProfitFactor = roundFloat(winSum/lossesAbs, 3)
 	} else if winSum > 0 {
+		st.ProfitFactor = 99
+	}
+	if st.ProfitFactor > 99 {
 		st.ProfitFactor = 99
 	}
 	st.MedianPullbackPct = roundFloat(medianFloat(pullbacks), 3)

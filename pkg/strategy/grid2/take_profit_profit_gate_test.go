@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/c9s/bbgo/pkg/bbgo"
 	"github.com/c9s/bbgo/pkg/fixedpoint"
 	"github.com/c9s/bbgo/pkg/types"
 )
@@ -97,6 +98,76 @@ func TestShouldPlaceGridOrder_WLDShortCover(t *testing.T) {
 		"buy just below avg still loses after fee")
 	assert.True(t, s.shouldPlaceGridOrder(types.SideTypeBuy, fixedpoint.NewFromFloat(0.4308)),
 		"buy below fee-adjusted breakeven is ok")
+}
+
+func TestCleanGridUsesPinGate_HYPECase(t *testing.T) {
+	market := types.Market{
+		Symbol:        "HYPEUSDT",
+		BaseCurrency:  "HYPE",
+		QuoteCurrency: "USDT",
+		MinQuantity:   fixedpoint.NewFromFloat(0.01),
+		MinNotional:   fixedpoint.NewFromFloat(5),
+		TickSize:      fixedpoint.NewFromFloat(0.001),
+		StepSize:      fixedpoint.NewFromFloat(0.01),
+	}
+	// Stacked long from walking buys; avgCost above next twin sell — avgCost gate would block.
+	s := &Strategy{
+		Position: types.NewPositionFromMarket(market),
+		FeeRate:  fixedpoint.NewFromFloat(0.0002),
+		LowerPrice: fixedpoint.NewFromFloat(90),
+		UpperPrice: fixedpoint.NewFromFloat(97),
+		GridNum:    12,
+		QuantityOrAmount: bbgo.QuantityOrAmount{
+			Quantity: fixedpoint.NewFromFloat(21.3),
+		},
+	}
+	_ = s.Position.ModifyBase(fixedpoint.NewFromFloat(64.32))
+	_ = s.Position.ModifyAverageCost(fixedpoint.NewFromFloat(91.91559))
+
+	assert.True(t, s.isCleanGridInventory(), "in-band multi-pin inventory is clean")
+	// Without entry: clean allows (no avgCost block)
+	assert.True(t, s.shouldPlaceGridOrder(types.SideTypeSell, fixedpoint.NewFromFloat(91.909)))
+	// With pin entry 91.272 → twin 91.909 is profitable per-lot
+	assert.True(t, s.shouldPlaceGridOrderWithEntry(
+		types.SideTypeSell,
+		fixedpoint.NewFromFloat(91.909),
+		fixedpoint.NewFromFloat(91.272),
+	), "pin gate must allow twin sell above fill")
+}
+
+func TestDirtyGridUsesAvgCostGate(t *testing.T) {
+	market := types.Market{
+		Symbol:        "HYPEUSDT",
+		BaseCurrency:  "HYPE",
+		QuoteCurrency: "USDT",
+		TickSize:      fixedpoint.NewFromFloat(0.001),
+		StepSize:      fixedpoint.NewFromFloat(0.01),
+	}
+	// avgCost above band → dirty; pin round-trip looks fine but avgCost blocks sell below cost
+	s := &Strategy{
+		Position:   types.NewPositionFromMarket(market),
+		FeeRate:    fixedpoint.NewFromFloat(0.0002),
+		LowerPrice: fixedpoint.NewFromFloat(90),
+		UpperPrice: fixedpoint.NewFromFloat(97),
+		GridNum:    12,
+		QuantityOrAmount: bbgo.QuantityOrAmount{
+			Quantity: fixedpoint.NewFromFloat(21.3),
+		},
+	}
+	_ = s.Position.ModifyBase(fixedpoint.NewFromFloat(21.3))
+	_ = s.Position.ModifyAverageCost(fixedpoint.NewFromFloat(98)) // outside band → dirty
+
+	assert.False(t, s.isCleanGridInventory())
+	assert.True(t, s.isProfitablePinRoundTrip(
+		fixedpoint.NewFromFloat(91.272),
+		fixedpoint.NewFromFloat(91.909),
+		types.SideTypeSell,
+	), "pin alone would allow")
+	assert.False(t, s.shouldPlaceGridOrderWithEntry(
+		types.SideTypeSell,
+		fixedpoint.NewFromFloat(91.909),
+		fixedpoint.NewFromFloat(91.272),
+	), "dirty inventory still blocked by avgCost even if pin round-trip looks fine")
 }
 
 func TestNetCloseProfitAfterFee_Long(t *testing.T) {

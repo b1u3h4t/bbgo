@@ -185,9 +185,16 @@ func oneDayArbitrageCount(ps *grid2.GridProfitStats) int {
 }
 
 func roundFloat(v float64, prec int) float64 {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0
+	}
 	if prec < 0 {
 		return v
 	}
 	pow := math.Pow(10, float64(prec))
-	return math.Round(v*pow) / pow
+	out := math.Round(v*pow) / pow
+	if math.IsNaN(out) || math.IsInf(out, 0) {
+		return 0
+	}
+	return out
 }

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"math"
 	"testing"
 	"time"
@@ -87,6 +88,43 @@ func TestIdealEntryFromBTRespectsSide(t *testing.T) {
 	}
 	if ss <= se || sttp >= se {
 		t.Fatalf("short stops bad entry=%v sl=%v tp=%v", se, ss, sttp)
+	}
+}
+
+func TestRoundFloatFinite(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   float64
+		want float64
+	}{
+		{name: "inf", in: math.Inf(1), want: 0},
+		{name: "neg_inf", in: math.Inf(-1), want: 0},
+		{name: "nan", in: math.NaN(), want: 0},
+		{name: "normal", in: 1.2345, want: 1.23},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := roundFloat(tc.in, 2)
+			if got != tc.want {
+				t.Fatalf("roundFloat(%v)=%v want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSummarizeSideJSONSafeWhenLossNearZero(t *testing.T) {
+	t.Parallel()
+	st := summarizeSide([]trendBTTrade{
+		{Side: 1, PnLPct: 12, Win: true, PullbackPct: 0.4},
+		{Side: 1, PnLPct: -1e-15, Win: false},
+	}, 1)
+	if math.IsNaN(st.ProfitFactor) || math.IsInf(st.ProfitFactor, 0) {
+		t.Fatalf("profitFactor not finite: %v", st.ProfitFactor)
+	}
+	if _, err := json.Marshal(st); err != nil {
+		t.Fatalf("marshal: %v", err)
 	}
 }
 

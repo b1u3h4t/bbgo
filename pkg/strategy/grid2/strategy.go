@@ -1183,11 +1183,15 @@ func (s *Strategy) processFilledOrder(o types.Order) {
 		s.logger.Infof("new quantity %s @ price %s is less than min base quantity %s, please check it. it may due to trading fee or the min base quantity setting changes", newQuantity.String(), newPrice.String(), s.Market.MinQuantity.String())
 	}
 
-	if !s.shouldPlaceGridOrder(newSide, newPrice) {
+	if !s.shouldPlaceGridOrderWithEntry(newSide, newPrice, o.Price) {
 		base, avg := s.Position.GetBaseAndAverageCost()
+		gate := "avgCost"
+		if s.isCleanGridInventory() {
+			gate = "pin"
+		}
 		s.logger.Infof(
-			"skip GRID REVERSE ORDER %s @ %s: would close at a loss after fee (base=%s avgCost=%s gross=%s fee=%s net=%s feeRate=%s); flat must be profitable",
-			newSide, newPrice.String(), base.String(), avg.String(),
+			"skip GRID REVERSE ORDER %s @ %s: would close at a loss after fee (gate=%s fill=%s base=%s avgCost=%s gross=%s fee=%s net=%s feeRate=%s); flat must be profitable",
+			newSide, newPrice.String(), gate, o.Price.String(), base.String(), avg.String(),
 			s.Position.UnrealizedProfit(newPrice).String(),
 			s.estimatedCloseFee(newPrice).String(),
 			s.netCloseProfitAt(newPrice).String(),
@@ -1816,11 +1820,11 @@ func (s *Strategy) repairMissingReverseOrders(ctx context.Context) error {
 		}
 	}
 
-	submitOne := func(side types.SideType, price, qty fixedpoint.Value, reduceOnly bool) {
+	submitOne := func(side types.SideType, price, entry, qty fixedpoint.Value, reduceOnly bool) {
 		if qty.IsZero() || s.Market.IsDustQuantity(qty, price) {
 			return
 		}
-		if !s.shouldPlaceGridOrder(side, price) {
+		if !s.shouldPlaceGridOrderWithEntry(side, price, entry) {
 			return
 		}
 		if occupiedBool[price.String()] {
@@ -1856,18 +1860,18 @@ func (s *Strategy) repairMissingReverseOrders(ctx context.Context) error {
 					break
 				}
 				qty := fixedpoint.Min(gridQty, remaining)
-				submitOne(types.SideTypeSell, n.sellPrice, qty, true)
+				submitOne(types.SideTypeSell, n.sellPrice, n.buyPrice, qty, true)
 				remaining = remaining.Sub(qty)
 			}
 		} else {
 			// Two-sided: every empty sell pin above last is a normal maker sell
 			// (may reduce long or open short) — no ReduceOnly.
 			for _, n := range above {
-				submitOne(types.SideTypeSell, n.sellPrice, gridQty, false)
+				submitOne(types.SideTypeSell, n.sellPrice, n.buyPrice, gridQty, false)
 			}
 		}
 		for _, n := range below {
-			submitOne(types.SideTypeBuy, n.buyPrice, gridQty, false)
+			submitOne(types.SideTypeBuy, n.buyPrice, n.sellPrice, gridQty, false)
 		}
 	case base.Sign() < 0:
 		if s.ShortOnly {
@@ -1877,25 +1881,25 @@ func (s *Strategy) repairMissingReverseOrders(ctx context.Context) error {
 					break
 				}
 				qty := fixedpoint.Min(gridQty, remaining)
-				submitOne(types.SideTypeBuy, n.buyPrice, qty, true)
+				submitOne(types.SideTypeBuy, n.buyPrice, n.sellPrice, qty, true)
 				remaining = remaining.Sub(qty)
 			}
 		} else {
 			for i := len(below) - 1; i >= 0; i-- {
 				n := below[i]
-				submitOne(types.SideTypeBuy, n.buyPrice, gridQty, false)
+				submitOne(types.SideTypeBuy, n.buyPrice, n.sellPrice, gridQty, false)
 			}
 			for _, n := range above {
-				submitOne(types.SideTypeSell, n.sellPrice, gridQty, false)
+				submitOne(types.SideTypeSell, n.sellPrice, n.buyPrice, gridQty, false)
 			}
 		}
 	default:
 		// Flat: mirror openGrid — sells above last, buys below.
 		for _, n := range above {
-			submitOne(types.SideTypeSell, n.sellPrice, gridQty, false)
+			submitOne(types.SideTypeSell, n.sellPrice, n.buyPrice, gridQty, false)
 		}
 		for _, n := range below {
-			submitOne(types.SideTypeBuy, n.buyPrice, gridQty, false)
+			submitOne(types.SideTypeBuy, n.buyPrice, n.sellPrice, gridQty, false)
 		}
 	}
 
@@ -1973,7 +1977,17 @@ func (s *Strategy) isProfitableCloseAt(price fixedpoint.Value) bool {
 // shouldPlaceGridOrder is false when the order would close/reduce the position
 // at a loss after fees, or when LongOnly/ShortOnly would open the wrong side naked.
 // Opening / flat sides otherwise pass — "平仓一定要盈利".
+// Without a fill entry price, dirty inventory uses whole-position avgCost;
+// clean inventory without entry allows the pin (avoids avgCost blocking stacked pins).
 func (s *Strategy) shouldPlaceGridOrder(side types.SideType, price fixedpoint.Value) bool {
+	return s.shouldPlaceGridOrderWithEntry(side, price, fixedpoint.Zero)
+}
+
+// shouldPlaceGridOrderWithEntry chooses the profit gate:
+//   - clean grid + entryPrice > 0 → pin/本笔 round-trip vs entryPrice
+//   - dirty / foreign / stacked-beyond-band inventory → whole-position avgCost
+//   - clean + no entry (bulk place/filter) → allow (pin ladder already spaced > fee)
+func (s *Strategy) shouldPlaceGridOrderWithEntry(side types.SideType, price, entryPrice fixedpoint.Value) bool {
 	if s.LongOnly && side == types.SideTypeSell {
 		// Sell only with long inventory — never naked short.
 		if s.Position == nil || s.Position.GetBase().Sign() <= 0 {
@@ -1989,25 +2003,111 @@ func (s *Strategy) shouldPlaceGridOrder(side types.SideType, price fixedpoint.Va
 	if !s.isClosingOrderSide(side) {
 		return true
 	}
+	if s.isCleanGridInventory() {
+		if entryPrice.Sign() > 0 {
+			return s.isProfitablePinRoundTrip(entryPrice, price, side)
+		}
+		return true
+	}
 	return s.isProfitableCloseAt(price)
+}
+
+// isCleanGridInventory reports whether the open position looks like inventory
+// from this single grid ladder (use pin/本笔 profit gate) rather than foreign /
+// restart-overlay / multi-grid stack (keep whole-position avgCost gate).
+//
+// Clean when ALL of:
+//  1. flat / nil position, OR
+//  2. band is configured (lower, upper, gridNumber>0) AND qty>0, AND
+//  3. averageCost is inside [lowerPrice, upperPrice] (inclusive), AND
+//  4. |positionBase| <= quantity * max(gridNumber-1, 1) * 2
+//     (one-side full pins, with 2× slack for compound growth)
+//
+// Dirty (avgCost gate) when any check fails — e.g. missing band config, avgCost
+// outside the grid range, or base larger than one grid can explain.
+func (s *Strategy) isCleanGridInventory() bool {
+	if s.Position == nil {
+		return true
+	}
+	base := s.Position.GetBase()
+	if base.IsZero() {
+		return true
+	}
+	// Need band + size to judge; otherwise keep conservative avgCost gate.
+	if s.LowerPrice.IsZero() || s.UpperPrice.IsZero() || s.GridNum <= 0 {
+		return false
+	}
+	avg := s.Position.GetAverageCost()
+	if avg.Sign() > 0 {
+		if avg.Compare(s.LowerPrice) < 0 || avg.Compare(s.UpperPrice) > 0 {
+			return false
+		}
+	}
+	qty := s.QuantityOrAmount.Quantity
+	if qty.Sign() <= 0 {
+		return false
+	}
+	maxPins := s.GridNum - 1
+	if maxPins < 1 {
+		maxPins = 1
+	}
+	// Allow compound growth: up to 2x configured qty across all one-side pins.
+	maxBase := qty.Mul(fixedpoint.NewFromInt(maxPins)).Mul(fixedpoint.NewFromFloat(2.0))
+	if base.Abs().Compare(maxBase) > 0 {
+		return false
+	}
+	return true
+}
+
+// isProfitablePinRoundTrip checks one grid lot: entry fill → reverse exit after fees.
+// Round-trip fee ≈ 2× maker (both legs); matches industry per-level TP accounting.
+func (s *Strategy) isProfitablePinRoundTrip(entryPrice, exitPrice fixedpoint.Value, closingSide types.SideType) bool {
+	if entryPrice.Sign() <= 0 || exitPrice.Sign() <= 0 {
+		return false
+	}
+	rtFee := s.closingFeeRate().Mul(fixedpoint.NewFromInt(2))
+	switch closingSide {
+	case types.SideTypeSell:
+		// Long lot: need exit > entry * (1 + 2*fee)
+		minExit := entryPrice.Mul(fixedpoint.One.Add(rtFee))
+		return exitPrice.Compare(minExit) > 0
+	case types.SideTypeBuy:
+		// Short lot: need exit < entry * (1 - 2*fee)
+		maxExit := entryPrice.Mul(fixedpoint.One.Sub(rtFee))
+		return exitPrice.Compare(maxExit) < 0
+	default:
+		return true
+	}
 }
 
 // twinPinReverseIsUnprofitableClose reports whether filling the missing reverse
 // for an empty twin (key = sell pin) would close the book at a loss after fees.
 // Short → reverse buy at next-lower pin; long → reverse sell at sell pin.
+// Clean grids use the adjacent pin as the lot entry; dirty uses avgCost.
 func (s *Strategy) twinPinReverseIsUnprofitableClose(sellPin fixedpoint.Value) bool {
 	if s.Position == nil || s.grid == nil {
 		return false
 	}
 	base := s.Position.GetBase()
+	lower, hasLower := s.grid.NextLowerPin(sellPin)
 	switch {
 	case base.Sign() < 0:
-		lower, ok := s.grid.NextLowerPin(sellPin)
-		if !ok {
+		if !hasLower {
 			return false
 		}
-		return !s.isProfitableCloseAt(fixedpoint.Value(lower))
+		buyPrice := fixedpoint.Value(lower)
+		if s.isCleanGridInventory() {
+			// Cover short opened at sellPin by buying lower pin.
+			return !s.isProfitablePinRoundTrip(sellPin, buyPrice, types.SideTypeBuy)
+		}
+		return !s.isProfitableCloseAt(buyPrice)
 	case base.Sign() > 0:
+		if s.isCleanGridInventory() {
+			if !hasLower {
+				return false
+			}
+			return !s.isProfitablePinRoundTrip(fixedpoint.Value(lower), sellPin, types.SideTypeSell)
+		}
 		return !s.isProfitableCloseAt(sellPin)
 	default:
 		return false
