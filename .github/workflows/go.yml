@@ -77,11 +77,34 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-go-
 
-    - name: Set up MySQL (ubuntu-latest)
+    # ubuntu-latest (esp. 26.04) no longer ships /etc/init.d/mysql; use Docker like
+    # upstream's mysql:8.4 service, but only on PR runners so self-hosted :3306 stays free.
+    - name: Set up MySQL (ubuntu-latest Docker)
       if: github.event_name == 'pull_request'
       run: |
-        sudo /etc/init.d/mysql start
-        mysql -e 'CREATE DATABASE ${{ env.MYSQL_DATABASE }};' -u${{ env.MYSQL_USER }} -p${{ env.MYSQL_PASSWORD }}
+        docker rm -f "${CI_MYSQL_NAME}" >/dev/null 2>&1 || true
+        docker run -d --name "${CI_MYSQL_NAME}" \
+          -e MYSQL_ROOT_PASSWORD=${{ env.MYSQL_PASSWORD }} \
+          -e MYSQL_DATABASE=${{ env.MYSQL_DATABASE }} \
+          -p 127.0.0.1:${{ env.MYSQL_HOST_PORT }}:3306 \
+          mysql:8.4
+        ready=0
+        for i in $(seq 1 60); do
+          if docker exec "${CI_MYSQL_NAME}" mysql -uroot -p${{ env.MYSQL_PASSWORD }} -e "SELECT 1" >/dev/null 2>&1; then
+            sleep 3
+            if docker exec "${CI_MYSQL_NAME}" mysql -uroot -p${{ env.MYSQL_PASSWORD }} -e "SELECT 1" >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+          fi
+          sleep 2
+        done
+        if [ "$ready" != "1" ]; then
+          echo "MySQL did not become ready in time"
+          docker logs "${CI_MYSQL_NAME}" || true
+          exit 1
+        fi
+        docker exec "${CI_MYSQL_NAME}" mysql -uroot -p${{ env.MYSQL_PASSWORD }} -e "CREATE DATABASE IF NOT EXISTS ${{ env.MYSQL_DATABASE }};"
 
     - name: Set up redis (ubuntu-latest)
       if: github.event_name == 'pull_request'
@@ -100,7 +123,7 @@ jobs:
           -e MYSQL_ROOT_PASSWORD=${{ env.MYSQL_PASSWORD }} \
           -e MYSQL_DATABASE=${{ env.MYSQL_DATABASE }} \
           -p 127.0.0.1:${{ env.MYSQL_HOST_PORT }}:3306 \
-          mysql:8.0; then
+          mysql:8.4; then
           echo "docker run ${CI_MYSQL_NAME} failed"
           ss -ltn | grep -E '(:|^)${{ env.MYSQL_HOST_PORT }}$' || true
           docker ps -a --filter name=bbgo-ci-mysql- || true
@@ -428,10 +451,10 @@ jobs:
           fi
         fi
 
-    - name: Cleanup CI PostgreSQL (ubuntu-latest)
+    - name: Cleanup CI containers (ubuntu-latest)
       if: always() && github.event_name == 'pull_request'
       run: |
-        docker rm -f "${CI_PG_NAME}" >/dev/null 2>&1 || true
+        docker rm -f "${CI_MYSQL_NAME}" "${CI_PG_NAME}" >/dev/null 2>&1 || true
 
     - name: Cleanup per-run tmpdir
       if: always()

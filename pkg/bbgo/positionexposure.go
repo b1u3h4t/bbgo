@@ -65,15 +65,14 @@ var positionExposureSizeMetrics = promauto.NewHistogramVec(
 type PositionExposure struct {
 	symbol string
 
-	// mu protects net and pending as a consistent pair. Close updates both
-	// fields; readers like GetUncovered/IsClosed must not observe a torn state
-	// where only one field has been updated (that can falsely look uncovered
-	// and trigger a duplicate hedge).
-	mu sync.Mutex
-
 	// net = net position
 	// pending = covered position
-	net, pending fixedpoint.Value
+	net, pending fixedpoint.MutexValue
+
+	// mu makes every update and read of net and pending one step. Close moves both,
+	// and a reader between the two moves would see a half-applied delta: a covered
+	// position closed by a fill would look uncovered and be hedged again.
+	mu sync.RWMutex
 
 	openCallbacks  []func(d fixedpoint.Value)
 	coverCallbacks []func(d fixedpoint.Value)
@@ -105,22 +104,35 @@ func (m *PositionExposure) GetSymbol() string {
 }
 
 func (m *PositionExposure) GetNet() fixedpoint.Value {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.net
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.net.Get()
 }
 
 func (m *PositionExposure) GetPending() fixedpoint.Value {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.pending.Get()
+}
+
+// snapshot returns net and pending read together
+func (m *PositionExposure) snapshot() (net, pending fixedpoint.Value) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.net.Get(), m.pending.Get()
+}
+
+// apply adds the deltas to net and pending in one step and returns the new values
+func (m *PositionExposure) apply(netDelta, pendingDelta fixedpoint.Value) (net, pending fixedpoint.Value) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.pending
+	m.net.Add(netDelta)
+	m.pending.Add(pendingDelta)
+	return m.net.Get(), m.pending.Get()
 }
 
 func (m *PositionExposure) Open(delta fixedpoint.Value) {
-	m.mu.Lock()
-	m.net = m.net.Add(delta)
-	net, pending := m.net, m.pending
-	m.mu.Unlock()
+	net, pending := m.apply(delta, fixedpoint.Zero)
 
 	m.logger.Infof(
 		"%s opened:%f netPosition:%f coveredPosition: %f",
@@ -136,10 +148,7 @@ func (m *PositionExposure) Open(delta fixedpoint.Value) {
 func (m *PositionExposure) Uncover(delta fixedpoint.Value) {
 	delta = delta.Neg()
 
-	m.mu.Lock()
-	m.pending = m.pending.Add(delta)
-	net, pending := m.net, m.pending
-	m.mu.Unlock()
+	net, pending := m.apply(fixedpoint.Zero, delta)
 
 	m.logger.Infof(
 		"%s uncovered:%f netPosition:%f coveredPosition: %f",
@@ -153,10 +162,7 @@ func (m *PositionExposure) Uncover(delta fixedpoint.Value) {
 }
 
 func (m *PositionExposure) Cover(delta fixedpoint.Value) {
-	m.mu.Lock()
-	m.pending = m.pending.Add(delta)
-	net, pending := m.net, m.pending
-	m.mu.Unlock()
+	net, pending := m.apply(fixedpoint.Zero, delta)
 
 	m.logger.Infof(
 		"%s covered:%f netPosition:%f coveredPosition: %f",
@@ -170,11 +176,7 @@ func (m *PositionExposure) Cover(delta fixedpoint.Value) {
 }
 
 func (m *PositionExposure) Close(delta fixedpoint.Value) {
-	m.mu.Lock()
-	m.pending = m.pending.Add(delta)
-	m.net = m.net.Add(delta)
-	net, pending := m.net, m.pending
-	m.mu.Unlock()
+	net, pending := m.apply(delta, delta)
 
 	m.logger.Infof(
 		"%s closed:%f netPosition:%f coveredPosition: %f",
@@ -188,29 +190,23 @@ func (m *PositionExposure) Close(delta fixedpoint.Value) {
 }
 
 func (m *PositionExposure) IsClosed() bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.net.IsZero() && m.pending.IsZero()
+	net, pending := m.snapshot()
+	return net.IsZero() && pending.IsZero()
 }
 
 func (m *PositionExposure) String() string {
-	m.mu.Lock()
-	net, pending := m.net, m.pending
-	uncovered := net.Sub(pending)
-	m.mu.Unlock()
-
+	net, pending := m.snapshot()
 	return fmt.Sprintf("PositionExposure<%s> net:%s pending:%s uncovered:%s",
 		m.symbol,
 		net.String(),
 		pending.String(),
-		uncovered.String(),
+		net.Sub(pending).String(),
 	)
 }
 
 func (m *PositionExposure) GetUncovered() fixedpoint.Value {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.net.Sub(m.pending)
+	netPosition, coveredPosition := m.snapshot()
+	return netPosition.Sub(coveredPosition)
 }
 
 func (m *PositionExposure) SetMetricsLabels(strategyType, strategyID, exchange, symbol string) {
@@ -225,20 +221,20 @@ func (m *PositionExposure) SetMetricsLabels(strategyType, strategyID, exchange, 
 	m.positionExposureNetMetrics = positionExposureNetMetrics.With(m.labels)
 	m.positionExposureUncoveredMetrics = positionExposureUncoveredMetrics.With(m.labels)
 	m.positionExposureSizeMetrics = positionExposureSizeMetrics.With(m.labels)
+
+	updater := func(delta fixedpoint.Value) {
+		m.updateMetrics()
+	}
+
+	m.OnOpen(updater)
+	m.OnCover(updater)
+	m.OnClose(updater)
 }
 
 func (m *PositionExposure) updateMetrics() {
-	if m.positionExposurePendingMetrics == nil {
-		return
-	}
-
-	m.mu.Lock()
-	net, pending := m.net, m.pending
-	uncovered := net.Sub(pending)
-	m.mu.Unlock()
-
+	net, pending := m.snapshot()
 	m.positionExposurePendingMetrics.Set(pending.Float64())
 	m.positionExposureNetMetrics.Set(net.Float64())
-	m.positionExposureUncoveredMetrics.Set(uncovered.Float64())
+	m.positionExposureUncoveredMetrics.Set(net.Sub(pending).Float64())
 	m.positionExposureSizeMetrics.Observe(net.Float64())
 }

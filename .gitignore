@@ -71,3 +71,29 @@ coverage_dum.txt
 /.credentials
 
 .claude/settings.local.json
+
+# the protobuf python code directory
+python/
+
+# Local ops / research artifacts (do not publish)
+.workbuddy-ai/
+OFI.md
+dashboard-analysis-review.md
+grid2-latest-review.md
+stockA/
+docs/sperandeo-web/
+docs/sperandeo-123-*
+bbgo-linux-amd64
+bbgo-linux-amd64.gz
+apps/frontend/tsconfig.tsbuildinfo
+scripts/analyze_grid_pnl_since_sep3.py
+scripts/analyze_nongrid_trades.py
+scripts/binance_realized_since_sep3.py
+scripts/dump_redis_grid_profits.py
+scripts/entry_levels_now.py
+scripts/hype_grid_opt/
+scripts/margin_alloc_snapshot.py
+scripts/order_winrate.py
+scripts/swing_ga_opt/
+scripts/verify_two_brackets.py
+scripts/zec_status_now.py
