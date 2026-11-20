@@ -16,7 +16,7 @@ func TestStream_SetLogger_SideStreams(t *testing.T) {
 
 	ex := New("", "")
 	ex.UseFutures()
-	s := NewStream(ex, ex.client, ex.futuresClient)
+	s := NewStream(ex, ex.client, ex.futuresClient, ex.deliveryClient)
 	s.SetLogger(logger.WithField("session", "binance_futures"))
 
 	s.initFuturesAuxStream()
