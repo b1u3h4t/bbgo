@@ -85,7 +85,18 @@ type Strategy struct {
 
 	MarginAssetInfoCacheTTL types.Duration `json:"marginAssetInfoCacheTTL"`
 
+	// InterestEstimate logs and exports the margin interest of the UTC calendar month (realized + projected)
+	// and the projections over the next rolling months of 30 x 24 hours
+	InterestEstimate *InterestEstimateConfig `json:"interestEstimate,omitempty"`
+
+	// InterestBudgetAlert alerts when a budget of interestEstimate.budget is
+	// exceeded or projected to be exceeded. It needs a budget.
+	InterestBudgetAlert *InterestBudgetAlertConfig `json:"interestBudgetAlert,omitempty"`
+
 	ExchangeSession *bbgo.ExchangeSession
+
+	// Environment is injected; its MarginService provides the realized interest
+	Environment *bbgo.Environment
 
 	marginBorrowRepay types.MarginBorrowRepayService
 	marginAssetInfo   marginAssetInfoCache
@@ -100,6 +111,26 @@ func (s *Strategy) Defaults() error {
 	if s.MarginAssetInfoCacheTTL == 0 {
 		s.MarginAssetInfoCacheTTL = types.Duration(30 * time.Minute)
 	}
+	return nil
+}
+
+// Validate checks the interest estimate config and the interest budget alert, if set
+func (s *Strategy) Validate() error {
+	if s.InterestEstimate != nil {
+		if err := s.InterestEstimate.Validate(); err != nil {
+			return err
+		}
+
+		if err := s.InterestEstimate.validateBudgetAssets(s.getAssetStringSlice()); err != nil {
+			return err
+		}
+	}
+
+	// an alert needs a budget to watch: do not ignore it silently
+	if s.InterestBudgetAlert != nil && (s.InterestEstimate == nil || !s.InterestEstimate.hasBudget()) {
+		return fmt.Errorf("interestBudgetAlert is set but no interest budget is, set interestEstimate.budget")
+	}
+
 	return nil
 }
 
@@ -612,7 +643,8 @@ func (s *Strategy) Run(ctx context.Context, orderExecutor bbgo.OrderExecutor, se
 
 	s.logger = logrus.WithFields(logrus.Fields{
 		"strategy": ID,
-		"exchange": s.ExchangeSession.Name,
+		"session":  s.ExchangeSession.Name,
+		"exchange": s.ExchangeSession.ExchangeName,
 	})
 
 	if !session.Margin {
@@ -642,6 +674,19 @@ func (s *Strategy) Run(ctx context.Context, orderExecutor bbgo.OrderExecutor, se
 
 	if s.MarginHighInterestRateAlertConfig != nil {
 		go newMarginHighInterestRateWorker(s, s.MarginHighInterestRateAlertConfig).Run(ctx)
+	}
+
+	if cfg := s.InterestEstimate; cfg != nil && cfg.Interval.Duration() > 0 {
+		worker := newInterestEstimateWorker(s, session, cfg)
+		release, err := worker.claimBudget()
+		if err != nil {
+			return err
+		}
+
+		go func() {
+			defer release()
+			worker.Run(ctx)
+		}()
 	}
 
 	go s.run(ctx, s.Interval.Duration())

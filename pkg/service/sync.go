@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
 	"time"
 
 	bbgoEx "github.com/c9s/bbgo/pkg/exchange"
@@ -25,6 +27,9 @@ type SyncService struct {
 	DepositService  *DepositService
 	MarginService   *MarginService
 	FuturesService  *FuturesService
+
+	// MarginInterestValuationService, when set, values the synced margin interests in USDT
+	MarginInterestValuationService *MarginInterestValuationService
 }
 
 // SyncSessionSymbols syncs the trades from the given exchange session
@@ -71,7 +76,7 @@ func (s *SyncService) SyncSessionSymbols(
 }
 
 func (s *SyncService) SyncMarginHistory(
-	ctx context.Context, exchange types.Exchange, startTime time.Time, assets ...string,
+	ctx context.Context, exchange types.Exchange, sessionName string, startTime time.Time, assets ...string,
 ) error {
 	if _, implemented := exchange.(types.MarginHistoryService); !implemented {
 		log.Debugf("exchange %T does not support types.MarginHistoryService", exchange)
@@ -91,12 +96,48 @@ func (s *SyncService) SyncMarginHistory(
 
 	log.Infof("syncing %s margin history: %v...", exchange.Name(), assets)
 	for _, asset := range assets {
-		if err := s.MarginService.Sync(ctx, exchange, asset, startTime); err != nil {
+		if err := s.MarginService.Sync(ctx, exchange, sessionName, asset, startTime); err != nil {
 			return err
 		}
 	}
 
+	if err := s.syncMarginFeeAssetInterests(ctx, exchange, sessionName, startTime, assets); err != nil {
+		return err
+	}
+
+	// a row that cannot be priced now is stored unpriced and priced by a later
+	// sync, so a kline or market failure does not stop the startup sync
+	if s.MarginInterestValuationService != nil {
+		if err := s.MarginInterestValuationService.Sync(ctx, exchange, sessionName, startTime); err != nil {
+			log.WithError(err).Warnf("unable to value the %s margin interests of session %q", exchange.Name(), sessionName)
+		}
+	}
+
 	return nil
+}
+
+// syncMarginFeeAssetInterests syncs the interests of the fee asset (BNB on
+// Binance) when it is not one of assets: interest paid with BNB deduction is
+// stored under it, so without it the listed assets would miss those rows.
+// Only the interests are synced, not the loans and repays of the fee asset.
+func (s *SyncService) syncMarginFeeAssetInterests(
+	ctx context.Context, exchange types.Exchange, sessionName string, startTime time.Time, assets []string,
+) error {
+	fee := MarginInterestFeeAsset(exchange.Name())
+	if fee == "" || slices.Contains(assets, fee) {
+		log.Warnf(
+			"[MarginService] fee asset %q is not included in interest payments for exchange session %s, margin assets: %v",
+			fee, sessionName, assets,
+		)
+		return nil
+	}
+
+	if err := ValidateMarginSessionName(sessionName); err != nil {
+		return fmt.Errorf("invalid margin session name: %w", err)
+	}
+
+	log.Infof("[MarginService] syncing %s margin interests paid in %s...", exchange.Name(), fee)
+	return s.MarginService.SyncInterests(ctx, exchange, sessionName, fee, startTime)
 }
 
 func (s *SyncService) SyncRewardHistory(ctx context.Context, exchange types.Exchange, startTime time.Time) error {

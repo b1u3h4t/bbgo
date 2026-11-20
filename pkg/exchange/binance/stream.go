@@ -16,6 +16,7 @@ import (
 	"github.com/adshao/go-binance/v2"
 	"github.com/adshao/go-binance/v2/delivery"
 	"github.com/adshao/go-binance/v2/futures"
+	"golang.org/x/time/rate"
 
 	"github.com/c9s/bbgo/pkg/types"
 )
@@ -110,6 +111,9 @@ type Stream struct {
 	algoOrderUpdateEventCallbacks     []func(e *AlgoOrderUpdateEvent)
 	serverShutdownEventCallbacks      []func(e *ServerShutdownEvent)
 
+	// futures websocket api (ws-fapi) event callbacks
+	futuresAccountStatusEventCallbacks []func(e *FuturesAccountStatusEvent)
+
 	errorCallbacks []func(e *ErrorEvent)
 
 	// depthBuffers is used for storing the depth info
@@ -130,6 +134,24 @@ type Stream struct {
 	futuresAuxStream  *types.StandardStream
 	futuresPublicSubs []types.Subscription // cached /public subscriptions
 	futuresMarketSubs []types.Subscription // cached /market subscriptions
+
+	// futuresAccountStatusStream polls v2/account.status over the futures WebSocket API.
+	// Only created for futures user data streams when EnableFuturesAccountStatusUpdate is called.
+	futuresAccountStatusStream   *types.StandardStream
+	futuresAccountStatusInterval time.Duration
+	futuresWsApiRequestID        uint64
+
+	// ctx is the base context passed to Connect, e.g. used to start the futures account status stream
+	ctx context.Context
+
+	// futuresWsApiErrorLimiter rate limits the error logs of the futures websocket api responses
+	futuresWsApiErrorLimiter *rate.Limiter
+
+	// futuresWsApiWriteMu serializes the account status requests with the close frame written by Close
+	futuresWsApiWriteMu sync.Mutex
+
+	// logger is the base logger of the stream and its side streams, see SetLogger
+	logger logrus.FieldLogger
 }
 
 func NewStream(ex *Exchange, client *binance.Client, futuresClient *futures.Client, deliveryClient *delivery.Client) *Stream {
@@ -146,6 +168,7 @@ func NewStream(ex *Exchange, client *binance.Client, futuresClient *futures.Clie
 		riskBalances: make(map[string]*RiskBalance),
 	}
 
+	stream.SetLogger(log)
 	stream.SetParser(parseWebSocketEvent)
 	stream.SetDispatcher(stream.dispatchEvent)
 	stream.SetEndpointCreator(stream.createEndpoint)
@@ -222,6 +245,7 @@ func NewStream(ex *Exchange, client *binance.Client, futuresClient *futures.Clie
 	stream.OnDisconnect(stream.handleDisconnect)
 	stream.OnConnect(stream.handleConnect)
 	stream.SetBeforeConnect(stream.handleBeforeConnect)
+	stream.OnStart(stream.handleStart)
 	stream.OnListenKeyExpired(func(e *ListenKeyExpired) {
 		log.Warnf("listen key expired, triggering reconnect: %+v", e)
 		stream.Reconnect()
@@ -266,7 +290,33 @@ func (s *Stream) updateRiskBalance(ctx context.Context) error {
 	return nil
 }
 
+// handleStart is called once Connect has connected the user data stream.
+func (s *Stream) handleStart() {
+	s.startFuturesAccountStatusStream()
+}
+
+// SetLogger sets the base logger of the stream, and of the side streams it opens later: they
+// add the "endpoint" field to it, which tells their connections apart from the main one.
+// It should be called before Connect.
+func (s *Stream) SetLogger(logger logrus.FieldLogger) {
+	s.logger = logger
+	s.StandardStream.SetLogger(logger)
+}
+
+// sideStreamLogger is the logger of a side stream connecting to the given endpoint.
+func (s *Stream) sideStreamLogger(endpoint string) logrus.FieldLogger {
+	var logger logrus.FieldLogger = log
+	if s.logger != nil {
+		logger = s.logger
+	}
+	return logger.WithField("endpoint", endpoint)
+}
+
 func (s *Stream) handleBeforeConnect(ctx context.Context) error {
+	// keep the base context for the goroutines started after connect,
+	// e.g. the account status stream started from OnStart
+	s.ctx = ctx
+
 	if s.exchange.IsMargin {
 		if err := s.updateRiskBalance(ctx); err != nil {
 			return err
@@ -276,15 +326,28 @@ func (s *Stream) handleBeforeConnect(ctx context.Context) error {
 	return nil
 }
 
-// Close closes the stream and, if present, the auxiliary futures /public stream.
+// Close closes the stream and, if present, the auxiliary futures /public stream
+// and the futures account status stream.
 func (s *Stream) Close() error {
 	s.ConnLock.Lock()
 	auxStream := s.futuresAuxStream
+	accountStatusStream := s.futuresAccountStatusStream
 	s.ConnLock.Unlock()
 
 	if auxStream != nil {
 		if err := auxStream.Close(); err != nil {
 			log.WithError(err).Warn("futures aux stream close error")
+		}
+	}
+
+	if accountStatusStream != nil {
+		// hold the write lock so that Close never writes the close frame concurrently with a request;
+		// Close cancels the connection context first, so the poller stops writing afterwards.
+		s.futuresWsApiWriteMu.Lock()
+		err := accountStatusStream.Close()
+		s.futuresWsApiWriteMu.Unlock()
+		if err != nil {
+			log.WithError(err).Warn("futures account status stream close error")
 		}
 	}
 	return s.StandardStream.Close()
@@ -301,6 +364,9 @@ func (s *Stream) writeSubscriptions() error {
 // Only called once; handleConnect guards with futuresAuxStream != nil check.
 func (s *Stream) initFuturesAuxStream() {
 	aux := types.NewStandardStream()
+	aux.SetLogger(s.sideStreamLogger("public"))
+	// the "stream" log field; a bare StandardStream reads PublicOnly for its logs only
+	aux.SetPublicOnly()
 	aux.SetParser(parseWebSocketEvent)
 	aux.SetDispatcher(s.dispatchEvent)
 	aux.SetEndpointCreator(func(ctx context.Context) (string, error) {
