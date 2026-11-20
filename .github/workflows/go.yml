@@ -115,18 +115,49 @@ jobs:
     - name: Set up MySQL (self-hosted Docker)
       if: github.event_name != 'pull_request'
       run: |
-        docker rm -f "${CI_MYSQL_NAME}" >/dev/null 2>&1 || true
-        # Free 13306 only from prior bbgo-ci-mysql-* leftovers (do not touch host mysqld).
-        docker ps --filter name=bbgo-ci-mysql- --format '{{.ID}}' | xargs -r docker rm -f || true
-        # Do not bind host :3306 — production/Harbor MySQL often owns it (docker exit 125).
-        if ! docker run -d --name "${CI_MYSQL_NAME}" \
-          -e MYSQL_ROOT_PASSWORD=${{ env.MYSQL_PASSWORD }} \
-          -e MYSQL_DATABASE=${{ env.MYSQL_DATABASE }} \
-          -p 127.0.0.1:${{ env.MYSQL_HOST_PORT }}:3306 \
-          mysql:8.4; then
-          echo "docker run ${CI_MYSQL_NAME} failed"
-          ss -ltn | grep -E '(:|^)${{ env.MYSQL_HOST_PORT }}$' || true
+        set -euo pipefail
+        # Per-run host port: fixed 13306 races when another job/workflow still holds it
+        # on a shared self-hosted runner (docker "port is already allocated").
+        MYSQL_HOST_PORT=$((13000 + (${GITHUB_RUN_ID} % 2000)))
+        echo "MYSQL_HOST_PORT=${MYSQL_HOST_PORT}" >> "$GITHUB_ENV"
+        echo "Using MYSQL_HOST_PORT=${MYSQL_HOST_PORT}"
+
+        free_mysql_port() {
+          local port="$1"
+          docker ps -aq --filter name=bbgo-ci-mysql- | xargs -r docker rm -f || true
+          # Free whoever currently publishes this host port (name may not be bbgo-ci-mysql-*).
+          docker ps -q --filter "publish=${port}" | xargs -r docker rm -f || true
+        }
+
+        start_mysql() {
+          local port="$1"
+          free_mysql_port "${port}"
+          docker rm -f "${CI_MYSQL_NAME}" >/dev/null 2>&1 || true
+          # Do not bind host :3306 — production/Harbor MySQL often owns it (docker exit 125).
+          docker run -d --name "${CI_MYSQL_NAME}" \
+            -e MYSQL_ROOT_PASSWORD=${{ env.MYSQL_PASSWORD }} \
+            -e MYSQL_DATABASE=${{ env.MYSQL_DATABASE }} \
+            -p "127.0.0.1:${port}:3306" \
+            mysql:8.4
+        }
+
+        started=0
+        for try in 1 2 3 4 5; do
+          if start_mysql "${MYSQL_HOST_PORT}"; then
+            started=1
+            break
+          fi
+          echo "docker run ${CI_MYSQL_NAME} failed on :${MYSQL_HOST_PORT} (try ${try})"
+          ss -ltn 2>/dev/null | grep -E ":${MYSQL_HOST_PORT}\\b" || true
           docker ps -a --filter name=bbgo-ci-mysql- || true
+          docker rm -f "${CI_MYSQL_NAME}" >/dev/null 2>&1 || true
+          MYSQL_HOST_PORT=$((13000 + ((GITHUB_RUN_ID + try * 97) % 2000)))
+          echo "MYSQL_HOST_PORT=${MYSQL_HOST_PORT}" >> "$GITHUB_ENV"
+          echo "retrying with MYSQL_HOST_PORT=${MYSQL_HOST_PORT}"
+          sleep 2
+        done
+        if [ "$started" != "1" ]; then
+          echo "MySQL docker run failed after retries"
           exit 1
         fi
         # mysqladmin ping can succeed during entrypoint's temporary server (or even with
