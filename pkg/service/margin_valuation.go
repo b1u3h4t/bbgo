@@ -171,6 +171,10 @@ func (s *MarginInterestValuationService) selectPending(
 func (s *MarginInterestValuationService) queryCloses(
 	ctx context.Context, ex types.Exchange, symbol string, start, until time.Time,
 ) (map[int64]fixedpoint.Value, error) {
+	// SQLite stores time.Time as text with a zone offset. BETWEEN is a string
+	// compare, so a local until like "00:28-05:00" sorts before "01:00+00:00"
+	// even when the instant is later. Always bind UTC.
+	start, until = start.UTC(), until.UTC()
 	query, args, err := sq.Select("start_time", "close").
 		From(targetKlineTable(ex)).
 		Where(sq.Eq{"symbol": symbol, "`interval`": types.Interval1h.String()}).
