@@ -6,6 +6,9 @@ field for field. `pkg/chain/btc/stream` follows the chain block by block on
 top of it (see "Block stream" below). There is no indexer and no
 `ChainSession` integration yet.
 
+The design record, with what is deliberately not supported yet, is
+`doc/design/bitcoin-chain-layer.md`.
+
 Read this before building on it. Bitcoin is not an EVM chain with a different
 RPC: the data model is different, and most EVM habits are wrong here.
 
@@ -141,7 +144,37 @@ w.OnRevert(func(e watch.Event) { ... }) // the same events, undone by a reorg
   they can be spent in the next block (`btc.CoinbaseMaturity`).
 
 The watcher is safe to query from other goroutines; callbacks run on the
-stream's goroutine, after the state is updated.
+stream's goroutine, after the state is updated. `Snapshot()` hands its UTXOs
+and tip to `balance.Compute` (see "Balances").
+
+## Balances
+
+There are no balances on chain: an address's balance is the sum of the
+unspent outputs locked to it, and how much of it is spendable depends on the
+chain tip. `pkg/chain/btc/balance` separates the two concerns.
+
+- **`Snapshot{Height, UTXOs}`** is a set of `btc.UTXO` as of a tip height.
+  `btc.UTXO` is the shared UTXO shape: outpoint, address (or script hex),
+  value, the height it was created at (0 in the mempool) and the coinbase
+  flag.
+- **`Compute(snapshot, minConfirmations)`** sums it per address into
+  `Confirmed` (at least `minConfirmations`), `Pending` (fewer, mempool
+  included) and `Immature` (coinbase outputs younger than 100 blocks,
+  whatever `minConfirmations` is). `Sum` and `Of` total and look up.
+- **Descriptors.** A ranged descriptor (`wpkh(xpub.../0/*)`) scanned by
+  `CoreSource` yields balances keyed by script hex: `scantxoutset` reports
+  no address for its matches. Pass addresses to get per-address rows.
+- **Sources** produce the snapshot:
+
+  | Source | Sees | Caveats |
+  |---|---|---|
+  | `CoreSource` (`scantxoutset`) | confirmed outputs, coinbase flag, exact height | your own node; scans the whole UTXO set (tens of seconds); takes descriptors too |
+  | `EsploraSource` (`pkg/chain/btc/esplora`) | confirmed and mempool outputs, minus those spent in the mempool | the operator learns the addresses; no coinbase flag, so immature coinbase counts as confirmed; public instances cap busy addresses (HTTP 400 "Too many unspent outputs") |
+  | `watch.Watcher.Snapshot()` | what the watcher has seen since it started, plus seeded outputs | follows reorgs |
+
+  `EsploraSource` lists the addresses one by one and reads the tip after
+  them, so the snapshot height is at least the height of every UTXO; it is
+  not atomic across addresses.
 
 ## Providers
 
@@ -163,6 +196,7 @@ bbgo btc utxo <txid>:<vout>                    # gettxout: unspent or not
 bbgo btc scan <address|descriptor>...          # scantxoutset; needs your own node
 bbgo btc stream [--full-tx --min-value 100] [--confirmations N] [--from-height N] [--chain main]
 bbgo btc watch <address>... [--seed | --from-height N] [--confirmations N]   # received / spent, balances
+bbgo btc balance <address|descriptor>... [--esplora https://mempool.space/api] [--min-conf 6] [--utxos]
 ```
 
 `--min-value` compares the sum of a transaction's outputs, change included.
@@ -181,3 +215,42 @@ BTC_RPC_ENDPOINT=https://bitcoin-rpc.publicnode.com go test ./pkg/chain/btc/stre
 ```
 
 streams the last three blocks with full transactions and checks they chain.
+
+## Regtest
+
+`pkg/chain/btc/regtest` runs a throwaway `bitcoind -regtest` with a wallet,
+so the parts that need your own node (`scantxoutset`, `CoreSource`, seeding)
+and the cases a public chain only produces by luck (coinbase maturity,
+reorgs) are tested exactly. `regtest.Start(t)` picks a free RPC port, uses a
+temporary data directory and the cookie file, and stops the node when the
+test ends; it skips the test when no `bitcoind` is found.
+
+```
+BITCOIND=/path/to/bitcoin-32.1/bin/bitcoind go test ./pkg/chain/btc/regtest -v
+```
+
+- `TestCoinbaseMaturity`: `UTXO.Mature` flips at the same height where the
+  node's mempool stops rejecting the coinbase spend.
+- `TestCoreSourceMatchesWallet`: `CoreSource` over the wallet's descriptors
+  totals what `getbalances` reports; prevout-derived fees equal what the
+  wallet paid.
+- `TestWatcherFollowsReorgs`: a watcher seeded from `scantxoutset` follows a
+  spend of the seeded output, a same-height reorg and a two-block reorg, and
+  ends on the same UTXOs as a fresh scan.
+
+Release binaries are at `https://bitcoincore.org/bin/`; check the tarball
+against `SHA256SUMS` and that file's signatures (`SHA256SUMS.asc`, builder
+keys in `bitcoin-core/guix.sigs`). Regtest needs no sync and a few MB of disk.
+
+For the CLI, run a node by hand and mine on demand:
+
+```
+bitcoind -regtest -daemon -datadir=/tmp/rt -rpcport=18443 -fallbackfee=0.0001
+bitcoin-cli -regtest -datadir=/tmp/rt createwallet demo
+bitcoin-cli -regtest -datadir=/tmp/rt generatetoaddress 101 "$(bitcoin-cli -regtest -datadir=/tmp/rt getnewaddress)"
+bbgo btc balance <address> --rpc http://127.0.0.1:18443 --rpc-cookie /tmp/rt/regtest/.cookie
+bbgo btc watch <address> --seed --chain regtest --poll 500ms --rpc ... --rpc-cookie ...
+```
+
+Coinbase outputs of a block mined at height h count as `Immature` until the
+tip reaches h + 99.
